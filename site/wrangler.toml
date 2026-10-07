@@ -1,0 +1,18 @@
+# Cloudflare Workers static assets for https://declass.priezjev.com.
+# Deploy from the repository root: wrangler deploy --config site/wrangler.toml
+# Only site/public is served; the custom domain's DNS record and certificate
+# are created by Cloudflare when the Worker is deployed.
+name = "declass-web"
+main = "worker.js"
+compatibility_date = "2026-10-01"
+workers_dev = false
+
+[assets]
+directory = "./public"
+binding = "ASSETS"
+# The Worker runs first so plain HTTP is redirected before any asset is served.
+run_worker_first = true
+
+[[routes]]
+pattern = "declass.priezjev.com"
+custom_domain = true
