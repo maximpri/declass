@@ -6,7 +6,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta
       name="description"
-      content="Declass pairs frontier coding models with local handling of sensitive data. A GPL-3.0-or-later coding agent for confidential work. Open source on GitHub."
+      content="Declass is a terminal coding agent where the cloud model never sees your sensitive data. The cloud model writes the code; a local model on your machine reads that data and answers its questions. Open source, GPL-3.0-or-later."
     />
     <meta name="theme-color" content="#142d2a" />
     <meta
@@ -15,7 +15,7 @@
     />
     <meta
       property="og:description"
-      content="Frontier models for the code. Local models for sensitive data. Open source on GitHub."
+      content="A terminal coding agent where the cloud model never sees your sensitive data. Open source on GitHub."
     />
     <link rel="canonical" href="https://declass.priezjev.com/" />
     <link rel="icon" href="/icon.svg" type="image/svg+xml" />
@@ -27,19 +27,25 @@
     <div class="page">
       <header>
         <a class="wordmark" href="/" aria-label="Declass home"
-          ><svg viewBox="0 0 32 32" aria-hidden="true">
-            <path d="M3 3h8v26H3zM21 3h8v26h-8z" /></svg
+          ><svg viewBox="0 0 64 64" aria-hidden="true">
+            <rect x="0.5" y="0.5" width="63" height="63" rx="14" fill="#122624" />
+            <rect x="15" y="15" width="9" height="34" rx="2.5" fill="#bbee7c" />
+            <path
+              d="M27.5 19.5H33A12.5 12.5 0 0 1 33 44.5H27.5"
+              fill="none"
+              stroke="#2bc4b0"
+              stroke-width="9"
+            /></svg
           >declass<span class="period">.</span></a
         >
         <div class="status">
-          <span class="status-dot" aria-hidden="true"></span><a href="https://github.com/maximpri/declass"
-            >Open source on GitHub</a
-          >
+          <span class="status-dot" aria-hidden="true"></span
+          ><a href="https://github.com/maximpri/declass">Open source on GitHub</a>
         </div>
       </header>
       <main id="main">
         <section class="hero" aria-labelledby="headline">
-          <p class="eyebrow">A coding agent for confidential work</p>
+          <p class="eyebrow">A terminal coding agent for confidential work</p>
           <h1 id="headline">
             Frontier AI coding.<br /><span
               >Private context<br />
@@ -49,65 +55,255 @@
           <div class="intro">
             <div class="intro-mark" aria-hidden="true">↳</div>
             <p>
-              Declass pairs a frontier model with a local model. One writes the
-              code. The other handles sensitive data. Declass checks what passes
-              between them.
+              Declass is a terminal coding agent where the cloud model never
+              sees your sensitive data. The cloud model writes the code, and a
+              local model on your machine reads that data and answers its
+              questions.
             </p>
           </div>
-          <a class="text-link" href="#how-it-works"
-            >How Declass works <span aria-hidden="true">↓</span></a
-          >
+          <div class="links">
+            <a class="text-link" href="#install"
+              >Install <span aria-hidden="true">↓</span></a
+            >
+            <a class="text-link" href="#how-it-works"
+              >How it works <span aria-hidden="true">↓</span></a
+            >
+          </div>
         </section>
+
+        <section class="approach" aria-labelledby="why-title">
+          <div class="section-label">
+            <span>01 / Why</span>
+            <h2 id="why-title">Your code goes out.<br />Your secrets don't.</h2>
+          </div>
+          <div class="prose">
+            <p>
+              Most coding agents send everything they read to the cloud,
+              including <code>.env</code> files, customer data, and logs. With
+              Declass, when the cloud model needs something from your sensitive
+              data, it has to ask the local model. Declass checks every answer
+              before it leaves, so secrets and raw data stay put.
+            </p>
+            <p>
+              It still does everything you'd expect from a coding agent, from
+              editing files to running tests to working through tasks end to
+              end. It just does it without handing over the parts of your
+              codebase you can't afford to share.
+            </p>
+            <p>
+              Running everything locally would avoid sending anything, but
+              local models are still well behind the best cloud models at
+              writing code. Declass gives you the cloud model's coding and
+              keeps the private context on your machine, with a record of
+              exactly what was sent.
+            </p>
+          </div>
+        </section>
+
+        <figure class="demo">
+          <img
+            src="/demo.gif"
+            width="1200"
+            height="736"
+            alt="A real Declass session: the task is typed, the agent reads the code while the customer file stays local, fixes the bug and passes the tests; the Privacy panel shows the customer file was classified sensitive and a password was replaced with a placeholder before the request went out."
+          />
+          <figcaption>
+            A real session on fictional customer data. The bug is fixed, the
+            tests pass, and none of the 13 planted secrets appear in the 5
+            requests sent to the cloud. Agent work plays at 6× speed.
+            <a
+              href="https://github.com/maximpri/declass/blob/main/docs/evidence/recorder-billing-2026-10-06/README.md"
+              >Recording and evidence</a
+            >
+          </figcaption>
+        </figure>
+
         <section
           id="how-it-works"
           class="approach"
           aria-labelledby="approach-title"
         >
           <div class="section-label">
-            <span>01 / The approach</span>
+            <span>02 / How it works</span>
             <h2 id="approach-title">Two models.<br />One boundary.</h2>
+            <p class="mark-note">
+              The mark is a split D: the upright is your machine and its local
+              model, the bowl is the cloud model, and the gap between them is
+              where Declass checks what crosses.
+            </p>
           </div>
           <div class="principles">
             <article>
               <span class="number">01</span>
               <div>
-                <h3>Frontier models do the coding.</h3>
+                <h3>Ordinary code goes to the cloud model as it is.</h3>
                 <p>
-                  Plan changes, write code and fix failing tests using the code
-                  and context you permit.
+                  Files that match your sensitive patterns (by default
+                  <code>.env*</code>, keys, <code>data/**</code>, CSVs,
+                  databases and logs) are not. The cloud model gets their
+                  structure (column names, value types, synthetic example rows)
+                  and can ask your local model specific questions about them.
                 </p>
               </div>
             </article>
             <article>
               <span class="number">02</span>
               <div>
-                <h3>Sensitive data is handled locally.</h3>
+                <h3>Everything that goes out is checked.</h3>
                 <p>
-                  Files classified as sensitive are processed by your trusted
-                  local model. The frontier works from structure, synthetic
-                  examples and checked answers.
+                  Including the local model's answers, against the private
+                  values Declass has seen. Secrets and personal data are
+                  replaced with placeholders such as
+                  <code>⟨secret:URL_PASSWORD#1⟩</code>. The local model can't
+                  approve its own answers.
                 </p>
               </div>
             </article>
             <article>
               <span class="number">03</span>
               <div>
-                <h3>You can inspect the boundary.</h3>
+                <h3>Commands run in a sandbox.</h3>
                 <p>
-                  Application checks, sandboxed tools and recorded outbound
-                  requests make the privacy controls visible.
+                  Seatbelt on macOS, bubblewrap on Linux, with network access
+                  limited to package registries.
+                </p>
+              </div>
+            </article>
+            <article>
+              <span class="number">04</span>
+              <div>
+                <h3>You can inspect every request.</h3>
+                <p>
+                  The Changes panel shows the diff. The Privacy panel shows each
+                  request and what was filtered from it.
+                  <code>declass audit show &lt;run&gt;</code> prints the full
+                  log, which is hash-chained so you can check it hasn't been
+                  altered.
+                </p>
+              </div>
+            </article>
+            <p class="caveat">
+              This doesn't make leaks impossible. Declass blocks known private
+              values, and the local model also checks its answers for
+              paraphrased details, but that check is a model's judgement, and
+              an answer like “3 customers are overdue” still goes out by design.
+              <a
+                href="https://github.com/maximpri/declass/blob/main/docs/SECURE_BY_DESIGN.md"
+                >What is and isn't covered</a
+              >
+            </p>
+          </div>
+        </section>
+
+        <section class="approach" aria-labelledby="results-title">
+          <div class="section-label">
+            <span>03 / Results</span>
+            <h2 id="results-title">Nearly the same code.<br />None of the secrets.</h2>
+          </div>
+          <div>
+            <div class="stats">
+              <div>
+                <strong>89.3%</strong>
+                <span>of hidden tests passed with Declass</span>
+                <em>96.5% for the same model with no protection</em>
+              </div>
+              <div>
+                <strong>0</strong>
+                <span>planted secrets found in 1,124 Declass requests</span>
+                <em>35,809 found in 1,328 unprotected requests</em>
+              </div>
+            </div>
+            <p class="caveat">
+              Nine coding tasks, each with planted private data (customer
+              records, credentials, logs, proprietary pricing), run three times
+              with Declass and three times without. Most of the gap comes from
+              two Declass runs that scored zero, both counted. The tasks are
+              mine, it's one cloud model, and three runs per task is a small
+              sample.
+              <a
+                href="https://github.com/maximpri/declass/blob/main/docs/evidence/benchmark-54-2026-10-04/README.md"
+                >Method and full evidence</a
+              >
+            </p>
+          </div>
+        </section>
+
+        <section id="install" class="approach" aria-labelledby="install-title">
+          <div class="section-label">
+            <span>04 / Install</span>
+            <h2 id="install-title">One command.<br />Then describe the task.</h2>
+          </div>
+          <div class="prose">
+            <p>macOS and Linux, on ARM64 or x86-64:</p>
+            <pre><code>curl -fsSL https://raw.githubusercontent.com/maximpri/declass/main/install.sh | bash</code></pre>
+            <p>Then, in your project:</p>
+            <pre><code>declass</code></pre>
+            <p>
+              The first time, a setup screen shows the API keys in your
+              environment and the model servers on your machine. You choose the
+              cloud model and the local model, review who receives what, and
+              save. Declass has no default models and sends nothing until you
+              choose.
+            </p>
+            <p>No API key? A ChatGPT Plus or Pro plan works instead:</p>
+            <pre><code>declass login chatgpt</code></pre>
+            <p class="small">
+              No <code>sudo</code> or Rust toolchain needed. Releases are signed
+              with the Declass release key.
+              <a
+                href="https://github.com/maximpri/declass/blob/main/docs/INSTALLATION.md"
+                >Installation guide</a
+              >
+              ·
+              <a
+                href="https://github.com/maximpri/declass/blob/main/docs/USAGE.md"
+                >Usage guide</a
+              >
+            </p>
+          </div>
+        </section>
+
+        <section class="approach" aria-labelledby="models-title">
+          <div class="section-label">
+            <span>05 / Models</span>
+            <h2 id="models-title">Bring your own<br />two models.</h2>
+          </div>
+          <div class="principles">
+            <article>
+              <span class="number">↗</span>
+              <div>
+                <h3>Cloud</h3>
+                <p>
+                  Anthropic, OpenAI, Google Gemini, OpenRouter, z.ai, DeepSeek,
+                  xAI, Mistral, Groq, Cerebras, Together, Fireworks and Qwen, or
+                  any OpenAI-compatible endpoint. Or a ChatGPT Plus or Pro plan,
+                  with no API key.
+                </p>
+              </div>
+            </article>
+            <article>
+              <span class="number">↙</span>
+              <div>
+                <h3>Local</h3>
+                <p>
+                  Ollama, LM Studio, llama.cpp, vLLM, oMLX, MLX, Jan, GPT4All,
+                  KoboldCpp, LocalAI and LiteLLM. It needs a context window of
+                  about 40K tokens. It only reads and answers questions, so it
+                  doesn't need to be good at coding.
                 </p>
               </div>
             </article>
           </div>
         </section>
-        <section class="release" aria-label="Release status">
+
+        <section class="release" aria-label="Release">
           <p>
             Built for teams working with financial records, confidential systems
             and proprietary code.
           </p>
           <span
-            ><a href="https://github.com/maximpri/declass/releases/latest">Download the latest release</a
+            ><a href="https://github.com/maximpri/declass/releases/latest"
+              >Download the latest release</a
             ><br />GPL-3.0-or-later.</span
           >
         </section>
