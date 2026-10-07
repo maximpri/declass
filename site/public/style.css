@@ -207,6 +207,7 @@ pre {
 .demo {
   margin: 0 0 62px;
 }
+.demo video,
 .demo img {
   display: block;
   width: 100%;
