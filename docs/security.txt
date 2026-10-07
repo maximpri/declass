@@ -1,0 +1,8 @@
+# security.txt template (RFC 9116) for Declass. Serve it at
+# https://declass.priezjev.com/.well-known/security.txt when website deployment is configured.
+# Refresh Expires before deployment; this template is not yet served by the website.
+Contact: https://github.com/maximpri/declass/security/advisories/new
+Expires: 2027-10-01T00:00:00.000Z
+Preferred-Languages: en
+Policy: https://github.com/maximpri/declass/security/policy
+Canonical: https://declass.priezjev.com/.well-known/security.txt

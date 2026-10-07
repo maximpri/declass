@@ -1,0 +1,72 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+# Dogfood fixtures and run workspaces are separate crates graded in isolation;
+# fuzz/ is its own workspace (libFuzzer targets, run by tools/fuzz.sh).
+exclude = ["tasks", "results", "fuzz"]
+
+[workspace.package]
+version = "0.2.0"
+authors = ["Maxim Priezjev"]
+edition = "2024"
+rust-version = "1.90"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/maximpri/declass"
+publish = false
+
+[workspace.dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "io-util", "process", "time", "signal", "sync", "net"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+futures-util = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+toml = "0.8"
+thiserror = "2"
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+sha2 = "0.10"
+hex = "0.4"
+uuid = { version = "1", features = ["v4"] }
+time = { version = "0.3", features = ["formatting", "parsing", "macros"] }
+regex = "1"
+rustix = { version = "0.38", features = ["fs", "process"] }
+tree-sitter = "0.25"
+tree-sitter-rust = "0.24"
+tree-sitter-typescript = "0.23"
+tree-sitter-python = "0.25"
+aho-corasick = "1"
+# File listing outside a git repository: honours .gitignore and .ignore files.
+ignore = "0.4"
+# Images: decode, scale and re-encode PNG, JPEG, GIF and WebP (pure Rust, no threads).
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
+base64 = "0.22"
+# Already built for rustls; used directly only to verify OpenID Connect ID-token signatures.
+ring = "0.17"
+# Property tests (dev only).
+proptest = { version = "1", default-features = false, features = ["std"] }
+
+declass-provider = { path = "crates/declass-provider" }
+declass-fs = { path = "crates/declass-fs" }
+declass-sandbox = { path = "crates/declass-sandbox" }
+declass-governor = { path = "crates/declass-governor" }
+declass-lsp = { path = "crates/declass-lsp" }
+declass-git = { path = "crates/declass-git" }
+declass-config = { path = "crates/declass-config" }
+declass-boundary = { path = "crates/declass-boundary" }
+declass-review = { path = "crates/declass-review" }
+declass-agent = { path = "crates/declass-agent" }
+declass-tui = { path = "crates/declass-tui" }
+declass-web = { path = "crates/declass-web" }
+declass-net = { path = "crates/declass-net" }
+declass-egress = { path = "crates/declass-egress" }
+declass-mcp = { path = "crates/declass-mcp" }
+declass-extensions = { path = "crates/declass-extensions" }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+
+[profile.release]
+lto = "thin"

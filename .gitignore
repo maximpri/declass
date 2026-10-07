@@ -1,0 +1,17 @@
+/target
+**/*.rs.bk
+.DS_Store
+.declass/
+.env
+.env.*
+# Keep local experiment directories and external-storage symlinks out of source.
+/results
+# Task fixtures hold canary templates, not secrets; they are part of the sealed packages.
+!tasks/*/assets/.env
+!tasks/*/assets/.env.*
+/dist/
+/.wrangler/
+
+# Local Python tooling caches.
+__pycache__/
+*.py[cod]

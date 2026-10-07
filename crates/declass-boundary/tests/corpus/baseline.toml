@@ -1,0 +1,106 @@
+# Recorded baseline of the detection corpus (tests/corpus.rs). The test fails
+# when a number rises above it; when one falls, lower it here in the same commit.
+
+# Imported rules (rules/gitleaks.toml) that do not compile, and rules compiled
+# without part of their definition (an allowlist entry, an unsupported field).
+[rules]
+failed = 0
+partial = 0
+
+# Hard negatives: lines holding a finding, scanned as that file (its name as the
+# path, so path conditions and path allowlists apply) and as text of unknown
+# origin. Measured 2026-09-27: 34 of 1,534 lines (2.2%); 2026-09-26: 37 of 1,513. Before long tokens
+# were judged by their parts (paths, hashed file names, identifiers) and ISBNs
+# told from card numbers, 148 (9.8%): 57 of the 688 synthetic lines and 91 of
+# the 825 lines of real toolchain output. Before the rule import, 80 of the
+# first 683 lines; the imported rules add none.
+[negatives."Cargo.lock"]
+as_file = 0
+as_text = 0
+
+# Base64 of public text, a data URI, a certificate and an SSH public key: the
+# entropy detector cannot tell them from a base64 secret.
+[negatives."base64.txt"]
+as_file = 18
+as_text = 18
+
+# Real output of vite, webpack and next builds, with a file listing of .next/.
+[negatives."build-output.txt"]
+as_file = 0
+as_text = 0
+
+[negatives."code.txt"]
+as_file = 0
+as_text = 0
+
+[negatives."config.yaml"]
+as_file = 0
+as_text = 0
+
+[negatives."docker-build.txt"]
+as_file = 0
+as_text = 0
+
+# Placeholders in credential assignments (`API_KEY=your-api-key-here`), the
+# documented example access key and test card, a labelled fictional phone number.
+[negatives."fixtures.txt"]
+as_file = 14
+as_text = 14
+
+[negatives."hashes.txt"]
+as_file = 0
+as_text = 0
+
+[negatives."identifiers.txt"]
+as_file = 0
+as_text = 0
+
+# npm, pip and cargo install logs and a cargo compile error.
+[negatives."install-logs.txt"]
+as_file = 0
+as_text = 0
+
+# A 13-digit millisecond timestamp that passes the card checksum was the one
+# finding until card numbers had to start as a network's do (2026-09-27).
+[negatives."logs.txt"]
+as_file = 0
+as_text = 0
+
+# `t.tokenHeader="X-CSRF-Token"`: a credential-named assignment.
+[negatives."minified.js"]
+as_file = 1
+as_text = 1
+
+# `1.2.3.4.5` read as an IPv4 address. Two digit runs that pass the card
+# checksum were findings until card numbers had to start as a network's do
+# (2026-09-27).
+[negatives."numbers.txt"]
+as_file = 1
+as_text = 1
+
+[negatives."package-lock.json"]
+as_file = 0
+as_text = 0
+
+# Node, Python, Rust and Java stack traces, two from a live run.
+[negatives."stack-traces.txt"]
+as_file = 0
+as_text = 0
+
+# vitest, jest and pytest output, passing and failing.
+[negatives."test-output.txt"]
+as_file = 0
+as_text = 0
+
+[negatives."uuids.txt"]
+as_file = 0
+as_text = 0
+
+# Public web pages as web_fetch shows them: links with form-encoded titles and
+# queries, percent escapes glued to words. Measured 2026-09-27: 0 of 21 lines;
+# before `+` was read as a separator and escapes were left out of tokens, 7
+# (a session took Wikipedia's `The+Adventures+of+Captain+Comic` for a key and
+# then refused a MobyGames URL holding the same words).
+[negatives."web-pages.txt"]
+as_file = 0
+as_text = 0
