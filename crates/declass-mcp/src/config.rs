@@ -57,6 +57,10 @@ pub struct ServerConfig {
     pub trust: Trust,
     /// Network access for a stdio server's sandbox.
     pub network: bool,
+    /// Credential stores in the home directory (entries of the sandbox's
+    /// list, such as `.kube`) a stdio server may read after all; every other
+    /// one is denied to it, as to every command.
+    pub read_home_secrets: Vec<String>,
     pub approve: Approve,
     /// Limit for starting the server and for each call.
     pub timeout: Duration,

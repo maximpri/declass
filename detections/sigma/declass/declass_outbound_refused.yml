@@ -1,0 +1,23 @@
+title: Declass refused to send something to a third party
+name: declass_outbound_refused
+id: 41dcb4f3-95cf-41cc-a7fd-271749f72198
+status: experimental
+description: >-
+  Declass refused an outbound request (web, MCP, a command's network) because it carried a
+  placeholder, a withheld value or meaning from sensitive data.
+references:
+  - https://github.com/maximpri/declass/blob/main/detections/sigma/README.md
+author: Declass
+date: 2026-10-19
+tags:
+  - attack.exfiltration
+logsource:
+  product: declass
+  service: audit
+detection:
+  selection:
+    kind: outbound_refused
+  condition: selection
+falsepositives:
+  - A task that legitimately handles sensitive data and asks for help on the web
+level: low

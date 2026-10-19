@@ -32,6 +32,7 @@ fn spec(ws: &Path, network: Network) -> Spec {
         spill_file: None,
         extra_env: vec![],
         deny_read: Vec::new(),
+        readable_home_secrets: Vec::new(),
         read_only: false,
     }
 }

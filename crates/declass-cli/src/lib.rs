@@ -46,6 +46,7 @@ mod extensions;
 mod goals;
 mod history;
 mod images;
+mod integrity;
 mod login;
 mod lsp;
 mod mcp;
@@ -61,6 +62,7 @@ mod setup;
 mod setup_screen;
 mod subagents;
 mod term;
+mod triggers;
 mod web;
 
 pub use doctor::{Check, Status};
@@ -160,6 +162,18 @@ enum Cmd {
     Plugins {
         #[command(subcommand)]
         action: Option<plugins::Action>,
+    },
+    /// Pin skills, plugins and MCP servers in a lock file and verify them (also in CI).
+    Extensions {
+        #[command(subcommand)]
+        action: Option<integrity::cmd::Action>,
+    },
+    /// Files another tool runs later (editor tasks, .envrc, agent settings, hooks)
+    /// that this workspace's runs changed.
+    Triggers {
+        /// Machine-readable output.
+        #[arg(long)]
+        json: bool,
     },
     /// Browse saved sessions and runs, or read one conversation. No model calls.
     History(history::Args),
@@ -304,6 +318,14 @@ enum Cmd {
 enum AuditCmd {
     /// Export verified, metadata-only audit events as JSON.
     Export { run_id: String },
+    /// Security events as JSON lines for a SIEM (Sigma rules: detections/sigma);
+    /// every run when none is named. Names of files and commands are hashed.
+    Events {
+        run_id: Option<String>,
+        /// Show file paths, commands and destinations as written.
+        #[arg(long)]
+        include_paths: bool,
+    },
     /// Check for missing, altered or unanchored audit logs; exit 1 needs attention.
     Check { run_id: Option<String> },
     /// Report raw-data expiry and audit logs due for retention review.
@@ -665,7 +687,7 @@ pub(crate) fn run_anchor(ws: &Path, run_id: &str) -> RunAnchors {
     run_anchors(&declass_config::owner_state_dir(), ws, run_id)
 }
 
-fn checked_run_id(run_id: &str) -> Result<&str> {
+pub(crate) fn checked_run_id(run_id: &str) -> Result<&str> {
     declass_agent::purge::check_run_id(run_id).map_err(anyhow::Error::msg)
 }
 
@@ -888,6 +910,9 @@ async fn execute(
             hooks: emb.hooks(),
         },
     )?;
+    for line in triggers::report(&audit_log_path(&ws, &manifest.run_id)) {
+        eprintln!("{}", term::safe(&line));
+    }
     println!("{}", serde_json::to_string_pretty(&summary)?);
     Ok(terminal.exit_code())
 }
@@ -1096,7 +1121,9 @@ async fn prepare(
             limits,
         )?;
     }
-    let extensions = extensions::discover(ws, cfg)?;
+    // Skills, plugins and MCP servers against their pins (`extensions.integrity`).
+    let gate = integrity::Gate::new(ws, cfg, Some(frontier.audit().clone()))?.map(Arc::new);
+    let extensions = extensions::discover_with(ws, cfg, gate.as_deref())?;
     let plugin_servers = if planning {
         Vec::new()
     } else {
@@ -1171,6 +1198,8 @@ async fn prepare(
                 frontier.audit(),
                 top_clearance,
                 plugin_servers,
+                gate.clone()
+                    .map(|g| g as Arc<dyn declass_agent::mcp::Admission>),
             )
             .await?
         },
@@ -1188,6 +1217,11 @@ async fn prepare(
         images: images::config(cfg, manifest.mode, &manifest.images)?,
         owner_instructions: Some(declass_config::owner_instructions_path()),
     };
+    if let Some(gate) = &gate {
+        for line in gate.finish()? {
+            eprintln!("{}", declass_tui::term::safe(&line));
+        }
+    }
     Ok(Prepared {
         git,
         engine,
@@ -1417,6 +1451,8 @@ async fn dispatch(args: Vec<OsString>, emb: &Embedding) -> Result<i32> {
     if let Some(code) = egress::bridge_helper(&args) {
         return Ok(code);
     }
+    // Declass's own sign-ins: never readable by a command or server.
+    declass_sandbox::deny_to_every_process(declass_config::owner_secret_paths);
     let mut cmd = command(emb.product());
     let matches = cmd.clone().get_matches_from(args);
     let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.format(&mut cmd).exit());
@@ -1476,6 +1512,15 @@ command are for a session (`declass` alone); give a command its own options afte
         Cmd::Plugins { action } => {
             plugins::run(action.unwrap_or(plugins::Action::List))?;
             Ok(0)
+        }
+        Cmd::Triggers { json } => triggers::list(&ws, json),
+        Cmd::Extensions { action } => {
+            integrity::cmd::run(
+                &ws,
+                &load_config(&ws, emb)?,
+                action.unwrap_or(integrity::cmd::Action::Status { json: false }),
+            )
+            .await
         }
         Cmd::History(args) => {
             history::show(&ws, args)?;
@@ -1630,6 +1675,10 @@ Add --no-privacy to confirm, or use --mode hybrid."
         Cmd::Audit { action } => {
             match action {
                 AuditCmd::Export { run_id } => return operations::export(&ws, &run_id),
+                AuditCmd::Events {
+                    run_id,
+                    include_paths,
+                } => return operations::events(&ws, run_id.as_deref(), include_paths),
                 AuditCmd::Check { run_id } => return operations::check(&ws, run_id.as_deref()),
                 AuditCmd::Retention => return operations::retention(&ws, &load_config(&ws, emb)?),
                 AuditCmd::Show { run_id, raw } => {

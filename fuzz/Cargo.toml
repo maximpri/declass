@@ -16,6 +16,7 @@ cargo-fuzz = true
 libfuzzer-sys = "0.4"
 declass-boundary = { path = "../crates/declass-boundary" }
 declass-provider = { path = "../crates/declass-provider" }
+declass-integrity = { path = "../crates/declass-integrity" }
 serde_json = "1"
 
 [workspace]
@@ -55,6 +56,34 @@ bench = false
 [[bin]]
 name = "detect"
 path = "fuzz_targets/detect.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "lockfile"
+path = "fuzz_targets/lockfile.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "jcs"
+path = "fuzz_targets/jcs.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "osv"
+path = "fuzz_targets/osv.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sshsig"
+path = "fuzz_targets/sshsig.rs"
 test = false
 doc = false
 bench = false

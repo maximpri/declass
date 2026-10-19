@@ -1,0 +1,24 @@
+title: Extension left out because it changed since it was pinned or was revoked
+name: declass_extension_left_out
+id: b8acf9e7-a319-4613-940e-e9e8d3cb3a95
+status: experimental
+description: >-
+  A skill, plugin or MCP server differed from its pin (extensions.integrity = enforce), or an advisory revoked it, and was not loaded. A changed extension may be an update or a compromise; a revoked one is known to be malicious.
+references:
+  - https://github.com/maximpri/declass/blob/main/detections/sigma/README.md
+author: Declass
+date: 2026-10-19
+tags:
+  - attack.initial-access
+  - attack.t1195.002
+logsource:
+  product: declass
+  service: audit
+detection:
+  selection:
+    kind: extension_integrity
+    action: left_out
+  condition: selection
+falsepositives:
+  - An extension updated on purpose and not yet re-pinned
+level: high

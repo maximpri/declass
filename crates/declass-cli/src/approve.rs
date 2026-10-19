@@ -162,13 +162,16 @@ fn session_oversight_at(
     let mode = mode(cfg)?;
     let git_commit = git_commit(cfg)?;
     let on_injection = on_injection(cfg)?;
+    let triggers = triggers(cfg)?;
     if mode == ApproveMode::Off {
         // With a terminal the operator can answer what still needs them:
-        // commits under `git.commit = "ask"`, and risky actions after the run
-        // read prompt injection (`oversight.on_injection`).
+        // commits under `git.commit = "ask"`, writes to files other tools
+        // run later, and risky actions after the run read prompt injection
+        // (`oversight.on_injection`).
         return Ok(Oversight {
             git_commit,
             on_injection,
+            triggers,
             approver: tty.then(|| ask(mode)),
             ..Oversight::default()
         });
@@ -190,6 +193,20 @@ terminal, or turn approval off in the owner config: declass config set oversight
         approver: Some(ask(mode)),
         git_commit,
         on_injection,
+        triggers,
+    })
+}
+
+/// `oversight.autorun_triggers` and `oversight.build_triggers`.
+fn triggers(cfg: &Config) -> Result<declass_agent::oversight::Triggers> {
+    let policy = |key: &str| -> Result<declass_agent::oversight::TriggerPolicy> {
+        cfg.str(key)?
+            .parse()
+            .map_err(|e| anyhow::anyhow!("{key}: {e}"))
+    };
+    Ok(declass_agent::oversight::Triggers {
+        autorun: policy("oversight.autorun_triggers")?,
+        build: policy("oversight.build_triggers")?,
     })
 }
 
@@ -211,10 +228,12 @@ pub fn oversight(cfg: &Config) -> Result<Oversight> {
     let mode = mode(cfg)?;
     let git_commit = git_commit(cfg)?;
     let on_injection = on_injection(cfg)?;
+    let triggers = triggers(cfg)?;
     let Some(tty) = open_terminal(mode)? else {
         return Ok(Oversight {
             git_commit,
             on_injection,
+            triggers,
             ..Oversight::default()
         });
     };
@@ -230,6 +249,7 @@ pub fn oversight(cfg: &Config) -> Result<Oversight> {
         })),
         git_commit,
         on_injection,
+        triggers,
     })
 }
 

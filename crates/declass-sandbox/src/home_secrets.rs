@@ -9,9 +9,11 @@
 /// keys, cloud and registry tokens, git and HTTP passwords, coding agents'
 /// logins, database passwords, shell histories and startup files (tokens
 /// typed or exported there), browser profiles (cookies, saved logins). The
-/// agent denies them to every command ([`home_secrets`]): a command's output
-/// may reach the frontier, and with the egress proxy a command could send
-/// what it reads to a package registry, so it must not be able to read them.
+/// sandbox denies them to every process ([`crate::effective_deny_read`]): a
+/// command's output may reach the frontier, with the egress proxy a command
+/// could send what it reads to a package registry, and a server with network
+/// could send it anywhere, so none may read them unless the owner exempts
+/// one server ([`crate::Spec::readable_home_secrets`]).
 /// A list of well-known places, not a guarantee: the rest of the home
 /// directory stays readable.
 pub const HOME_SECRETS: &[&str] = &[

@@ -1,0 +1,24 @@
+title: Coding agent wrote an autorun file after reading prompt injection
+id: 8693eaeb-74c1-427e-90c0-660fcb3f59b3
+status: experimental
+description: >-
+  In one run, Declass's local model flagged prompt injection in what the agent read, and the run
+  also wrote a file another tool runs without asking, within two hours. The injection may have
+  steered the agent into planting it. (Unordered, so more backends can convert it; most matches
+  have the injection first.)
+references:
+  - https://github.com/maximpri/declass/blob/main/detections/sigma/README.md
+author: Declass
+date: 2026-10-19
+correlation:
+  type: temporal
+  rules:
+    - declass_injection_suspected
+    - declass_autorun_trigger_written
+  generate: true
+  group-by:
+    - run
+  timespan: 2h
+falsepositives:
+  - Runs whose task was to edit editor or agent configuration, with injection-like test fixtures in view
+level: critical

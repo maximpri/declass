@@ -1,0 +1,15 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Maps Sigma's `product: declass` log source to the events `declass audit events` writes:
+# each carries `product: declass` and `service: audit`.
+name: Declass audit events
+priority: 20
+transformations:
+  - id: declass_audit_events
+    type: add_condition
+    conditions:
+      product: declass
+      service: audit
+    rule_conditions:
+      - type: logsource
+        product: declass
+        service: audit

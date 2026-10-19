@@ -76,6 +76,9 @@ pub struct Tool {
     /// The server declares the tool does not change its environment
     /// (`annotations.readOnlyHint`). A hint from the server, not a guarantee.
     pub read_only: bool,
+    /// The tool exactly as the server listed it (every field, also those
+    /// this client does not use), for fingerprints of its definition.
+    pub raw: Value,
 }
 
 /// A `tools/call` result, rendered as text.
@@ -132,6 +135,14 @@ impl Transport {
         }
     }
 
+    /// Whether the server announced a change of its tools since last asked.
+    fn take_tools_changed(&mut self) -> bool {
+        match self {
+            Transport::Stdio(t) => std::mem::take(&mut t.tools_changed),
+            Transport::Http(t) => std::mem::take(&mut t.tools_changed),
+        }
+    }
+
     fn forget_session(&mut self) {
         if let Transport::Http(t) = self {
             t.session = None;
@@ -161,6 +172,12 @@ pub(crate) fn reply_to(message: &Value) -> Option<Value> {
     })
 }
 
+/// Whether `message` is the server's notice that its tools changed.
+pub(crate) fn announces_tools_changed(message: &Value) -> bool {
+    message.get("id").is_none()
+        && message.get("method").and_then(Value::as_str) == Some("notifications/tools/list_changed")
+}
+
 /// Whether `message` is the response to request `id`.
 pub(crate) fn answers(message: &Value, id: u64) -> bool {
     message.get("method").is_none()
@@ -177,6 +194,18 @@ pub struct Client {
     /// `serverInfo.name` and `version`, as the server states them.
     pub server_name: String,
     pub server_version: String,
+    /// The HTTP session expired and was established again since last asked.
+    reinitialized: bool,
+}
+
+/// What happened since [`Client::take_signals`] was last called that may
+/// have changed the server's tools.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Signals {
+    /// It sent `notifications/tools/list_changed`.
+    pub tools_changed: bool,
+    /// Its HTTP session expired and was established again.
+    pub reinitialized: bool,
 }
 
 fn secs(d: Duration) -> u64 {
@@ -194,6 +223,7 @@ impl Client {
             protocol_version: String::new(),
             server_name: String::new(),
             server_version: String::new(),
+            reinitialized: false,
         };
         client.initialize(timeout).await?;
         Ok(client)
@@ -248,6 +278,7 @@ impl Client {
             Err(McpError::SessionExpired) => {
                 self.transport.forget_session();
                 self.initialize(timeout).await?;
+                self.reinitialized = true;
                 self.exchange(method, params, timeout).await
             }
             other => other,
@@ -288,6 +319,14 @@ impl Client {
             });
         }
         Ok(answer.get("result").cloned().unwrap_or(Value::Null))
+    }
+
+    /// What may have changed the server's tools since this was last asked.
+    pub fn take_signals(&mut self) -> Signals {
+        Signals {
+            tools_changed: self.transport.take_tools_changed(),
+            reinitialized: std::mem::take(&mut self.reinitialized),
+        }
     }
 
     /// Every tool the server offers (all pages, at most [`MAX_TOOLS`]).
@@ -365,5 +404,6 @@ fn parse_tool(v: &Value) -> Option<Tool> {
             .and_then(|a| a.get("readOnlyHint"))
             .and_then(Value::as_bool)
             == Some(true),
+        raw: v.clone(),
     })
 }

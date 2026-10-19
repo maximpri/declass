@@ -437,6 +437,97 @@ pub(crate) fn export(ws: &Path, run_id: &str) -> Result<i32> {
     Ok(code)
 }
 
+/// Event fields that name a file, a command or a task: pseudonymised in
+/// `declass audit events` unless `--include-paths`.
+const NAMES: &[&str] = &[
+    "path",
+    "paths",
+    "command",
+    "derived_files",
+    "origin",
+    "destination",
+];
+
+/// `sha256:` and the hex digest of `s`: the same name always gives the same
+/// value, so events can still be correlated.
+fn pseudonym(s: &str) -> String {
+    format!("sha256:{}", hex::encode(Sha256::digest(s.as_bytes())))
+}
+
+/// `declass audit events`: the security events of one run (or every run in
+/// the workspace), one flat JSON object per line, for a SIEM and the Sigma
+/// rules in `detections/sigma` (`product: declass, service: audit`). Never
+/// a request body; the names of files, commands and destinations are
+/// pseudonymised unless `include_paths`.
+pub(crate) fn events(ws: &Path, run_id: Option<&str>, include_paths: bool) -> Result<i32> {
+    let dir = ws.join(".declass/audit");
+    let ids: Vec<String> = match run_id {
+        Some(id) => vec![crate::checked_run_id(id)?.to_owned()],
+        None => {
+            let mut ids: Vec<String> = fs::read_dir(&dir)
+                .map(|entries| {
+                    entries
+                        .flatten()
+                        .filter_map(|e| {
+                            let name = e.file_name().to_string_lossy().into_owned();
+                            name.strip_suffix(".jsonl").map(str::to_owned)
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            ids.sort();
+            ids
+        }
+    };
+    let mut out = String::new();
+    for id in &ids {
+        let lines = audit::read(&dir.join(format!("{id}.jsonl")))
+            .map_err(|e| anyhow::anyhow!("audit log of {id}: {e}"))?;
+        for line in lines {
+            let Line::Event(r) = line else { continue };
+            let Value::Object(mut fields) = serde_json::to_value(&r.event)? else {
+                continue;
+            };
+            if !include_paths {
+                for key in NAMES {
+                    if let Some(v) = fields.get_mut(*key) {
+                        match v {
+                            Value::String(s) => *s = pseudonym(s),
+                            Value::Array(items) => {
+                                for item in items.iter_mut() {
+                                    if let Value::String(s) = item {
+                                        *s = pseudonym(s);
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            let time = i64::try_from(r.unix_ms / 1000)
+                .ok()
+                .and_then(|s| time::OffsetDateTime::from_unix_timestamp(s).ok())
+                .and_then(|t| {
+                    t.format(&time::format_description::well_known::Rfc3339)
+                        .ok()
+                })
+                .unwrap_or_default();
+            let mut record = serde_json::Map::new();
+            record.insert("product".into(), json!("declass"));
+            record.insert("service".into(), json!("audit"));
+            record.insert("run".into(), json!(id));
+            record.insert("seq".into(), json!(r.seq));
+            record.insert("time".into(), json!(time));
+            record.extend(fields);
+            out.push_str(&serde_json::to_string(&Value::Object(record))?);
+            out.push('\n');
+        }
+    }
+    print!("{out}");
+    Ok(0)
+}
+
 pub(crate) fn check(ws: &Path, run_id: Option<&str>) -> Result<i32> {
     let state = declass_config::owner_state_dir();
     let inventory = match run_id {

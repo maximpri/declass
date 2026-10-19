@@ -1,0 +1,26 @@
+title: Command run by a coding agent wrote a file another tool runs without asking
+name: declass_autorun_trigger_by_command
+id: e610370c-cc1e-470d-85f9-f67ed757fa16
+status: experimental
+description: >-
+  A command the agent ran (not its file tools, which can ask the operator first) created or changed a file that another tool runs or loads without a further step. Writing it through a command avoids the per-write approval.
+references:
+  - https://github.com/maximpri/declass/blob/main/detections/sigma/README.md
+author: Declass
+date: 2026-10-19
+tags:
+  - attack.persistence
+  - attack.t1546
+  - attack.defense-evasion
+logsource:
+  product: declass
+  service: audit
+detection:
+  selection:
+    kind: trigger_written
+    tier: autorun
+    by: command
+  condition: selection
+falsepositives:
+  - Scaffolding commands that generate editor or agent configuration on purpose
+level: high

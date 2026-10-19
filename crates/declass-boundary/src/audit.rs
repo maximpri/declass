@@ -169,18 +169,86 @@ pub enum AuditEvent {
         weakens: Option<String>,
         confirmed: bool,
     },
+    /// A skill or plugin checked against its pin at the start of a run or
+    /// session (`extensions.integrity`): `outcome` is `changed`,
+    /// `unreadable`, `unpinned` or `pinned_first_use`, `action` `loaded` or
+    /// `left_out`. Digests only, never content.
+    ExtensionIntegrity {
+        /// `skill` or `plugin`.
+        extension: String,
+        id: String,
+        outcome: String,
+        expected: Option<String>,
+        observed: Option<String>,
+        action: String,
+    },
+    /// The extension checks of one run or session.
+    IntegritySummary {
+        /// `warn` or `enforce`.
+        mode: String,
+        verified: u64,
+        first_use: u64,
+        warned: u64,
+        left_out: u64,
+    },
+    /// An extension pin was written to the owner's lock (owner change log):
+    /// `by` is `lock`, `lock_update`, `install` or `first_use`; `forget`
+    /// (no digest) when a pin was removed.
+    ExtensionPinned {
+        /// `skill` or `plugin`.
+        extension: String,
+        id: String,
+        digest: String,
+        by: String,
+    },
+    /// A file the agent wrote (`edit_file`, `write_file`, `rename`,
+    /// `edit_protected`): its path and digests before and after, never its
+    /// content. `trigger` names the kind of file another tool runs later
+    /// (`autorun`, `on_use`), if it is one.
+    FileWrite {
+        tool: String,
+        path: String,
+        before_sha256: Option<String>,
+        after_sha256: String,
+        trigger: Option<String>,
+    },
+    /// A command the agent ran: its digest and the program it names first
+    /// (never its text, which a steered frontier could fill with a value it
+    /// should not know), what it could read (`access`), its network, exit
+    /// code, duration, and the files other tools run later that it created
+    /// or changed.
+    CommandRun {
+        command_sha256: String,
+        program: String,
+        access: String,
+        network: String,
+        exit_code: Option<i32>,
+        duration_ms: u64,
+        triggers_written: Vec<String>,
+    },
+    /// A file another tool runs later was created or changed in the run
+    /// (`declass_fs::triggers`): by a tool (`by` = `tool`) or a command
+    /// (`command`), when it runs (`tier`) and what runs it.
+    TriggerWritten {
+        path: String,
+        by: String,
+        tier: String,
+        runner: String,
+        sha256: Option<String>,
+    },
     /// An MCP server was started (or failed to start) for the run.
     McpServer {
         server: String,
         /// `stdio` or `http`.
         transport: String,
-        /// `started` or `failed`.
+        /// `started`, `failed`, or `refused` (by its pin: `declass extensions`).
         outcome: String,
         tools: usize,
     },
     /// A call to an MCP tool: server, tool, the server's trust class and the
     /// outcome (`ok`, `tool_error`, `error`, `timeout`, `server_stopped`,
-    /// `refused_outbound`, `interrupted`); never arguments or results.
+    /// `refused_outbound`, `interrupted`, `withheld`); never arguments or
+    /// results.
     McpCall {
         server: String,
         tool: String,
@@ -188,6 +256,17 @@ pub enum AuditEvent {
         outcome: String,
         /// Placeholders in the arguments were resolved (sensitive stdio servers only).
         resolved_placeholders: bool,
+    },
+    /// An MCP server listed its tools again during the run and they differ
+    /// from those offered at its start (`trigger`: `list_changed`,
+    /// `reinitialized` or `periodic`); `action` is `withheld` (its tools are
+    /// not used for the rest of the run) or `noted`. Digests only.
+    ToolsetChanged {
+        server: String,
+        offered: String,
+        observed: String,
+        trigger: String,
+        action: String,
     },
     /// An image entered the run (`read_file` on an image, an operator
     /// attachment): where it came from, its size, where it went and the rule
@@ -409,12 +488,19 @@ impl AuditEvent {
             AuditEvent::ProtectedEdit { .. } => "protected_edit",
             AuditEvent::Approval { .. } => "approval",
             AuditEvent::ConfigChange { .. } => "config_change",
+            AuditEvent::ExtensionIntegrity { .. } => "extension_integrity",
+            AuditEvent::IntegritySummary { .. } => "integrity_summary",
+            AuditEvent::ExtensionPinned { .. } => "extension_pinned",
             AuditEvent::OperatorMessage { .. } => "operator_message",
             AuditEvent::WebRequest { .. } => "web_request",
             AuditEvent::OutboundRefused { .. } => "outbound_refused",
             AuditEvent::GitCommit { .. } => "git_commit",
             AuditEvent::McpServer { .. } => "mcp_server",
             AuditEvent::McpCall { .. } => "mcp_call",
+            AuditEvent::FileWrite { .. } => "file_write",
+            AuditEvent::CommandRun { .. } => "command_run",
+            AuditEvent::TriggerWritten { .. } => "trigger_written",
+            AuditEvent::ToolsetChanged { .. } => "toolset_changed",
             AuditEvent::LanguageServer { .. } => "language_server",
             AuditEvent::SubagentStart { .. } => "subagent_start",
             AuditEvent::SubagentEnd { .. } => "subagent_end",

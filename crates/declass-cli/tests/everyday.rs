@@ -463,6 +463,7 @@ async fn an_interactive_session_asks_before_each_commit_with_approval_off() {
             approver: Some(asked.clone()),
             git_commit: CommitPolicy::Ask,
             on_injection: Default::default(),
+            triggers: Default::default(),
         },
         git_author: declass_git::Identity::parse("Olive Operator <olive@example.test>"),
         ..f.cfg("Add b and commit it.")

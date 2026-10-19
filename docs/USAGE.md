@@ -25,6 +25,12 @@ declass skills show code-review    # read a skill locally, without calling a mod
 declass plugins inspect examples/plugins/quality-kit  # inspect a native package; runs no code
 declass plugins install examples/plugins/quality-kit  # enable a private snapshot for the next session
 declass plugins list               # installed packages, capabilities and content digests
+declass extensions lock --project  # pin this repository's skills (commit .declass/extensions.lock)
+declass extensions verify          # compare skills, plugins and MCP servers with their pins (CI: --project-only --strict)
+declass extensions diff mcp:files  # how a server's tool definitions changed since they were pinned
+declass extensions advisories update   # fetch advisory feeds about extensions (--online: also osv.dev)
+declass triggers                   # files another tool runs later (editor tasks, .envrc, agent settings, hooks) that runs changed
+declass audit events               # security events as JSON lines for a SIEM (Sigma rules in detections/sigma)
 declass run "fix the failing billing export"      # one-shot: work to a terminal state, no conversation
 declass run --check 'cargo test --offline' "fix the export"  # require a passing check at finish
 declass --check 'npm test' "build the page"  # the same contract for a session
@@ -253,6 +259,9 @@ owner and project skill locations. It sends short metadata first and loads full 
 and referenced text only when needed. Install a native package with `declass plugins install PATH`;
 inspect it first with `declass plugins inspect PATH`. Installation takes a private content snapshot
 and executes no scripts. Enabled packages can contribute MCP servers at the next session start.
+`declass extensions lock` pins skills and plugins by the content of every file, and `declass
+extensions verify` reports any that changed, in text, JSON or SARIF; a repository can commit
+its pins and check them in CI. [Pin and verify extensions](EXTENSIONS.md#pin-and-verify-extensions).
 
 | In the workspace | What it does |
 |---|---|
@@ -265,6 +274,9 @@ Plugin skill names are qualified, for example `quality-kit:code-review`. Use `de
 quality-kit:code-review` to inspect one locally. Restart the session after installing or updating
 extensions to refresh its catalog and tool servers. Repository settings can disable discovery
 with `extensions.skills_enabled = false` or packages with `extensions.plugins_enabled = false`.
+Each run checks skills and plugins against their pins first: `extensions.integrity = "warn"` (the
+default) says what changed, `"enforce"` leaves a changed one out, and a repository may only raise
+it; `extensions.integrity_first_use` (on by default) pins your own the first time they load.
 Skill instructions grant no tools or permissions. [Example, lifecycle, privacy and compatibility](EXTENSIONS.md).
 
 **Without git.** Declass works in any folder. Outside a git repository, files are listed and searched
@@ -775,7 +787,15 @@ own Model Context Protocol client (stdio and streamable HTTP) starts each enable
 start and offers its tools as `mcp__<server>__<tool>`. A stdio server runs in the command sandbox
 (same hidden paths as commands, the workspace as working directory, no network unless `network =
 true`, only the environment variables named in `env`); an HTTP server is reached from the host
-(`https`, or `http` to loopback; credentials by variable name in `headers_env`).
+(`https`, or `http` to loopback; credentials by variable name in `headers_env`). Like every
+sandboxed process, a stdio server cannot read the credential stores in your home directory
+(`~/.ssh`, `~/.aws`, `~/.kube`, `~/.config/gh`, `~/.npmrc` and the rest of the list in
+[SECURITY.md](../SECURITY.md)) or Declass's sign-ins. A server that needs one names it in
+`read_home_secrets`, e.g. `read_home_secrets = [".kube"]`; `declass doctor` lists every such
+exception. Each server is pinned the first time a run starts it (its program, the package a
+launcher runs, and every tool definition); a change is reported, or the server is withheld under
+`extensions.integrity = "enforce"`, also when it rewrites its tools during a run.
+[Pin and verify extensions](EXTENSIONS.md#mcp-servers).
 
 ```toml
 [mcp.servers.everything]                  # a stdio server

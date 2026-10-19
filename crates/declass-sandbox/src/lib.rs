@@ -2,8 +2,10 @@
 //! Command sandbox (Seatbelt on macOS, bubblewrap on Linux), environment
 //! allowlist and process-tree control.
 //!
-//! Commands may read the filesystem (except paths the caller denies, and
-//! `.declass` at any depth: Declass's own run state), write only inside the workspace
+//! Commands may read the filesystem (except paths the caller denies, the
+//! credential stores in the home directory ([`HOME_SECRETS`]), paths
+//! registered with [`deny_to_every_process`], and `.declass` at any depth:
+//! Declass's own run state), write only inside the workspace
 //! and the run's scratch directory, never write `.git` or `.declass` at any depth,
 //! and reach the network only as [`Network`] says: not at all, only through the
 //! host's egress proxy, or freely. Resolution fails closed: without a sandbox
@@ -127,22 +129,69 @@ pub const ENV_ALLOWLIST: &[&str] = &[
 
 pub use home_secrets::HOME_SECRETS;
 
-/// The [`HOME_SECRETS`] that exist under `$HOME`, except any holding
+/// The [`HOME_SECRETS`] that exist under `home`, except any holding
 /// `workspace` (denying it would deny the work itself).
-pub fn home_secrets(workspace: &Path) -> Vec<PathBuf> {
-    match std::env::var_os("HOME").filter(|h| !h.is_empty()) {
-        Some(home) => home_secrets_in(Path::new(&home), workspace),
-        None => Vec::new(),
-    }
-}
-
-/// [`home_secrets`] for the home directory `home`.
 pub fn home_secrets_in(home: &Path, workspace: &Path) -> Vec<PathBuf> {
     HOME_SECRETS
         .iter()
         .map(|p| home.join(p))
         .filter(|p| p.symlink_metadata().is_ok() && !workspace.starts_with(p))
         .collect()
+}
+
+/// Lists paths to deny (see [`deny_to_every_process`]).
+type DenyList = fn() -> Vec<PathBuf>;
+
+static DENIED_TO_EVERY_PROCESS: std::sync::RwLock<Option<DenyList>> = std::sync::RwLock::new(None);
+
+/// Sets what no sandboxed process of this program may read, whatever its
+/// [`Spec`] says: the program's own sign-ins. `paths` is asked again for
+/// every process, so a directory created later is denied too. The program
+/// sets it once, before the first command.
+pub fn deny_to_every_process(paths: DenyList) {
+    if let Ok(mut denied) = DENIED_TO_EVERY_PROCESS.write() {
+        *denied = Some(paths);
+    }
+}
+
+/// Everything `spec`'s process may not read: its own `deny_read`, the
+/// [`HOME_SECRETS`] under `$HOME` it is not allowed to read
+/// (`readable_home_secrets`), and what was registered with
+/// [`deny_to_every_process`]. Every sandboxed process gets this list, so no
+/// caller can leave the credential stores readable by forgetting them.
+pub fn effective_deny_read(spec: &Spec) -> Vec<PathBuf> {
+    let home = std::env::var_os("HOME").filter(|h| !h.is_empty());
+    effective_deny_read_in(spec, home.as_deref().map(Path::new))
+}
+
+/// [`effective_deny_read`] for the home directory `home`.
+fn effective_deny_read_in(spec: &Spec, home: Option<&Path>) -> Vec<PathBuf> {
+    let home_secrets: Vec<PathBuf> = home
+        .map(|home| {
+            let readable: Vec<PathBuf> = spec
+                .readable_home_secrets
+                .iter()
+                .map(|r| home.join(r))
+                .collect();
+            home_secrets_in(home, &spec.workspace)
+                .into_iter()
+                .filter(|p| !readable.contains(p))
+                .collect()
+        })
+        .unwrap_or_default();
+    let registered = DENIED_TO_EVERY_PROCESS
+        .read()
+        .ok()
+        .and_then(|d| *d)
+        .map(|paths| paths())
+        .unwrap_or_default();
+    let mut deny = spec.deny_read.clone();
+    for p in home_secrets.into_iter().chain(registered) {
+        if !deny.contains(&p) {
+            deny.push(p);
+        }
+    }
+    deny
 }
 
 /// macOS services toolchains need. Everything else (keychain, pasteboard,
@@ -264,7 +313,13 @@ pub struct Spec {
     pub extra_env: Vec<(String, String)>,
     /// Absolute paths the command may not read (directories: everything under them).
     /// Used to keep sensitive files out of commands whose output the frontier sees.
+    /// The credential stores and registered paths are added to every process
+    /// ([`effective_deny_read`]).
     pub deny_read: Vec<PathBuf>,
+    /// [`HOME_SECRETS`] entries (as listed, relative to the home directory)
+    /// this process may read after all: the owner's exceptions for one
+    /// server. Empty for every command.
+    pub readable_home_secrets: Vec<String>,
     /// The workspace is read-only as well: the command may write only its
     /// scratch directory (the commands of read-only sub-agents).
     pub read_only: bool,
@@ -944,6 +999,7 @@ fn prepare(
             .scratch
             .canonicalize()
             .map_err(|e| SandboxError::Spawn(e.to_string()))?,
+        deny_read: effective_deny_read(spec),
         ..spec.clone()
     };
     let spec = &resolved;
@@ -1552,6 +1608,7 @@ mod tests {
             spill_file: Some(ws.parent().unwrap().join("spill.txt")),
             extra_env: vec![],
             deny_read: Vec::new(),
+            readable_home_secrets: Vec::new(),
             read_only: false,
         }
     }
@@ -1852,6 +1909,57 @@ mod tests {
         );
     }
 
+    static REGISTERED: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+    fn registered() -> Vec<PathBuf> {
+        REGISTERED.get().cloned().into_iter().collect()
+    }
+
+    #[test]
+    fn every_process_is_denied_the_credential_stores_unless_exempted() {
+        let (_d, ws) = setup();
+        let home = ws.parent().unwrap().join("home");
+        for p in [".ssh/id_ed25519", ".kube/config", ".npmrc"] {
+            std::fs::create_dir_all(home.join(p).parent().unwrap()).unwrap();
+            std::fs::write(home.join(p), "x").unwrap();
+        }
+        let mut s = spec(&ws);
+        s.deny_read = vec![ws.join("data")];
+        // Without a caller listing them, every store that exists is denied.
+        let deny = effective_deny_read_in(&s, Some(&home));
+        for p in [
+            ws.join("data"),
+            home.join(".ssh"),
+            home.join(".kube"),
+            home.join(".npmrc"),
+        ] {
+            assert!(deny.contains(&p), "{} not denied: {deny:?}", p.display());
+        }
+        // An owner's exception for one server lifts only that entry.
+        s.readable_home_secrets = vec![".kube".into()];
+        let deny = effective_deny_read_in(&s, Some(&home));
+        assert!(!deny.contains(&home.join(".kube")), "{deny:?}");
+        assert!(deny.contains(&home.join(".ssh")), "{deny:?}");
+        // A path the program registers is denied to every process, also when
+        // it was created after registration; nothing is listed twice.
+        let sign_ins = ws.parent().unwrap().join("credentials");
+        REGISTERED.set(sign_ins.clone()).unwrap();
+        deny_to_every_process(registered);
+        s.deny_read.push(home.join(".ssh"));
+        let deny = effective_deny_read_in(&s, Some(&home));
+        assert!(deny.contains(&sign_ins), "{deny:?}");
+        assert_eq!(
+            deny.iter().filter(|p| **p == home.join(".ssh")).count(),
+            1,
+            "{deny:?}"
+        );
+        // Without a home directory only the caller's and registered paths remain.
+        assert_eq!(
+            effective_deny_read_in(&s, None),
+            [ws.join("data"), home.join(".ssh"), sign_ins]
+        );
+    }
+
     #[tokio::test]
     async fn writes_inside_workspace_and_scratch_only() {
         let (_d, ws) = setup();
@@ -2148,6 +2256,7 @@ mod fail_closed_tests {
             spill_file: None,
             extra_env: vec![],
             deny_read: Vec::new(),
+            readable_home_secrets: Vec::new(),
             read_only: false,
         }
     }
@@ -2242,6 +2351,7 @@ mod bwrap_args_tests {
             spill_file: None,
             extra_env: vec![],
             deny_read: Vec::new(),
+            readable_home_secrets: Vec::new(),
             read_only: false,
         };
         for dir in ["ws/.git", "ws/vendor/dep/.git", "ws/.declass", "ws/data"] {
@@ -2305,6 +2415,7 @@ mod network_rule_tests {
             spill_file: None,
             extra_env: vec![],
             deny_read: Vec::new(),
+            readable_home_secrets: Vec::new(),
             read_only: false,
         }
     }
@@ -2412,6 +2523,7 @@ mod toolchain_tests {
             spill_file: None,
             extra_env: vec![],
             deny_read: Vec::new(),
+            readable_home_secrets: Vec::new(),
             read_only: false,
         }
     }
@@ -2495,6 +2607,7 @@ mod linker_tests {
             spill_file: None,
             extra_env: vec![],
             deny_read: Vec::new(),
+            readable_home_secrets: Vec::new(),
             read_only: false,
         };
         let o = run(

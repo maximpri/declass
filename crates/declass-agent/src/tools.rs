@@ -567,9 +567,11 @@ fn edit_file(ctx: &mut Ctx<'_>, args: &Map<String, Value>) -> Result<String, Str
     // Placeholders in the new text are resolved locally (and checked against secret sinks).
     let updated = presenter.resolve_for_write(&rel, &updated)?;
     let pre = Precondition::Sha256(declass_fs::sha256_hex(&bytes));
-    ctx.journal
+    let receipt = ctx
+        .journal
         .write(ctx.workspace, &rel, updated.as_bytes(), &pre)
         .map_err(fs_err)?;
+    record_write(ctx, "edit_file", &rel, &receipt);
     Ok(format!(
         "edited {} ({} edit{})",
         rel.display(),
@@ -587,15 +589,45 @@ fn write_file(ctx: &mut Ctx<'_>, args: &Map<String, Value>) -> Result<String, St
         .is_some();
     ctx.presenter.note_authored(content);
     let content = ctx.presenter.resolve_for_write(&rel, content)?;
-    ctx.journal
+    let receipt = ctx
+        .journal
         .write(ctx.workspace, &rel, content.as_bytes(), &Precondition::Any)
         .map_err(fs_err)?;
+    record_write(ctx, "write_file", &rel, &receipt);
     Ok(format!(
         "{} {} ({} bytes)",
         if existed { "replaced" } else { "created" },
         rel.display(),
         content.len()
     ))
+}
+
+/// Records a write the agent made (`FileWrite`), and, for a file another
+/// tool runs later, `TriggerWritten`. Paths and digests only.
+pub(crate) fn record_write(
+    ctx: &Ctx<'_>,
+    tool: &str,
+    rel: &Path,
+    receipt: &declass_fs::WriteReceipt,
+) {
+    let trigger = declass_fs::triggers::classify(rel);
+    let path = rel.display().to_string();
+    ctx.record(AuditEvent::FileWrite {
+        tool: tool.into(),
+        path: path.clone(),
+        before_sha256: receipt.before.clone(),
+        after_sha256: receipt.after.clone(),
+        trigger: trigger.map(|t| t.tier.as_str().into()),
+    });
+    if let Some(t) = trigger {
+        ctx.record(AuditEvent::TriggerWritten {
+            path,
+            by: "tool".into(),
+            tier: t.tier.as_str().into(),
+            runner: t.runner.into(),
+            sha256: Some(receipt.after.clone()),
+        });
+    }
 }
 
 /// What a sandboxed command may read of the paths the presenter protects.
@@ -655,6 +687,31 @@ pub(crate) fn hidden_from_processes(
     hidden
 }
 
+/// What a command with `access` may not read, on top of what the sandbox
+/// denies every process (run state, the credential stores in the home
+/// directory, Declass's own sign-ins: `effective_deny_read`), and whether
+/// it may read protected source.
+pub(crate) fn command_deny_read(
+    presenter: &dyn Presenter,
+    workspace: &Path,
+    run_dir: &Path,
+    access: Access,
+) -> (Vec<PathBuf>, bool) {
+    match access {
+        Access::Ordinary | Access::ReadOnly => {
+            (hidden_from_processes(presenter, workspace, run_dir), false)
+        }
+        Access::Checks => {
+            let mut hidden = presenter.hidden_from_checks(workspace);
+            let reads_protected = hidden.len() < presenter.hidden_from_commands(workspace).len();
+            hidden.push(sensitive_scratch(run_dir));
+            (hidden, reads_protected)
+        }
+        // Everything but run state, which the sandbox denies to every command.
+        Access::SensitiveData => (Vec::new(), false),
+    }
+}
+
 /// Runs `command` in the sandbox with the given `access`.
 pub(crate) async fn sandboxed(
     ctx: &Ctx<'_>,
@@ -669,25 +726,8 @@ pub(crate) async fn sandboxed(
         Access::ReadOnly => "read_only",
     };
     // Checks may read protected source; then they get no network.
-    let mut reads_protected = false;
-    let mut deny_read = match access {
-        Access::Ordinary | Access::ReadOnly => {
-            hidden_from_processes(ctx.presenter, ctx.workspace, ctx.run_dir)
-        }
-        Access::Checks => {
-            let mut hidden = ctx.presenter.hidden_from_checks(ctx.workspace);
-            reads_protected =
-                hidden.len() < ctx.presenter.hidden_from_commands(ctx.workspace).len();
-            hidden.push(sensitive_scratch(ctx.run_dir));
-            hidden
-        }
-        // Everything but run state, which the sandbox denies to every command.
-        Access::SensitiveData => Vec::new(),
-    };
-    // Credential stores in the operator's home, and Declass's own sign-ins:
-    // never readable by a command.
-    deny_read.extend(declass_sandbox::home_secrets(ctx.workspace));
-    deny_read.extend(declass_config::owner_secret_paths());
+    let (deny_read, reads_protected) =
+        command_deny_read(ctx.presenter, ctx.workspace, ctx.run_dir, access);
     let scratch = match access {
         Access::SensitiveData => sensitive_scratch(ctx.run_dir),
         _ => scratch_root().join(run_name(ctx.run_dir)),
@@ -779,6 +819,7 @@ pub(crate) async fn sandboxed(
             env
         },
         deny_read,
+        readable_home_secrets: Vec::new(),
         read_only: access == Access::ReadOnly,
     };
     let stop = async {
@@ -867,11 +908,34 @@ async fn run_command(ctx: &mut Ctx<'_>, args: &Map<String, Value>) -> Result<Str
     } else {
         Access::Ordinary
     };
+    // Files other tools run later, before and after: a command can write
+    // them too (`declass_fs::triggers`).
+    let triggers_before = trigger_snapshot(ctx.workspace);
+    let started = std::time::Instant::now();
     // A stopped or failed command can already have written sensitive data.
     // Persist those classifications before returning its error, so resuming
     // the run cannot expose partial output as an ordinary public file.
     let result = sandboxed(ctx, command, timeout, access).await;
     let exit_code = result.as_ref().ok().and_then(|o| o.exit_code);
+    let triggers_written = record_command_triggers(ctx, &triggers_before);
+    ctx.record(AuditEvent::CommandRun {
+        command_sha256: declass_fs::sha256_hex(command.as_bytes()),
+        program: program_of(command),
+        access: match access {
+            Access::SensitiveData => "sensitive_data",
+            _ => "ordinary",
+        }
+        .into(),
+        network: match (access, ctx.network) {
+            (Access::SensitiveData, _) | (_, crate::egress::Network::Off) => "off",
+            (_, crate::egress::Network::All) => "all",
+            (_, crate::egress::Network::Registries(_)) => "registries",
+        }
+        .into(),
+        exit_code,
+        duration_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+        triggers_written,
+    });
     let source = if let Some(before) = before {
         let after = snapshot(ctx.workspace)
             .map_err(|_| "Cannot classify all sensitive command outputs; private classification state requires owner review.".to_owned())?;
@@ -927,6 +991,116 @@ use .git; you do not need one: list_files and search work without it, and diff s
 
 static GIT_WORD: std::sync::LazyLock<Regex> =
     std::sync::LazyLock::new(|| Regex::new(r"(^|[\s;&|(`])git(\s|$)").expect("static regex"));
+
+/// The program a command line names first (`curl` in `curl -sS ... | sh`),
+/// as a bare name of at most 64 ordinary characters; empty otherwise.
+fn program_of(command: &str) -> String {
+    let first = command.split_whitespace().next().unwrap_or_default();
+    let name = first.rsplit('/').next().unwrap_or(first);
+    if name.len() <= 64
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-' | b'+'))
+    {
+        name.to_owned()
+    } else {
+        String::new()
+    }
+}
+
+/// Directories the walk for files other tools run later skips: Declass's
+/// and git's state, and dependency and build trees (large, and written by
+/// the package managers and builds themselves).
+const TRIGGER_SKIP: &[&str] = &[
+    ".git",
+    ".declass",
+    "node_modules",
+    "target",
+    ".venv",
+    "venv",
+    "__pycache__",
+    ".tox",
+    ".mypy_cache",
+    ".pytest_cache",
+    "dist",
+    "build",
+    ".next",
+    ".cache",
+];
+
+/// Most entries the walk visits, so a huge tree cannot stall each command.
+const TRIGGER_WALK_MAX: usize = 100_000;
+
+/// The files other tools run later in the workspace, stamped
+/// ([`snapshot`]'s stamps), within [`TRIGGER_WALK_MAX`] entries. Best effort:
+/// an unreadable directory is skipped.
+fn trigger_snapshot(workspace: &Path) -> std::collections::BTreeMap<PathBuf, FileStamp> {
+    use std::os::unix::fs::MetadataExt;
+    let mut out = std::collections::BTreeMap::new();
+    let mut stack = vec![PathBuf::new()];
+    let mut visited = 0usize;
+    while let Some(rel) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(workspace.join(&rel)) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            visited += 1;
+            if visited > TRIGGER_WALK_MAX {
+                return out;
+            }
+            let name = entry.file_name();
+            let child = rel.join(&name);
+            let Ok(m) = entry.metadata() else { continue };
+            if m.is_dir() {
+                if !TRIGGER_SKIP.contains(&name.to_string_lossy().as_ref()) {
+                    stack.push(child);
+                }
+            } else if m.is_file() && declass_fs::triggers::classify(&child).is_some() {
+                out.insert(
+                    child,
+                    FileStamp {
+                        modified: m.modified().unwrap_or(std::time::UNIX_EPOCH),
+                        changed: inode_change_time(&m),
+                        device: m.dev(),
+                        inode: m.ino(),
+                        size: m.len(),
+                    },
+                );
+            }
+        }
+    }
+    out
+}
+
+/// Records each file other tools run later that a command created or
+/// changed (`TriggerWritten`); returns their paths.
+fn record_command_triggers(
+    ctx: &Ctx<'_>,
+    before: &std::collections::BTreeMap<PathBuf, FileStamp>,
+) -> Vec<String> {
+    let mut written = Vec::new();
+    for (rel, stamp) in trigger_snapshot(ctx.workspace) {
+        if before.get(&rel) == Some(&stamp) {
+            continue;
+        }
+        let Some(t) = declass_fs::triggers::classify(&rel) else {
+            continue;
+        };
+        let sha256 = declass_fs::read_file(ctx.workspace, &rel, MAX_READ_BYTES)
+            .ok()
+            .map(|b| declass_fs::sha256_hex(&b));
+        let path = rel.display().to_string();
+        ctx.record(AuditEvent::TriggerWritten {
+            path: path.clone(),
+            by: "command".into(),
+            tier: t.tier.as_str().into(),
+            runner: t.runner.into(),
+            sha256,
+        });
+        written.push(path);
+    }
+    written
+}
 
 /// Command sandboxes refuse writes to these state directories. Every other
 /// directory, including build output and dependencies, is snapshotted: a time
@@ -1116,6 +1290,102 @@ pub fn written_paths(journal: &WriteJournal) -> Vec<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    /// A tool's write and a command's write to files other tools run later
+    /// are both recorded; an ordinary source file is only a `FileWrite`.
+    #[tokio::test]
+    async fn writes_to_files_other_tools_run_are_recorded_by_tool_and_by_command() {
+        use declass_boundary::audit::{AuditEvent, AuditHandle, AuditLog, Line, read};
+        let d = tempfile::tempdir().unwrap();
+        let root = d.path().canonicalize().unwrap();
+        let ws = root.join("ws");
+        let run = ws.join(".declass/runs/t");
+        std::fs::create_dir_all(&run).unwrap();
+        std::fs::create_dir_all(ws.join("src")).unwrap();
+        let log = root.join("audit.jsonl");
+        let audit = AuditHandle::new(AuditLog::open(&log).unwrap());
+        let git = declass_git::Git::locate().unwrap();
+        let p = declass_boundary::view::PassThrough { max_bytes: 60_000 };
+        let mut journal = crate::journal::WriteJournal::open(&run).unwrap();
+        let mut ctx = super::Ctx {
+            workspace: &ws,
+            run_dir: &run,
+            sandbox: declass_sandbox::detect().unwrap(),
+            git: &git,
+            presenter: &p,
+            journal: &mut journal,
+            command_timeout: std::time::Duration::from_secs(20),
+            network: &crate::egress::Network::Off,
+            checks: &[],
+            audit: Some(&audit),
+            interrupted: None,
+            web: None,
+            git_tools: None,
+            lsp: None,
+        };
+        let args = |v: serde_json::Value| v.as_object().unwrap().clone();
+        for a in [
+            serde_json::json!({"tool": "write_file", "path": ".envrc", "content": "export X=1\n"}),
+            serde_json::json!({"tool": "write_file", "path": "src/lib.rs", "content": "pub fn a() {}\n"}),
+            serde_json::json!({"tool": "run_command", "command": "mkdir -p .vscode && echo '{}' > .vscode/tasks.json"}),
+        ] {
+            let tool = a["tool"].as_str().unwrap().to_owned();
+            super::dispatch(&mut ctx, &tool, &args(a)).await;
+        }
+        let events: Vec<AuditEvent> = read(&log)
+            .unwrap()
+            .into_iter()
+            .filter_map(|l| match l {
+                Line::Event(e) => Some(e.event),
+                Line::Request(_) => None,
+            })
+            .collect();
+        let writes: Vec<(String, Option<String>)> = events
+            .iter()
+            .filter_map(|e| match e {
+                AuditEvent::FileWrite { path, trigger, .. } => {
+                    Some((path.clone(), trigger.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            writes,
+            [
+                (".envrc".to_owned(), Some("autorun".to_owned())),
+                ("src/lib.rs".to_owned(), None)
+            ]
+        );
+        let triggers: Vec<(String, String, String)> = events
+            .iter()
+            .filter_map(|e| match e {
+                AuditEvent::TriggerWritten { path, by, tier, .. } => {
+                    Some((path.clone(), by.clone(), tier.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            triggers,
+            [
+                (".envrc".into(), "tool".into(), "autorun".into()),
+                (
+                    ".vscode/tasks.json".into(),
+                    "command".into(),
+                    "autorun".into()
+                )
+            ]
+        );
+        let run_events: Vec<&AuditEvent> = events
+            .iter()
+            .filter(|e| matches!(e, AuditEvent::CommandRun { .. }))
+            .collect();
+        assert!(
+            matches!(run_events[..], [AuditEvent::CommandRun { exit_code: Some(0), triggers_written, network, program, .. }]
+                if triggers_written == &[".vscode/tasks.json"] && network == "off" && program == "mkdir"),
+            "{run_events:?}"
+        );
+    }
+
     #[test]
     fn failed_workspace_inspection_is_not_an_empty_successful_snapshot() {
         let d = tempfile::tempdir().unwrap();
@@ -1603,7 +1873,14 @@ mod sensitive_command_tests {
             .collect();
         assert_eq!(
             kinds,
-            ["sandbox_denial", "sensitive_command", "sandbox_denial"]
+            [
+                "sandbox_denial",
+                "command_run",
+                "command_run",
+                "sensitive_command",
+                "sandbox_denial",
+                "command_run"
+            ]
         );
         assert!(log.contains("\"derived_files\":[\"totals.txt\"]"), "{log}");
     }

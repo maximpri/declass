@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Runs the Linux (bubblewrap) sandbox, agent, boundary and egress tests (and their lints) in
-# Docker, in four setups:
+# Runs the Linux (bubblewrap) sandbox, agent, boundary, egress and language-server tests (and
+# their lints) in Docker, in four setups:
 #   privileged    --privileged; tests run as a non-root user
 #   unprivileged  no added capabilities, tests as a non-root user; bubblewrap
 #                 uses unprivileged user namespaces (the usual Linux desktop)
@@ -27,7 +27,7 @@ image=$prefix:local
 volume=$prefix-target
 target_dir=${DECLASS_LINUX_TARGET_DIR:-}
 base=${DECLASS_LINUX_BASE:-rust:1-bookworm}
-crates=(-p declass-sandbox -p declass-agent -p declass-boundary -p declass-egress)
+crates=(-p declass-sandbox -p declass-agent -p declass-boundary -p declass-egress -p declass-lsp)
 keep=false
 rmi_base=false
 for arg in "$@"; do

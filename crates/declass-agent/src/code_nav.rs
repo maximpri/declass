@@ -160,7 +160,11 @@ struct Answer {
 
 /// Paths a server may not read: what checks may not read, plus declass's own
 /// state, git history and the sensitive commands' `TMPDIR` in every mode.
-fn server_hidden(presenter: &dyn Presenter, workspace: &Path, run_dir: &Path) -> Vec<PathBuf> {
+pub(crate) fn server_hidden(
+    presenter: &dyn Presenter,
+    workspace: &Path,
+    run_dir: &Path,
+) -> Vec<PathBuf> {
     let mut v = presenter.hidden_from_checks(workspace);
     v.push(workspace.join(".git"));
     v.push(workspace.join(".declass"));
@@ -1163,20 +1167,23 @@ async fn rename_in(
     let mut written: Vec<(PathBuf, Vec<u8>, String)> = Vec::new();
     for (rel, original, updated) in plan {
         let pre = Precondition::Sha256(declass_fs::sha256_hex(&original));
-        if let Err(e) = ctx
+        match ctx
             .journal
             .write(ctx.workspace, &rel, updated.as_bytes(), &pre)
         {
-            // Put back what was already written.
-            for (r, o, u) in written.iter().rev() {
-                let pre = Precondition::Sha256(declass_fs::sha256_hex(u.as_bytes()));
-                let _ = ctx.journal.write(ctx.workspace, r, o, &pre);
+            Ok(receipt) => crate::tools::record_write(ctx, "rename", &rel, &receipt),
+            Err(e) => {
+                // Put back what was already written.
+                for (r, o, u) in written.iter().rev() {
+                    let pre = Precondition::Sha256(declass_fs::sha256_hex(u.as_bytes()));
+                    let _ = ctx.journal.write(ctx.workspace, r, o, &pre);
+                }
+                return Err(Fail::Refused(format!(
+                    "{}: {}; nothing was changed",
+                    rel.display(),
+                    fs_err(e)
+                )));
             }
-            return Err(Fail::Refused(format!(
-                "{}: {}; nothing was changed",
-                rel.display(),
-                fs_err(e)
-            )));
         }
         written.push((rel, original, updated));
     }

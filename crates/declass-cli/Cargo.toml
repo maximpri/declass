@@ -15,6 +15,7 @@ workspace = true
 [dependencies]
 declass-agent.workspace = true
 declass-extensions.workspace = true
+declass-integrity.workspace = true
 declass-boundary.workspace = true
 declass-provider.workspace = true
 declass-config.workspace = true
@@ -26,6 +27,7 @@ declass-tui.workspace = true
 declass-web.workspace = true
 declass-egress.workspace = true
 declass-lsp.workspace = true
+declass-net.workspace = true
 url = "2"
 anyhow.workspace = true
 sha2.workspace = true

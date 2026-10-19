@@ -199,6 +199,7 @@ pub async fn run(ws: &Path, online: bool, emb: &Embedding) -> Vec<Check> {
             out.extend(frontier(c, online).await);
             out.extend(local(c, online).await);
             out.extend(mcp_servers(c, ws, online).await);
+            out.push(extensions(c, ws));
         }
         None => out.push(check(
             "endpoints",
@@ -264,6 +265,31 @@ sends (a risk the owner accepted)"
                 )),
             );
         }
+        // Credential stores every other process is denied.
+        if let Ok((server, true)) = &s
+            && !server.read_home_secrets.is_empty()
+        {
+            let reach = if server.network {
+                "and has network, so it can send them anywhere"
+            } else {
+                "without network"
+            };
+            out.push(
+                check(
+                    "mcp",
+                    Status::Warn,
+                    format!(
+                        "server `{name}` may read credential stores denied to every other process \
+({}) {reach} (a risk the owner accepted)",
+                        server.read_home_secrets.join(", ")
+                    ),
+                )
+                .fix(format!(
+                    "declass config set mcp.servers.{name}.read_home_secrets '[]' if it does not \
+need them"
+                )),
+            );
+        }
         match s {
             Err(e) => out.push(check("mcp", Status::Fail, format!("{e:#}")).fix(format!(
                 "fix [mcp.servers.{name}] in the owner config (`declass config list`)"
@@ -289,8 +315,8 @@ sends (a risk the owner accepted)"
     if start.is_empty() {
         return out;
     }
-    let sandbox = match declass_sandbox::detect() {
-        Ok(k) => k,
+    let reports = match crate::mcp::inspect(c, ws, &start, None).await {
+        Ok(r) => r,
         Err(e) => {
             out.push(check(
                 "mcp",
@@ -300,37 +326,6 @@ sends (a risk the owner accepted)"
             return out;
         }
     };
-    // The same hidden paths as a run, from an engine over the configured
-    // policy (no local model; nothing leaves this machine).
-    let dir = std::env::temp_dir().join(format!("declass-doctor-{}", uuid::Uuid::new_v4()));
-    let engine = match crate::policy(c).map_err(|e| e.to_string()).and_then(|p| {
-        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-        declass_boundary::engine::Engine::open_for_inspection(ws, &dir, p)
-            .map_err(|e| e.to_string())
-    }) {
-        Ok(e) => e,
-        Err(e) => {
-            out.push(check(
-                "mcp",
-                Status::Fail,
-                format!("servers cannot start: {e}"),
-            ));
-            return out;
-        }
-    };
-    let workspace = ws.canonicalize().unwrap_or_else(|_| ws.to_path_buf());
-    let reports = declass_agent::mcp::probe(
-        &start,
-        &declass_agent::mcp::Setup {
-            workspace: &workspace,
-            run_dir: &dir,
-            sandbox,
-            presenter: engine.as_ref(),
-            audit: None,
-        },
-    )
-    .await;
-    let _ = std::fs::remove_dir_all(&dir);
     for r in reports {
         out.push(match r.result {
             Ok(n) => check(
@@ -1509,6 +1504,62 @@ async fn web_search(c: &Config, ws: &Path, online: bool) -> Check {
         Err(e) => check(NAME, Status::Warn, format!("{}; test query: {e}", choice.detail)).fix(
             "start it (`declass config preset searxng` prints the command) and enable the JSON format (search.formats: [html, json] in its settings.yml)",
         ),
+    }
+}
+
+/// Skills and plugins against their pins (what `declass extensions verify`
+/// checks), and what a run does about a difference.
+fn extensions(c: &Config, ws: &Path) -> Check {
+    use declass_integrity::Level;
+    let mode = c.str("extensions.integrity").unwrap_or_default();
+    let (checked, findings, _) = match crate::integrity::check_all(ws, Some(c), false) {
+        Ok(found) => found,
+        Err(e) => {
+            return check(
+                "extensions",
+                Status::Warn,
+                format!("skills and plugins could not be listed: {e:#}"),
+            );
+        }
+    };
+    let count = |level| findings.iter().filter(|f| f.level == level).count();
+    let (errors, warnings) = (count(Level::Error), count(Level::Warning));
+    let first = findings
+        .iter()
+        .find(|f| f.level >= Level::Warning)
+        .map(|f| format!("; first: {} {}: {}", f.kind, f.id, f.message))
+        .unwrap_or_default();
+    if errors > 0 {
+        let status = if mode == "enforce" {
+            Status::Fail
+        } else {
+            Status::Warn
+        };
+        check(
+            "extensions",
+            status,
+            format!(
+                "{errors} skill(s), plugin(s) or lock file(s) differ from their pins or cannot be checked (extensions.integrity = {mode}){first}"
+            ),
+        )
+        .fix(
+            "declass extensions verify shows each one; after reviewing a change, pin it with declass extensions lock --update <id> (or --project for the repository's skills)",
+        )
+    } else if warnings > 0 {
+        check(
+            "extensions",
+            Status::Warn,
+            format!("{warnings} not pinned, or pinned but no longer installed{first}"),
+        )
+        .fix("declass extensions lock (your own), declass extensions lock --project (the repository's)")
+    } else {
+        check(
+            "extensions",
+            Status::Pass,
+            format!(
+                "{checked} skill(s) and plugin(s) checked against their pins (extensions.integrity = {mode})"
+            ),
+        )
     }
 }
 

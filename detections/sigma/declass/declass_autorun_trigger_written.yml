@@ -1,0 +1,24 @@
+title: Coding agent wrote a file another tool runs without asking
+name: declass_autorun_trigger_written
+id: a581ab60-8fe8-4ffa-9369-59e6d813aac1
+status: experimental
+description: >-
+  A Declass run created or changed a file that an editor, a shell hook, a dev container or another coding agent runs or loads without a further step (for example .vscode/tasks.json with runOn folderOpen, .envrc, .mcp.json, .claude/settings.json, AGENTS.md). Such a file outlives the run and can execute code later.
+references:
+  - https://github.com/maximpri/declass/blob/main/detections/sigma/README.md
+author: Declass
+date: 2026-10-19
+tags:
+  - attack.persistence
+  - attack.t1546
+logsource:
+  product: declass
+  service: audit
+detection:
+  selection:
+    kind: trigger_written
+    tier: autorun
+  condition: selection
+falsepositives:
+  - The operator asked for the change and set oversight.autorun_triggers to note
+level: medium

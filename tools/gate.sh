@@ -97,8 +97,9 @@ fi
 
 step "provenance"
 # Declass's implementation is independent. Product names are permitted in the
-# evaluation adapters, credential denylist, and portable-skill discovery
-# adapter (the user requested interoperability with standard agent files).
+# evaluation adapters, credential denylist, portable-skill discovery adapter
+# (the user requested interoperability with standard agent files), and the
+# catalogue of files other tools run later (named only to flag writes to them).
 # Distinctive names match case-insensitively; names that are also ordinary words
 # (Cursor, Goose) match only as capitalized product names.
 # The clipboard decoder uses Rust's standard-library byte cursor; its import
@@ -110,7 +111,8 @@ hits=$( { grep -rniE "$pattern" crates fuzz/fuzz_targets fuzz/Cargo.toml --inclu
     | grep -v '^crates/declass-evals/src/lanes/' \
     | grep -v '^crates/declass-cli/src/extensions.rs:' \
     | grep -vE '^crates/declass-tui/src/clipboard\.rs:[0-9]+:.*(use std::io::\{Cursor, Read, Write\};|Cursor::new\()' \
-    | grep -v '^crates/declass-sandbox/src/home_secrets.rs:' || true)
+    | grep -v '^crates/declass-sandbox/src/home_secrets.rs:' \
+    | grep -v '^crates/declass-fs/src/triggers.rs:' || true)
 if [ -n "$hits" ]; then
     echo "provenance check failed:" >&2
     echo "$hits" >&2

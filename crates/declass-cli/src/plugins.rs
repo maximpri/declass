@@ -22,7 +22,17 @@ pub(crate) enum Action {
     /// Check a local package without installing or executing anything.
     Inspect { path: PathBuf },
     /// Install a private snapshot of a local package and enable it for future sessions.
-    Install { path: PathBuf },
+    Install {
+        path: PathBuf,
+        /// Refuse a package without a valid signature by a key in extension_signers.
+        #[arg(long)]
+        require_signed: bool,
+        /// Accept a signer other than the one pinned for this package.
+        #[arg(long)]
+        allow_signer_change: bool,
+    },
+    /// Print what a publisher signs for a package (`ssh-keygen -Y sign -n declass-plugin`).
+    Digest { path: PathBuf },
     /// Enable an installed package whose pinned content is intact.
     Enable { name: String },
     /// Disable a package for future sessions.
@@ -716,12 +726,35 @@ pub(crate) fn run(action: Action) -> Result<()> {
                 })
             );
         }
-        Action::Install { path } => {
+        Action::Install {
+            path,
+            require_signed,
+            allow_signer_change,
+        } => {
+            let signer = signer(&path, require_signed)?;
+            crate::integrity::check_signer(
+                &parse(&contents(&path)?)?.name,
+                signer.as_ref(),
+                allow_signer_change,
+            )?;
             let package = install(&path, &root)?;
+            crate::integrity::pin_installed_plugin(&package, signer.as_ref())?;
             println!(
-                "Installed {}\nAvailable in your next session.",
-                describe(&package)
+                "Installed {}\n{}Pinned in {}.\nAvailable in your next session.",
+                describe(&package),
+                match &signer {
+                    Some(s) => format!(
+                        "Signed by {} ({}).\n",
+                        s.principals.join(", "),
+                        s.key.openssh()
+                    ),
+                    None => "Not signed by a key you list in extension_signers.\n".into(),
+                },
+                crate::integrity::owner_lock_path().display()
             );
+        }
+        Action::Digest { path } => {
+            println!("{}", files_digest(&contents(&path)?, true)?);
         }
         Action::Enable { name } | Action::Disable { name } => {
             let enabled = enable;
@@ -738,6 +771,7 @@ pub(crate) fn run(action: Action) -> Result<()> {
         }
         Action::Remove { name } => {
             remove_record(&root, &name)?;
+            crate::integrity::unpin_plugin(&name)?;
             println!(
                 "Plugin {name} unregistered. Its snapshot is retained in {}.",
                 root.join(&name).display()
@@ -745,6 +779,71 @@ pub(crate) fn run(action: Action) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// The package's files as a ToolHive-compatible content digest
+/// (`declass_integrity::content`), for lock files.
+pub(crate) fn content_digest(package: &Package) -> Result<declass_integrity::Sha256Digest> {
+    files_digest(&contents(&package.root)?, false)
+}
+
+/// A package's publisher signature, beside its files.
+pub(crate) const SIGNATURE: &str = "declass-plugin.sig";
+/// The SSH signature namespace for packages.
+pub(crate) const NAMESPACE: &str = "declass-plugin";
+
+/// The content digest of `files`, without the signature file when
+/// `unsigned_part` (what a publisher signs).
+fn files_digest(files: &Files, unsigned_part: bool) -> Result<declass_integrity::Sha256Digest> {
+    let hashes: Vec<(String, [u8; 32])> = files
+        .iter()
+        .filter(|(path, _)| !(unsigned_part && path.as_path() == Path::new(SIGNATURE)))
+        .map(|(path, bytes)| {
+            let path = path.to_str().context("package paths must be UTF-8")?;
+            Ok((path.to_owned(), Sha256::digest(bytes).into()))
+        })
+        .collect::<Result<_>>()?;
+    Ok(declass_integrity::content::content_digest(
+        hashes.iter().map(|(p, h)| (p.as_str(), *h)),
+    )?)
+}
+
+/// The owner's trusted package publishers (`allowed_signers` format).
+pub(crate) fn signers_path() -> PathBuf {
+    declass_config::owner_config_path().with_file_name("extension_signers")
+}
+
+/// Who signed the package at `path`, if a key the owner lists did. A
+/// signature that does not match the content refuses the package; one by a
+/// key the owner does not list counts as none (refused under
+/// `require_signed`).
+fn signer(path: &Path, require_signed: bool) -> Result<Option<declass_integrity::sshsig::Signer>> {
+    use declass_integrity::sshsig;
+    let files = contents(path)?;
+    let Some(signature) = files.get(Path::new(SIGNATURE)) else {
+        ensure!(
+            !require_signed,
+            "the package has no {SIGNATURE}; the publisher signs it with: ssh-keygen -Y sign -n {NAMESPACE} -f KEY DIGEST_FILE, where DIGEST_FILE holds `declass plugins digest DIR`"
+        );
+        return Ok(None);
+    };
+    let message = format!("{}\n", files_digest(&files, true)?);
+    let signature = std::str::from_utf8(signature).context("the package signature is not text")?;
+    let key = sshsig::verify(signature, message.as_bytes(), NAMESPACE)
+        .map_err(|e| anyhow::anyhow!("the package signature is not valid: {e}"))?;
+    let listed = std::fs::read_to_string(signers_path()).unwrap_or_default();
+    match sshsig::allowed(&sshsig::allowed_signers(&listed), &key, NAMESPACE) {
+        Some(signer) => Ok(Some(signer.clone())),
+        None => {
+            ensure!(
+                !require_signed,
+                "the package is signed by {}, which {} does not list for {NAMESPACE}",
+                key.openssh(),
+                signers_path().display()
+            );
+            Ok(None)
+        }
+    }
 }
 
 pub(crate) fn roots(packages: &[Package]) -> Vec<Root> {
@@ -832,6 +931,9 @@ pub(crate) fn servers(
                     declass_mcp::Trust::Public
                 },
                 network: s.network,
+                // A package never relaxes the credential deny list; only the
+                // owner config can, per server.
+                read_home_secrets: Vec::new(),
                 approve: match s.approve.as_str() {
                     "auto" => declass_mcp::Approve::Auto,
                     "writes" => declass_mcp::Approve::Writes,
