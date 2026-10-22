@@ -226,48 +226,60 @@ production signing keys.
 ### Optional Apple signing and notarization
 
 SSH signatures authenticate Declass releases on both macOS and Linux. Apple signing
-is a separate step for macOS distribution. It needs:
+is a separate step for macOS distribution, so Gatekeeper accepts a downloaded image.
+It needs:
 
 - An Apple Developer Program membership and a **Developer ID Application**
-  certificate with its private key in the signing Mac's keychain. An Apple
-  Development certificate is not the distribution identity. Developer ID
-  Installer is only needed for a `.pkg`; Declass currently ships a `.dmg`.
+  certificate with its private key in the signing Mac's keychain
+  (`security find-identity -v -p codesigning` lists it). An Apple Development
+  certificate is not the distribution identity, and the scripts refuse it.
+  Developer ID Installer is only needed for a `.pkg`; Declass ships a `.dmg`.
 - Xcode or its command-line tools, including `codesign`, `notarytool` and `stapler`.
 - Notarization credentials: an Apple account, team ID and app-specific password,
-  or an App Store Connect API key. Store credentials in Keychain, not this repo.
-
-[Apple's Developer ID guide](https://developer.apple.com/developer-id/) explains
-membership and certificate setup. Its
-[packaging guide](https://developer.apple.com/documentation/xcode/packaging-mac-software-for-distribution)
-describes signing binaries and disk images. Save notarization credentials using
-an interactive prompt so the password is not written into shell history:
+  or an App Store Connect API key. Store them in Keychain once, not in this repo;
+  the command prompts for the password so it is not written into shell history:
 
 ```sh
 xcrun notarytool store-credentials declass-notary --apple-id YOUR_APPLE_ID --team-id YOUR_TEAM_ID
 ```
 
-The [notarytool guide](https://developer.apple.com/documentation/technotes/tn3147-migrating-to-the-latest-notarization-tool)
-covers both credential types. The release order matters:
+[Apple's Developer ID guide](https://developer.apple.com/developer-id/) explains
+membership and certificate setup, and the
+[notarytool guide](https://developer.apple.com/documentation/technotes/tn3147-migrating-to-the-latest-notarization-tool)
+covers both credential types. Then name the identity (as listed, or its SHA-1 hash)
+when building and packaging:
 
-1. Start from a fresh copy of the matching unsigned candidate. Sign its executable
-   with the Developer ID Application identity, hardened runtime and secure
-   timestamp (`codesign --force --options runtime --timestamp --sign IDENTITY BINARY`).
-   Verify its signature and test Declass's command sandbox with that signed binary.
-2. Record the signing step in `BUILDINFO.txt`, regenerate the inner `SHA256SUMS`
-   over the final payload, and optionally sign that manifest with the SSH release
-   key. Apple signing changes the binary bytes, so its earlier checksum is stale.
-3. Package the final payload. Sign the `.dmg` with the Developer ID Application
-   identity and a timestamp. Submit it with
-   `xcrun notarytool submit IMAGE.dmg --keychain-profile declass-notary --wait`.
-4. After an **Accepted** result, run `xcrun stapler staple IMAGE.dmg` and
-   `xcrun stapler validate IMAGE.dmg`, then test installation on a separate Mac.
-5. Generate the outer image checksum and optional SSH signature **last**, after
-   signing and stapling have finished changing the image. Publish those final bytes.
+```sh
+tools/release.sh 0.2.0 --key /secure/path/release-key \
+  --apple-identity "Developer ID Application: NAME (TEAMID)" --out dist/macos-arm64
+tools/package-dmg.sh dist/macos-arm64 --key /secure/path/release-key \
+  --signers /secure/path/allowed_signers \
+  --apple-identity "Developer ID Application: NAME (TEAMID)" --notary-profile declass-notary \
+  --out dist/declass-0.2.0-aarch64-apple-darwin.dmg
+```
 
-The current scripts build unsigned images or SSH-authenticated release assets;
-they do not perform Apple signing or notarization automatically. No production
-SSH key is bundled. Keep it outside the repository and distribute only its public
-key and fingerprint through a channel recipients already trust.
+The order matters, and the scripts keep it:
+
+1. `release.sh` checks the identity before any work, then signs the binary with
+   the hardened runtime and a secure timestamp, verifies the signature and runs
+   the signed binary. Declass needs no entitlements. `BUILDINFO.txt` records the
+   signer. The checksums and SSH signature are made after signing, because
+   signing changes the binary's bytes.
+2. `package-dmg.sh` refuses a payload whose binary is not signed by the same
+   identity, with the hardened runtime and a timestamp. It signs the image and
+   submits it to Apple's notary service (an upload of the image), waiting for the
+   result. Anything but **Accepted** stops it and names the `notarytool log`
+   command for the submission.
+3. It staples the ticket to the image, validates it, and asks Gatekeeper
+   (`spctl --assess --type open`) to accept it.
+4. The image's checksum and SSH signature are made **last**, over the final,
+   stapled bytes. Publish those.
+
+Test installation on a separate Mac before publishing. The installer reports the
+installed binary's Apple signature; the SSH release signature remains what it
+checks. `cicd.sh` candidates stay unsigned. No production SSH key is bundled.
+Keep it outside the repository and distribute only its public key and fingerprint
+through a channel recipients already trust.
 
 ## Platform checks
 

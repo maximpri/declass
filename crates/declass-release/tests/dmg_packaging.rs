@@ -414,3 +414,138 @@ fn signed_dmg_authenticates_payload_and_outer_image_with_external_trust() {
             .success()
     );
 }
+
+/// Apple signing with stand-ins for the keychain, codesign, notarytool,
+/// stapler and Gatekeeper, each logging its call: the payload binary must
+/// already carry the Developer ID signature, and the image is signed,
+/// notarized, stapled and assessed before its checksum is made.
+#[test]
+fn apple_signed_dmg_is_notarized_and_stapled_before_its_checksum() {
+    const DEVELOPER_ID: &str = "Developer ID Application: Test (TEAM123456)";
+    let setup = || {
+        let f = Fixture::new();
+        let stubs = f.root.join("stubs");
+        executable(
+            &stubs.join("security"),
+            "#!/bin/sh\n[ \"$*\" = 'find-identity -v -p codesigning' ] || exit 1\n\
+             echo '  1) 1111111111111111111111111111111111111111 \"Apple Development: Test (DEVTEAM123)\"'\n\
+             echo '  2) 2222222222222222222222222222222222222222 \"Developer ID Application: Test (TEAM123456)\"'\n\
+             echo '     2 valid identities found'\n",
+        );
+        executable(
+            &stubs.join("codesign"),
+            "#!/bin/bash\nset -eu\nlast=${!#}\ncase \" $* \" in\n\
+             *' --sign '*) echo \"codesign $*\" >>\"$DMG_LOG\"; printf 'codesigned\\n' >>\"$last\" ;;\n\
+             *' -dvv '*) printf 'CodeDirectory v=20500 size=1 flags=0x10000(runtime) hashes=1+0 location=embedded\\nAuthority=%s\\nAuthority=Developer ID Certification Authority\\nTimestamp=Oct 21, 2026\\n' \"${DMG_TEST_AUTHORITY:-Developer ID Application: Test (TEAM123456)}\" >&2 ;;\n\
+             *' --verify '*) [ \"${DMG_TEST_UNSIGNED:-0}\" = 0 ] ;;\n\
+             *) exit 1 ;;\nesac\n",
+        );
+        executable(
+            &stubs.join("xcrun"),
+            "#!/bin/bash\nset -eu\necho \"xcrun $1 $2\" >>\"$DMG_LOG\"\ncase \"$1 $2\" in\n\
+             'notarytool submit') printf '{\"id\":\"abc-123\",\"status\":\"%s\",\"message\":\"done\"}\\n' \"${DMG_TEST_NOTARY:-Accepted}\" ;;\n\
+             'stapler staple') printf 'stapled\\n' >>\"$3\" ;;\n\
+             'stapler validate') ;;\n\
+             *) exit 1 ;;\nesac\n",
+        );
+        executable(
+            &stubs.join("spctl"),
+            "#!/bin/sh\necho spctl >>\"$DMG_LOG\"\n",
+        );
+        f
+    };
+    let log = |f: &Fixture| f.root.join("apple.log");
+    let apple = |f: &Fixture, identity: &str| {
+        let mut c = f.package();
+        c.args([
+            "--unsigned",
+            "--apple-identity",
+            identity,
+            "--notary-profile",
+            "declass-notary",
+        ])
+        .env("DMG_LOG", log(f));
+        c
+    };
+    let refused = |c: &mut Command, why: &str| {
+        let o = c.output().unwrap();
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&o.stdout),
+            String::from_utf8_lossy(&o.stderr)
+        );
+        assert!(!o.status.success(), "accepted: {text}");
+        assert!(text.contains(why), "{why} not in: {text}");
+    };
+
+    let f = setup();
+    refused(
+        f.package()
+            .args(["--unsigned", "--apple-identity", DEVELOPER_ID]),
+        "go together",
+    );
+    refused(
+        &mut apple(&f, "Apple Development: Test (DEVTEAM123)"),
+        "not a Developer ID Application identity",
+    );
+    refused(&mut apple(&f, "Nobody"), "no valid code-signing identity");
+    refused(
+        apple(&f, DEVELOPER_ID).env("DMG_TEST_UNSIGNED", "1"),
+        "no valid Apple signature",
+    );
+    refused(
+        apple(&f, DEVELOPER_ID).env(
+            "DMG_TEST_AUTHORITY",
+            "Developer ID Application: Other (OTHER12345)",
+        ),
+        "is not signed by",
+    );
+    assert!(!f.capture.exists(), "an unsigned payload reached hdiutil");
+    refused(
+        apple(&f, DEVELOPER_ID).env("DMG_TEST_NOTARY", "Invalid"),
+        "notarization Invalid; see xcrun notarytool log abc-123",
+    );
+    assert!(!f.image.exists(), "a rejected image was published");
+
+    let f = setup();
+    assert_ok(apple(&f, DEVELOPER_ID).output().unwrap());
+    let image = std::fs::read(&f.image).unwrap();
+    assert_eq!(image, b"fixture disk image\ncodesigned\nstapled\n");
+    let manifest = std::fs::read_to_string(f.image.with_extension("dmg.SHA256SUMS")).unwrap();
+    assert!(
+        manifest.starts_with(&format!("{:x}  ", Sha256::digest(&image))),
+        "the checksum is not of the final image: {manifest}"
+    );
+    let calls = std::fs::read_to_string(log(&f)).unwrap();
+    let calls: Vec<&str> = calls.lines().collect();
+    assert_eq!(calls.len(), 5, "{calls:?}");
+    assert!(
+        calls[0].starts_with(
+            "codesign --force --timestamp --sign 2222222222222222222222222222222222222222 "
+        ),
+        "{calls:?}"
+    );
+    assert_eq!(
+        calls[1..],
+        [
+            "xcrun notarytool submit",
+            "xcrun stapler staple",
+            "xcrun stapler validate",
+            "spctl"
+        ]
+    );
+    let readme = std::fs::read_to_string(f.capture.join("README.txt")).unwrap();
+    assert!(
+        readme.contains(&format!("signed by {DEVELOPER_ID}")),
+        "{readme}"
+    );
+    assert!(!readme.contains("No Apple code signing"), "{readme}");
+    let installed = f.install().arg("--unsigned").output().unwrap();
+    assert!(installed.status.success());
+    assert!(
+        String::from_utf8_lossy(&installed.stdout)
+            .contains(&format!("Apple code signature: {DEVELOPER_ID}.")),
+        "{}",
+        String::from_utf8_lossy(&installed.stdout)
+    );
+}

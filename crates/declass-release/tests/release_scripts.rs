@@ -334,12 +334,18 @@ fn release_packages_committed_source_and_notices_with_signed_checksums() {
     );
     script(
         &bin.join("rustc"),
-        "if [ \"$1\" = -vV ]; then echo 'host: test-target'; else echo 'rustc fixture'; fi",
+        "if [ \"$1\" = -vV ]; then echo \"host: ${RELEASE_TEST_HOST:-test-target}\"; else echo 'rustc fixture'; fi",
     );
     script(
         &bin.join("cargo"),
         r#"case "$1" in
-build) mkdir -p target/test-target/release; echo 'binary fixture' >target/test-target/release/declass ;;
+build)
+    t=test-target
+    while [ $# -gt 0 ]; do if [ "$1" = --target ]; then t=$2; fi; shift; done
+    mkdir -p "target/$t/release"
+    printf '#!/bin/sh\necho "declass 0.1.0"\n' >"target/$t/release/declass"
+    chmod 755 "target/$t/release/declass"
+    ;;
 metadata) printf '{"target_directory":"%s/target"}\n' "$PWD" ;;
 vendor)
     mkdir -p vendor/dependency-1.0
@@ -375,7 +381,8 @@ esac"#,
     git(&["add", "."]);
     git(&["commit", "-qm", "release fixture"]);
     let path = std::env::join_paths(
-        std::iter::once(bin).chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+        std::iter::once(bin.clone())
+            .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
     )
     .unwrap();
     let archive = temp.path().join("source.tar.gz");
@@ -402,6 +409,87 @@ esac"#,
         &signers,
         &format!("release@declass namespaces=\"declass-release\" {public}\n"),
     );
+    // Apple signing, with stand-ins for the keychain and codesign: only a
+    // Developer ID Application identity on a macOS host is accepted, before
+    // any work, and the binary is signed before it is summed.
+    script(
+        &bin.join("security"),
+        "[ \"$*\" = 'find-identity -v -p codesigning' ] || exit 1\n\
+         echo '  1) 1111111111111111111111111111111111111111 \"Apple Development: Release Test (DEVTEAM123)\"'\n\
+         echo '  2) 2222222222222222222222222222222222222222 \"Developer ID Application: Release Test (TEAM123456)\"'\n\
+         echo '     2 valid identities found'",
+    );
+    script(
+        &bin.join("codesign"),
+        r#"last=${!#}
+case " $* " in
+*" --sign 2222222222222222222222222222222222222222 "*) printf '# signed\n' >>"$last" ;;
+*" -dvv "*) printf 'CodeDirectory v=20500 size=1 flags=0x10000(runtime) hashes=1+0 location=embedded\nAuthority=Developer ID Application: Release Test (TEAM123456)\nTimestamp=Oct 21, 2026\n' >&2 ;;
+*" --verify "*) ;;
+*) exit 1 ;;
+esac"#,
+    );
+    let apple_release = |identity: &str, host: &str, out: &Path| {
+        Command::new(repo.join("tools/release.sh"))
+            .args(["0.1.0", "--key"])
+            .arg(&key)
+            .args(["--apple-identity", identity, "--out"])
+            .arg(out)
+            .env("PATH", &path)
+            .env("RELEASE_TEST_HOST", host)
+            .env_remove("DECLASS_RELEASE_KEY")
+            .output()
+            .unwrap()
+    };
+    let apple_out = temp.path().join("apple-release");
+    for (identity, host, why) in [
+        (
+            "Developer ID Application: Release Test (TEAM123456)",
+            "x86_64-unknown-linux-gnu",
+            "signs macOS builds",
+        ),
+        (
+            "Apple Development: Release Test (DEVTEAM123)",
+            "aarch64-apple-darwin",
+            "is not a Developer ID Application identity",
+        ),
+        (
+            "Nobody",
+            "aarch64-apple-darwin",
+            "no valid code-signing identity",
+        ),
+    ] {
+        let o = apple_release(identity, host, &apple_out);
+        assert!(!o.status.success(), "{}", text(&o));
+        assert!(text(&o).contains(why), "{why}: {}", text(&o));
+        assert!(!apple_out.exists());
+    }
+    let signed = apple_release(
+        "2222222222222222222222222222222222222222",
+        "aarch64-apple-darwin",
+        &apple_out,
+    );
+    assert!(signed.status.success(), "{}", text(&signed));
+    assert!(
+        std::fs::read_to_string(apple_out.join("declass-0.1.0-aarch64-apple-darwin"))
+            .unwrap()
+            .ends_with("# signed\n")
+    );
+    let buildinfo = std::fs::read_to_string(apple_out.join("BUILDINFO.txt")).unwrap();
+    assert!(
+        buildinfo.contains(
+            "\napple_signature Developer ID Application: Release Test (TEAM123456) (hardened runtime, secure timestamp)\n"
+        ),
+        "{buildinfo}"
+    );
+    assert!(
+        std::fs::read_to_string(apple_out.join("SOURCE.txt"))
+            .unwrap()
+            .contains("Apple Developer ID signature")
+    );
+    let checked = verify(&apple_out, &signers);
+    assert!(checked.status.success(), "{}", text(&checked));
+
     // Not ignored: this catches populating --out before the source clean check.
     let out_dir = repo.join("custom output");
     let release = Command::new(repo.join("tools/release.sh"))
@@ -418,6 +506,11 @@ esac"#,
     let checked = verify(&out_dir, &signers);
     assert!(checked.status.success(), "{}", text(&checked));
     assert!(text(&checked).contains("10 file(s) match"));
+    assert!(
+        std::fs::read_to_string(out_dir.join("BUILDINFO.txt"))
+            .unwrap()
+            .contains("\napple_signature none\n")
+    );
     for name in ["LICENSE", "NOTICE", "LICENSES.md"] {
         assert_eq!(
             std::fs::read(out_dir.join(name)).unwrap(),

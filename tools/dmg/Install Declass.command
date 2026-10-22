@@ -109,4 +109,13 @@ mv -f "$binary_tmp" "$bin/declass"
 binary_tmp=""
 printf '\nInstalled: %s/declass\nSource, licenses and verification records: %s\n' "$bin" "$record"
 printf 'Run: "%s/declass"\nTo use declass by name, add ~/.local/bin to your shell PATH.\n' "$bin"
-printf 'Mode: %s. No Apple signing or notarization is asserted; quarantine was not removed.\n' "$mode"
+# Reported, not relied on: the release signature above is what authenticates.
+authority=""
+if command -v codesign >/dev/null 2>&1 && codesign --verify --strict "$bin/declass" >/dev/null 2>&1; then
+    authority=$(codesign -dvv "$bin/declass" 2>&1 | sed -n 's/^Authority=//p' | head -n 1)
+fi
+if [ -n "$authority" ]; then
+    printf 'Mode: %s. Apple code signature: %s. Quarantine was not removed.\n' "$mode" "$authority"
+else
+    printf 'Mode: %s. No Apple signing or notarization is asserted; quarantine was not removed.\n' "$mode"
+fi

@@ -1,6 +1,19 @@
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 # Changelog
 
+## Unreleased
+
+### Apple-signed macOS releases
+
+- `tools/release.sh --apple-identity` signs the macOS binary with a Developer ID Application
+  certificate (hardened runtime, secure timestamp) before the checksums and SSH signature, and
+  records the signer in `BUILDINFO.txt`. Other certificates are refused.
+- `tools/package-dmg.sh --apple-identity --notary-profile` signs the disk image, notarizes it,
+  staples the ticket and checks it with Gatekeeper before its checksum is made. It refuses a
+  payload whose binary is not signed by the same identity.
+- The disk-image installer reports the installed binary's Apple signature.
+  [Details](docs/INSTALLATION.md#optional-apple-signing-and-notarization)
+
 ## 0.2.0 — 2026-10-06
 
 The first release from this repository, and the first signed one. Release assets are signed with
