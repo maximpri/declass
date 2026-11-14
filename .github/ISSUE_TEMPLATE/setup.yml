@@ -1,0 +1,52 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+name: It didn't work on my setup
+description: Install, setup, a model or a local server that didn't work.
+labels: ["setup"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks, these reports help the most right now.
+        **Don't paste secrets, customer data, API keys, audit logs or transcripts.** Placeholders are fine.
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of `declass --version`.
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options:
+        - macOS (Apple silicon)
+        - macOS (Intel)
+        - Linux (x86-64)
+        - Linux (ARM64)
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: install
+    attributes:
+      label: How you installed it
+      placeholder: install.sh, disk image, built from source...
+  - type: input
+    id: models
+    attributes:
+      label: Cloud provider and local model server
+      placeholder: "e.g. Anthropic + Ollama qwen3:8b"
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you ran, what you expected and what you saw.
+    validations:
+      required: true
+  - type: textarea
+    id: doctor
+    attributes:
+      label: declass doctor
+      description: Output of `declass doctor` (it runs offline). Check it before pasting.
+      render: text

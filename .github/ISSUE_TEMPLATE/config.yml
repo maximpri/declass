@@ -1,0 +1,9 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+blank_issues_enabled: false
+contact_links:
+  - name: Report a vulnerability (privately)
+    url: https://github.com/maximpri/declass/security/advisories/new
+    about: Disclosure paths, sandbox escapes and other security issues. Please don't open a public issue.
+  - name: Documentation
+    url: https://github.com/maximpri/declass/tree/main/docs
+    about: Installation, usage, the security design and what it does not cover.

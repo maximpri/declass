@@ -1,0 +1,16 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+name: Idea
+description: A feature or a change in behavior.
+labels: ["idea"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do?
+      description: The task or workflow, and where Declass gets in the way.
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: What would help?

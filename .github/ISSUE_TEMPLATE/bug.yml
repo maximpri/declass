@@ -1,0 +1,35 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+name: Bug
+description: Something Declass did wrong during a session or command.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Don't paste secrets, customer data, API keys, audit logs or transcripts.** Placeholders are fine.
+        If you think something private reached the cloud model, report it privately through a
+        [security advisory](https://github.com/maximpri/declass/security/advisories/new) instead.
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of `declass --version`.
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: Platform and models
+      placeholder: "e.g. macOS 15 ARM64, OpenAI + LM Studio"
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: The command or task, what you expected and what Declass did.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: How to reproduce it
+      description: The smallest steps or repository layout that shows it.
