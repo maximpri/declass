@@ -1,7 +1,19 @@
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 # Changelog
 
-## Unreleased
+## 0.3.0 — not yet released
+
+Try Declass on a repository before setting anything up, pin the extensions it loads, and keep
+credentials from every process it starts. Signed and notarized macOS releases.
+
+### See what an agent could send
+
+- `declass exposure` reads the repository on your machine with Declass's own detectors and
+  reports, file by file, how many secrets and personal-data values a coding agent could send to a
+  cloud model, and what Declass does with each file instead. It needs no model, API key or setup,
+  makes no network requests and creates no run state. It shows counts, never values.
+  `--json` and `--all` are available; exit 1 means findings were listed.
+  [Details](docs/OPERATIONS.md#see-what-an-agent-could-send)
 
 ### Pin and verify extensions
 
@@ -68,6 +80,15 @@
   `declass config set mcp.servers.<name>.read_home_secrets '[".kube"]' --confirm`. Entries must be
   on the sandbox's list ([SECURITY.md](SECURITY.md)); `declass doctor` warns about each exception.
   A native package cannot grant one.
+
+### Fixes
+
+- With git 2.54 (Apple Git-157), a `git` command run through `run_command` failed with
+  `fatal: error reading '.../.git'` and no pointer to the git tools, because that git no longer
+  says "Operation not permitted" when the sandbox refuses `.git`. Declass now recognises it and
+  points at `git_status`, `git_log` and the other git tools again.
+- Tokio 1.53.3 (RUSTSEC-2026-0386, `AsyncFd`'s safe constructors). The Linux sandbox's network
+  bridge now waits on its channel as a Tokio Unix socket instead of through `AsyncFd`.
 
 ### Apple-signed macOS releases
 

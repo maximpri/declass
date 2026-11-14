@@ -25,7 +25,7 @@ curl --proto '=https' --proto-redir '=https' -fsSL https://raw.githubusercontent
 
 The [GitHub downloads](https://github.com/maximpri/declass/releases/latest) include
 macOS and Linux archives plus macOS disk images. Re-running the command installs
-the then-latest release. To pin a version, append `-s -- 0.2.0`.
+the then-latest release. To pin a version, append `-s -- 0.3.0`.
 
 Without a trusted signer file (below), the installer selects the `-unsigned` assets
 and says so; `--allow-unsigned` selects them even when a signer file exists. It checks
@@ -82,12 +82,12 @@ authenticate the release payload against your separately trusted key. From a
 trusted checkout, pin a version and select a signers file with:
 
 ```sh
-tools/install-release.sh 0.2.0 --signers "$HOME/.config/declass/allowed_signers"
+tools/install-release.sh 0.3.0 --signers "$HOME/.config/declass/allowed_signers"
 ```
 
 This downloads the asset for the current operating system and architecture from
-`https://github.com/maximpri/declass/releases/download/v0.2.0`. Pin the version in
-your deployment scripts. `--url https://your-mirror.example/releases/v0.2.0`
+`https://github.com/maximpri/declass/releases/download/v0.3.0`. Pin the version in
+your deployment scripts. `--url https://your-mirror.example/releases/v0.3.0`
 selects a mirror with the same assets; HTTPS is required throughout redirects.
 
 Both installation modes retain the source and notices needed to inspect or
@@ -130,7 +130,7 @@ gate. They do not establish full sandbox compatibility on another architecture.
 
 These checksums detect changed bytes but do not authenticate a publisher. The
 installer uses candidates when no trusted signer is configured, or with `--allow-unsigned`. Upload the files in
-`assets/` to the matching GitHub release (`v0.2.0` for version `0.2.0`) to make
+`assets/` to the matching GitHub release (`v0.3.0` for version `0.3.0`) to make
 them available to the remote installer. Keep the matching source and notices
 with those assets. Candidate builds neither create signing keys nor publish
 releases. Signing can be added later using the procedure below.
@@ -148,7 +148,7 @@ To package an existing candidate on a Mac:
 
 ```sh
 tools/package-dmg.sh /absolute/path/candidates/releases/aarch64-apple-darwin \
-  --unsigned --out /absolute/path/declass-0.2.0-aarch64-apple-darwin-unsigned.dmg
+  --unsigned --out /absolute/path/declass-0.3.0-aarch64-apple-darwin-unsigned.dmg
 ```
 
 Use `x86_64-apple-darwin` for Intel Macs. Keep the generated checksum beside the
@@ -185,7 +185,7 @@ allowed-signers file. Run the release gate and build on each supported host;
 For example, on an ARM64 Mac:
 
 ```sh
-tools/release.sh 0.2.0 --key /secure/path/release-key --out dist/macos-arm64
+tools/release.sh 0.3.0 --key /secure/path/release-key --out dist/macos-arm64
 tools/package-release.sh dist/macos-arm64 \
   --key /secure/path/release-key \
   --signers /secure/path/allowed_signers \
@@ -196,9 +196,9 @@ tools/package-release.sh dist/macos-arm64 \
 produces three uniquely named assets, for example:
 
 ```text
-declass-0.2.0-aarch64-apple-darwin.tar.gz
-declass-0.2.0-aarch64-apple-darwin.SHA256SUMS
-declass-0.2.0-aarch64-apple-darwin.SHA256SUMS.sig
+declass-0.3.0-aarch64-apple-darwin.tar.gz
+declass-0.3.0-aarch64-apple-darwin.SHA256SUMS
+declass-0.3.0-aarch64-apple-darwin.SHA256SUMS.sig
 ```
 
 The same naming scheme applies to `x86_64-apple-darwin`,
@@ -212,9 +212,9 @@ locally, create the version tag from that build commit. The owner can then creat
 a draft release and upload the assets:
 
 ```sh
-gh release create v0.2.0 --repo maximpri/declass --verify-tag --draft --title "Declass 0.2.0" \
+gh release create v0.3.0 --repo maximpri/declass --verify-tag --draft --title "Declass 0.3.0" \
   --notes-file /path/to/release-notes.md
-gh release upload v0.2.0 --repo maximpri/declass \
+gh release upload v0.3.0 --repo maximpri/declass \
   dist/github-macos-arm64/* dist/github-macos-x86_64/* \
   dist/github-linux-arm64/* dist/github-linux-x86_64/*
 ```
@@ -250,12 +250,12 @@ covers both credential types. Then name the identity (as listed, or its SHA-1 ha
 when building and packaging:
 
 ```sh
-tools/release.sh 0.2.0 --key /secure/path/release-key \
+tools/release.sh 0.3.0 --key /secure/path/release-key \
   --apple-identity "Developer ID Application: NAME (TEAMID)" --out dist/macos-arm64
 tools/package-dmg.sh dist/macos-arm64 --key /secure/path/release-key \
   --signers /secure/path/allowed_signers \
   --apple-identity "Developer ID Application: NAME (TEAMID)" --notary-profile declass-notary \
-  --out dist/declass-0.2.0-aarch64-apple-darwin.dmg
+  --out dist/declass-0.3.0-aarch64-apple-darwin.dmg
 ```
 
 The order matters, and the scripts keep it:
