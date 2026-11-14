@@ -39,14 +39,16 @@ pub fn channel(helper: Vec<OsString>) -> std::io::Result<(ProxyRoute, Incoming)>
         helper,
     };
     let incoming = Incoming {
-        fd: tokio::io::unix::AsyncFd::new(OwnedFd::from(host))?,
+        channel: tokio::net::UnixStream::from_std(host)?,
     };
     Ok((route, incoming))
 }
 
 /// The host's end of a channel.
 pub struct Incoming {
-    fd: tokio::io::unix::AsyncFd<OwnedFd>,
+    /// Registered with the runtime as a socket, which owns its descriptor
+    /// (`AsyncFd`'s safe constructors are deprecated: RUSTSEC-2026-0386).
+    channel: tokio::net::UnixStream,
 }
 
 impl Incoming {
@@ -54,28 +56,31 @@ impl Incoming {
     /// everything that could hold its end) is gone.
     pub async fn next(&self) -> Option<std::io::Result<tokio::net::UnixStream>> {
         loop {
-            let mut ready = match self.fd.readable().await {
-                Ok(r) => r,
-                Err(e) => return Some(Err(e)),
-            };
-            match ready.try_io(|fd| receive(fd.get_ref())) {
-                Ok(Ok(Some(stream))) => {
+            if let Err(e) = self.channel.readable().await {
+                return Some(Err(e));
+            }
+            // A would-block result clears the readiness, and the loop waits again.
+            match self
+                .channel
+                .try_io(tokio::io::Interest::READABLE, || receive(&self.channel))
+            {
+                Ok(Some(stream)) => {
                     return Some(
                         stream
                             .set_nonblocking(true)
                             .and_then(|()| tokio::net::UnixStream::from_std(stream)),
                     );
                 }
-                Ok(Ok(None)) => return None,
-                Ok(Err(e)) => return Some(Err(e)),
-                Err(_would_block) => continue,
+                Ok(None) => return None,
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => continue,
+                Err(e) => return Some(Err(e)),
             }
         }
     }
 }
 
 /// One descriptor from the channel (`None` at its end).
-fn receive(channel: &OwnedFd) -> std::io::Result<Option<UnixStream>> {
+fn receive(channel: impl AsFd) -> std::io::Result<Option<UnixStream>> {
     use rustix::net::{RecvAncillaryBuffer, RecvAncillaryMessage, RecvFlags};
     let mut space = [0u8; rustix::cmsg_space!(ScmRights(1))];
     let mut control = RecvAncillaryBuffer::new(&mut space);
