@@ -14,7 +14,7 @@ use std::path::Path;
 
 const MAX_ENTRIES: usize = 20_000;
 const MAX_DEPTH: usize = 48;
-const SKIPPED: &[&str] = &[
+pub(crate) const SKIPPED: &[&str] = &[
     ".git",
     ".declass",
     "target",
@@ -78,10 +78,10 @@ struct Exception {
     origin: String,
 }
 #[derive(Serialize)]
-struct FileRule {
-    path: String,
-    disposition: &'static str,
-    rule: String,
+pub(crate) struct FileRule {
+    pub(crate) path: String,
+    pub(crate) disposition: &'static str,
+    pub(crate) rule: String,
 }
 
 fn origin(raw: &str) -> Option<String> {
@@ -261,16 +261,18 @@ impl Inventory<'_> {
     }
 }
 
-pub(crate) fn collect(
-    ws: &Path,
-    cfg: &Config,
-    mode: Mode,
-    frontier_override: Option<&str>,
-    local_override: Option<&str>,
-) -> Result<Report> {
-    let p = policy(cfg)?;
+/// The workspace's files with the rule that applies to each, sorted by path,
+/// and whether the walk was complete. Names and metadata only: no file is opened.
+pub(crate) struct Files {
+    pub(crate) files: Vec<FileRule>,
+    pub(crate) complete: bool,
+    /// False when derived-file classifications could not be read.
+    pub(crate) derived_known: bool,
+}
+
+pub(crate) fn inventory(ws: &Path, p: &Policy, mode: Mode) -> Result<Files> {
     let mut inventory = Inventory {
-        policy: &p,
+        policy: p,
         mode,
         files: Vec::new(),
         complete: true,
@@ -281,8 +283,6 @@ pub(crate) fn collect(
         inventory.complete = false;
     }
     inventory.files.sort_by(|a, b| a.path.cmp(&b.path));
-    let top = mode == Mode::TopClearance;
-    let local_url = cfg.str("local.base_url")?;
     let derived = declass_boundary::derived::workspace_paths(ws);
     if let Ok(paths) = &derived {
         if mode == Mode::Hybrid {
@@ -303,6 +303,24 @@ pub(crate) fn collect(
             }
         }
     }
+    Ok(Files {
+        files: inventory.files,
+        complete: inventory.complete,
+        derived_known: derived.is_ok(),
+    })
+}
+
+pub(crate) fn collect(
+    ws: &Path,
+    cfg: &Config,
+    mode: Mode,
+    frontier_override: Option<&str>,
+    local_override: Option<&str>,
+) -> Result<Report> {
+    let p = policy(cfg)?;
+    let mut inventory = inventory(ws, &p, mode)?;
+    let top = mode == Mode::TopClearance;
+    let local_url = cfg.str("local.base_url")?;
     let frontier_url = cfg.str("frontier.base_url")?;
     let destinations = vec![
         endpoint(
@@ -384,7 +402,7 @@ pub(crate) fn collect(
         inventory.complete = false;
         warnings.push("Installed plugin server policies could not be inspected.".into());
     }
-    if derived.is_err() {
+    if !inventory.derived_known {
         warnings.push("Derived-file classifications are unavailable or a sensitive command is pending; review local state before starting a run.".into());
     }
     if !inventory.complete {

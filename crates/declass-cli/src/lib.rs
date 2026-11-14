@@ -42,6 +42,7 @@ mod doctor;
 mod egress;
 mod embedding;
 mod explore;
+mod exposure;
 mod extensions;
 mod goals;
 mod history;
@@ -221,6 +222,9 @@ enum Cmd {
     Scan(scan::Args),
     /// Preview file rules, model destinations and privacy exceptions offline.
     Privacy(privacy::Args),
+    /// Show what a coding agent could send to the cloud from this repository,
+    /// and what Declass keeps local instead. Offline; no models needed.
+    Exposure(exposure::Args),
     /// Run a task.
     Run {
         /// The task, as text.
@@ -1796,6 +1800,7 @@ Add --no-privacy to confirm, or use --mode hybrid."
             Ok(0)
         }
         Cmd::Privacy(args) => privacy::run(&ws, args, &load_config(&ws, emb)?),
+        Cmd::Exposure(args) => exposure::run(&ws, args, &load_config(&ws, emb)?),
         Cmd::Purge {
             run_id,
             all,

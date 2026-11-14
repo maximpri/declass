@@ -43,6 +43,7 @@ declass audit check [run]          # nonzero exit for missing, altered or unanch
 declass audit retention            # review raw-data expiry and audit archival thresholds
 declass purge --dry-run            # preview expired raw runs without deleting them
 declass privacy                    # offline file rules, model destinations and exceptions
+declass exposure                   # what an agent could send from this repo: counts, never values; offline
 declass audit disclosure <run>     # what was withheld from the frontier, by class (counts only)
 declass audit disclosure <run> --narrative  # the local model's account of what the frontier could have learned
 declass resume <run>               # continue an interrupted one-shot run
@@ -66,6 +67,7 @@ declass purge                      # delete raw run data older than the retentio
 ```
 
 [Privacy preview](OPERATIONS.md#preview-privacy-before-starting) explains the offline report and its exit codes.
+[Exposure report](OPERATIONS.md#see-what-an-agent-could-send) explains `declass exposure`.
 [Operations](OPERATIONS.md) covers audit export, monitoring and retention.
 
 ## Plan before implementing

@@ -34,6 +34,34 @@ curl -fsSL https://raw.githubusercontent.com/maximpri/declass/main/install.sh | 
 
 This installs `declass` to `~/.local/bin` and adds it to your `PATH` (pass `--no-modify-path` to skip that). No `sudo` or Rust toolchain needed. Releases are signed with the [Declass release key](docs/declass-release.pub). This one-line installer checks checksums, which catch corrupted downloads; to also check the signature, add the key to your allowed signers first ([how](docs/INSTALLATION.md#signed-releases)). For disk images, building from source or verifying signatures, see the [installation guide](docs/INSTALLATION.md).
 
+## See what your agent can read
+
+Before you configure anything, run this in a repository you work on:
+
+```sh
+declass exposure
+```
+
+```text
+Exposure · 6 files read on this machine · nothing was sent
+
+Without a privacy boundary, a coding agent could send 4 secrets, 301 email addresses, 240 phone numbers, 60 IP addresses in 5 files to a cloud model.
+With Declass in hybrid mode: 3 read only by your local model, 2 with values replaced by placeholders.
+
+  data/customers.csv
+    found:   240 email addresses, 240 phone numbers
+    declass: read by your local model, not sent to the cloud model (sensitivity.globs: data/**)
+  .env
+    found:   3 secrets
+    declass: read by your local model, not sent to the cloud model (sensitivity.globs: .env*)
+  src/payments.py
+    found:   1 secret
+    declass: values replaced with placeholders before any request (runtime content checks apply)
+  ...
+```
+
+It reads your files on your machine with Declass's pattern detectors for secrets and personal data, shows counts and never values, and says what Declass would do with each file. It needs no API key or model and sends nothing. It doesn't run Declass's local-model checks, and pattern detectors only find known formats, so a clean report doesn't prove a repository holds nothing private. (Output above is from a small fictional project.)
+
 ## Quick start
 
 Open a new terminal in your project and run:
@@ -121,6 +149,7 @@ declass --check 'cargo test' "fix it"   # finish only when the check passes
 declass --mode local-only               # use only your local model
 declass --resume                        # continue the last session
 declass run "fix the export"            # run once without a conversation
+declass exposure                        # show what an agent could send from this repo (offline)
 declass privacy                         # show what's sensitive and where requests go
 declass audit show <run>                # show everything a run sent to the cloud
 declass doctor                          # check your setup
@@ -144,6 +173,14 @@ Every session also has a cap on frontier requests, and F2 opens the settings. De
 Cloud: Anthropic, OpenAI, Google Gemini, OpenRouter, z.ai, DeepSeek, xAI, Mistral, Groq, Cerebras, Together, Fireworks and Qwen, or any OpenAI-compatible endpoint. With a ChatGPT Plus or Pro plan you can skip the API key: `declass login chatgpt` ([details](docs/USAGE.md#chatgpt-plan)).
 
 Local: Ollama, LM Studio, llama.cpp, vLLM, oMLX, MLX, Jan, GPT4All, KoboldCpp, LocalAI and LiteLLM. The local model needs a context window of about 40K tokens. In hybrid mode it only reads and answers questions, so it doesn't need to be good at coding.
+
+## Why not…
+
+**…a redaction proxy in front of another agent?** A proxy sees a file after the cloud agent has already decided to read it, and has to catch every private value in it. In Declass the cloud model doesn't get files classified as sensitive: the local model reads them and answers questions about them. The outbound check is a second layer, not the only one. Ordinary commands run in a sandbox that can't read those files, so the agent can't `cat` its way around the boundary; commands that need the data run without network and their output stays local. Answers can still carry meaning, as [the limits](docs/SECURE_BY_DESIGN.md) explain.
+
+**…a fully local agent?** That's `declass --mode local-only`. Local models still trail the best cloud models at writing code. In the benchmark above, hybrid mode scored 89.3% to the unprotected model's 96.5%, and no complete planted value appeared in its recorded requests.
+
+**…just `.gitignore` or an ignore file?** Ignore files decide what gets committed, or what one tool opens. They don't cover a customer CSV the agent needs to understand, a secret hard-coded in source, or what a command prints. `declass exposure` shows how much of that is in your repository.
 
 ## Status
 

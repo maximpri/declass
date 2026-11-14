@@ -59,6 +59,41 @@ Review endpoints with `declass doctor`. See the [security model](../SECURITY.md)
 and [deployment evaluation](SECURE_BY_DESIGN.md#evaluate-your-deployment) for
 endpoint trust and permitted disclosure. Retention and audit commands follow.
 
+## See what an agent could send
+
+```sh
+declass exposure
+declass exposure --all     # list every file with findings, not the first 25
+declass exposure --json
+```
+
+`declass exposure` reads the same files as the privacy preview, on this
+machine, and runs Declass's pattern detectors for secrets and personal data
+(and your `sensitivity.custom_patterns`) over them. For each file with findings
+it reports how many values of each kind it found and what Declass does with the
+file in hybrid mode under the current path rules: read only by the local model,
+placeholders before any request, interface only or sealed. Files that path
+rules cover but where nothing was detected are counted. Detectors turned off in
+your configuration are not run, and the report names them.
+
+It does not run Declass's local-model checks or compare against values a run
+has already seen, so names and paraphrased details are mostly not counted.
+Overlapping matches count as one value, so counts are a lower bound.
+
+It needs no model, API key or setup. It makes no network requests, starts no
+tool server and creates no run, audit or vault. The report holds paths and
+counts; matched values are never displayed or written. Files over 2 MiB,
+binary files (including UTF-16 text), symlinks and special files are counted
+as not read, and the excluded directories (`.git`, `node_modules`, `target`
+and the like) are named.
+
+Detectors recognize known formats. A file with no findings can still hold
+private information, and a count is not a measure of sensitivity.
+
+Exit 0 means nothing was found. Exit 1 means files with findings are listed,
+or the command failed (for example on an invalid configuration) with an error
+message. Exit 2 means the inventory is incomplete, whatever was found.
+
 ## Storage and retention
 
 | Data | Location | Control |
