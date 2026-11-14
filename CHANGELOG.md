@@ -1,10 +1,11 @@
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 # Changelog
 
-## 0.3.0 — not yet released
+## 0.3.0 — 2026-11-14
 
 Try Declass on a repository before setting anything up, pin the extensions it loads, and keep
-credentials from every process it starts. Signed and notarized macOS releases.
+credentials from every process it starts. Release tooling can now sign and notarize macOS builds
+with an Apple Developer ID; the 0.3.0 disk images are not notarized yet.
 
 ### See what an agent could send
 
