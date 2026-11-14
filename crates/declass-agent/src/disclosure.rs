@@ -282,11 +282,18 @@ impl Disclosure {
                     AuditEvent::RunEnd { .. }
                     | AuditEvent::EndpointTrust { .. }
                     | AuditEvent::ConfigChange { .. }
+                    | AuditEvent::ExtensionIntegrity { .. }
+                    | AuditEvent::IntegritySummary { .. }
+                    | AuditEvent::ExtensionPinned { .. }
                     | AuditEvent::WebRequest { .. }
                     | AuditEvent::OperatorMessage { .. }
                     | AuditEvent::GitCommit { .. }
                     | AuditEvent::McpServer { .. }
                     | AuditEvent::McpCall { .. }
+                    | AuditEvent::FileWrite { .. }
+                    | AuditEvent::CommandRun { .. }
+                    | AuditEvent::TriggerWritten { .. }
+                    | AuditEvent::ToolsetChanged { .. }
                     | AuditEvent::LanguageServer { .. }
                     | AuditEvent::SubagentStart { .. }
                     | AuditEvent::SubagentEnd { .. }

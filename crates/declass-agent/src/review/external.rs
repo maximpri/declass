@@ -97,9 +97,8 @@ async fn run(
     materialize(snapshot, &workspace)?;
     declass_fs::private::ensure_private_dir(&scratch)
         .map_err(|_| "cannot prepare scanner scratch")?;
-    let mut deny_read = declass_sandbox::home_secrets(original);
-    deny_read.extend(declass_config::owner_secret_paths());
-    deny_read.push(original.to_path_buf());
+    // The credential stores and Declass's sign-ins are denied by the sandbox
+    // to every process; the original workspace is denied here.
     let spec = declass_sandbox::Spec {
         workspace: workspace.clone(),
         scratch,
@@ -108,7 +107,8 @@ async fn run(
         output_cap: 256 * 1024,
         spill_file: None,
         extra_env: vec![],
-        deny_read,
+        deny_read: vec![original.to_path_buf()],
+        readable_home_secrets: Vec::new(),
         read_only: true,
     };
     let argv: Vec<_> = std::iter::once(scanner.command.to_string_lossy().into_owned())

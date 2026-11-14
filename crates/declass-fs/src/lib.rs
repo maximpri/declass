@@ -10,6 +10,7 @@ pub mod path;
 pub mod pinned;
 pub mod private;
 pub mod registry;
+pub mod triggers;
 
 pub use error::FsError;
 pub use ops::{

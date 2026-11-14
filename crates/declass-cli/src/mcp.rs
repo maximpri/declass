@@ -47,6 +47,15 @@ pub fn server(cfg: &Config, name: &str) -> Result<(ServerConfig, bool)> {
             ),
         }
     }
+    let read_home_secrets = cfg.list(&key("read_home_secrets"))?;
+    if let Some(bad) = read_home_secrets
+        .iter()
+        .find(|e| !declass_sandbox::HOME_SECRETS.contains(&e.as_str()))
+    {
+        bail!(
+            "MCP server `{name}`: read_home_secrets entries name credential stores the sandbox denies (such as \".kube\"), not {bad:?}"
+        );
+    }
     let trust = match cfg.str(&key("trust"))?.as_str() {
         "sensitive" => Trust::Sensitive,
         _ => Trust::Public,
@@ -63,6 +72,7 @@ pub fn server(cfg: &Config, name: &str) -> Result<(ServerConfig, bool)> {
         headers_env,
         trust,
         network: cfg.bool(&key("network"))?,
+        read_home_secrets,
         approve,
         timeout: Duration::from_secs(cfg.int(&key("timeout_seconds"))?.max(1) as u64),
     };
@@ -106,6 +116,7 @@ pub async fn start(
     audit: &declass_boundary::audit::AuditHandle,
     top_clearance: bool,
     plugin_servers: Vec<ServerConfig>,
+    admission: Option<std::sync::Arc<dyn declass_agent::mcp::Admission>>,
 ) -> Result<Option<std::sync::Arc<declass_agent::mcp::Hub>>> {
     let mut servers = for_run(cfg)?;
     for server in plugin_servers {
@@ -145,6 +156,7 @@ pub async fn start(
             sandbox,
             presenter: presenter.unwrap_or(&passthrough),
             audit: Some(audit),
+            admission,
         },
     )
     .await;
@@ -160,6 +172,42 @@ pub async fn start(
     Ok(Some(std::sync::Arc::new(hub)))
 }
 
+/// Starts `servers` as a run would (the sandbox, a run's hidden paths from
+/// an engine over the configured policy; no local model, nothing leaves
+/// this machine), lists their tools, and stops them: `declass doctor` and
+/// `declass extensions`. `admission` sees each launch and listing.
+pub(crate) async fn inspect(
+    cfg: &Config,
+    ws: &std::path::Path,
+    servers: &[ServerConfig],
+    admission: Option<std::sync::Arc<dyn declass_agent::mcp::Admission>>,
+) -> Result<Vec<declass_agent::mcp::ServerReport>, String> {
+    let sandbox = declass_sandbox::detect().map_err(|e| e.to_string())?;
+    let dir = std::env::temp_dir().join(format!("declass-inspect-{}", uuid::Uuid::new_v4()));
+    let engine = crate::policy(cfg)
+        .map_err(|e| e.to_string())
+        .and_then(|p| {
+            std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+            declass_boundary::engine::Engine::open_for_inspection(ws, &dir, p)
+                .map_err(|e| e.to_string())
+        })?;
+    let workspace = ws.canonicalize().unwrap_or_else(|_| ws.to_path_buf());
+    let reports = declass_agent::mcp::probe(
+        servers,
+        &declass_agent::mcp::Setup {
+            workspace: &workspace,
+            run_dir: &dir,
+            sandbox,
+            presenter: engine.as_ref(),
+            audit: None,
+            admission,
+        },
+    )
+    .await;
+    let _ = std::fs::remove_dir_all(&dir);
+    Ok(reports)
+}
+
 /// Whether what is sent to a server could leave this machine: it is reached
 /// over HTTP (a loopback URL too: whatever listens there may forward it), or
 /// its sandbox has network.
@@ -171,5 +219,39 @@ pub fn reaches_network(s: &ServerConfig) -> bool {
 pub async fn stop(run_cfg: &declass_agent::RunConfig) {
     if let Some(hub) = &run_cfg.mcp {
         hub.shutdown().await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn configured_with(server: &str) -> Vec<(String, Result<(ServerConfig, bool)>)> {
+        let dir = tempfile::tempdir().unwrap();
+        let owner = dir.path().join("owner.toml");
+        std::fs::write(&owner, server).unwrap();
+        configured(&Config::load(&owner, None).unwrap())
+    }
+
+    #[test]
+    fn a_server_may_read_only_listed_credential_stores() {
+        let ok = configured_with(
+            "[mcp.servers.k8s]\ncommand = \"kubectl-mcp\"\nread_home_secrets = [\".kube\", \".config/gh\"]\n",
+        );
+        let (server, enabled) = ok[0].1.as_ref().unwrap();
+        assert!(enabled);
+        assert_eq!(server.read_home_secrets, [".kube", ".config/gh"]);
+        // Only entries of the sandbox's list: anything else would read as an
+        // exception that changes nothing (or a path outside the list).
+        for bad in ["\"~/.kube\"", "\"/etc/passwd\"", "\".kube/config\""] {
+            let refused = configured_with(&format!(
+                "[mcp.servers.k8s]\ncommand = \"kubectl-mcp\"\nread_home_secrets = [{bad}]\n"
+            ));
+            let e = refused[0].1.as_ref().unwrap_err().to_string();
+            assert!(e.contains("read_home_secrets"), "{bad}: {e}");
+        }
+        // Not set: none.
+        let none = configured_with("[mcp.servers.files]\ncommand = \"files-mcp\"\n");
+        assert!(none[0].1.as_ref().unwrap().0.read_home_secrets.is_empty());
     }
 }

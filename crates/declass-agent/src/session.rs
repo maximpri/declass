@@ -751,8 +751,10 @@ impl<'a> Session<'a> {
         if end == TurnEnd::Interrupted {
             self.notes.push(interrupted_note());
         }
-        let seconds = started.elapsed().as_secs_f64();
-        self.worked += started.elapsed();
+        // Measured once: the transcript's seconds are what resume adds back.
+        let elapsed = started.elapsed();
+        let seconds = elapsed.as_secs_f64();
+        self.worked += elapsed;
         self.stats.wall_seconds = self.worked.as_secs_f64();
         let steered = self.steering.delivered();
         if let Some(x) = self.history.last_mut() {

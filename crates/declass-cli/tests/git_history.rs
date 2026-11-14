@@ -203,6 +203,7 @@ async fn history_reaches_the_frontier_only_through_the_boundary() {
             approver: Some(approver.clone()),
             git_commit: CommitPolicy::Ask,
             on_injection: Default::default(),
+            triggers: Default::default(),
         },
         git_author: Identity::parse("Olive Operator <olive@example.test>"),
         ..RunConfig::new(ws.clone(), run_dir, "Add a report module.")

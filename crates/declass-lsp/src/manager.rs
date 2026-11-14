@@ -57,6 +57,7 @@ impl Launcher for SandboxLauncher {
                     .filter_map(|k| std::env::var(k).ok().map(|v| (k.clone(), v)))
                     .collect(),
                 deny_read: deny_read.to_vec(),
+                readable_home_secrets: Vec::new(),
                 read_only: false,
             };
             let mut argv = vec![server.program.display().to_string()];

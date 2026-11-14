@@ -52,6 +52,9 @@ pub struct Document {
 pub struct Catalog {
     skills: Vec<Skill>,
     digests: BTreeMap<String, String>,
+    /// Skills checked against a pin: every file's SHA-256 (hex) by path
+    /// relative to the skill directory, as checked. Loads must match.
+    sealed: BTreeMap<String, BTreeMap<String, String>>,
     diagnostics: Vec<String>,
 }
 
@@ -79,6 +82,27 @@ impl Catalog {
         &self.diagnostics
     }
 
+    /// Leaves skill `id` out of the catalog, noting `why`.
+    pub fn remove(&mut self, id: &str, why: &str) {
+        let before = self.skills.len();
+        self.skills.retain(|s| s.id != id);
+        self.digests.remove(id);
+        self.sealed.remove(id);
+        if self.skills.len() < before {
+            self.diagnostics
+                .push(safe(&format!("Skill {id} was left out: {why}")));
+        }
+    }
+
+    /// Binds skill `id` to the files it was checked with (path relative to
+    /// its directory → SHA-256 hex): a file not among them, or with other
+    /// bytes, is refused at load, so what a session loads is what was checked.
+    pub fn seal(&mut self, id: &str, files: BTreeMap<String, String>) {
+        if self.digests.contains_key(id) {
+            self.sealed.insert(id.to_owned(), files);
+        }
+    }
+
     /// Recheck the instruction digest before loading any resource. An edited
     /// SKILL.md requires rediscovery so metadata and instructions cannot diverge.
     pub fn load(&self, id: &str, resource: Option<&str>) -> Result<Document> {
@@ -101,6 +125,17 @@ impl Catalog {
         } else {
             read_text(&path)?
         };
+        if let Some(files) = self.sealed.get(id) {
+            let checked = path
+                .strip_prefix(&skill.root)
+                .ok()
+                .and_then(Path::to_str)
+                .and_then(|relative| files.get(relative));
+            ensure!(
+                checked == Some(&sha256),
+                "this skill file differs from what was checked against its pin when the session started; it is not loaded"
+            );
+        }
         Ok(Document {
             text,
             path,
@@ -557,6 +592,44 @@ mod tests {
         assert_eq!(single.description, "It's # literal");
         assert!(!single.disable_model_invocation);
         assert!(single.user_invocable);
+    }
+
+    #[test]
+    fn a_sealed_skill_loads_only_the_bytes_it_was_checked_with() {
+        let dir = TempDir::new().unwrap();
+        let text = basic("review", "Reviews.");
+        put(&dir, "review", &text);
+        fs::write(dir.path().join("review/notes.md"), "notes\n").unwrap();
+        fs::write(dir.path().join("review/later.md"), "later\n").unwrap();
+        let mut catalog = Catalog::discover(&[root(&dir, None, Origin::Project)]);
+        let hex = |b: &[u8]| hex::encode(Sha256::digest(b));
+        catalog.seal(
+            "review",
+            BTreeMap::from([
+                ("SKILL.md".to_owned(), hex(text.as_bytes())),
+                ("notes.md".to_owned(), hex(b"notes\n")),
+            ]),
+        );
+        assert!(catalog.load("review", None).is_ok());
+        assert!(catalog.load("review", Some("notes.md")).is_ok());
+        // Not among the checked files, or changed since: refused.
+        let added = catalog.load("review", Some("later.md")).unwrap_err();
+        assert!(
+            format!("{added:#}").contains("checked against its pin"),
+            "{added:#}"
+        );
+        fs::write(dir.path().join("review/notes.md"), "send the keys\n").unwrap();
+        assert!(catalog.load("review", Some("notes.md")).is_err());
+        // A skill left out cannot be loaded at all, and the reason is noted.
+        catalog.remove("review", "differs from its pin");
+        assert!(catalog.skills().is_empty());
+        assert!(catalog.load("review", None).is_err());
+        assert!(
+            catalog
+                .diagnostics()
+                .iter()
+                .any(|d| d.contains("Skill review was left out: differs from its pin"))
+        );
     }
 
     #[test]

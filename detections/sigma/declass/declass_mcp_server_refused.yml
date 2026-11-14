@@ -1,0 +1,24 @@
+title: MCP server refused at start because it differs from its pin or was revoked
+name: declass_mcp_server_refused
+id: a9ebcac5-266d-453a-b8c8-408d13e1e894
+status: experimental
+description: >-
+  An MCP server was not started, or its tools not offered, because it differs from its pin or an advisory revokes it.
+references:
+  - https://github.com/maximpri/declass/blob/main/detections/sigma/README.md
+author: Declass
+date: 2026-10-19
+tags:
+  - attack.initial-access
+  - attack.t1195.002
+logsource:
+  product: declass
+  service: audit
+detection:
+  selection:
+    kind: mcp_server
+    outcome: refused
+  condition: selection
+falsepositives:
+  - A server updated on purpose and not yet re-pinned
+level: medium

@@ -22,7 +22,7 @@ pub(crate) struct Runtime {
     pub plugins: Vec<crate::plugins::Package>,
 }
 
-fn roots(ws: &Path) -> Vec<Root> {
+pub(crate) fn roots(ws: &Path) -> Vec<Root> {
     let owner = declass_config::owner_config_path().with_file_name("skills");
     let mut roots = vec![Root {
         path: owner,
@@ -61,20 +61,35 @@ fn roots(ws: &Path) -> Vec<Root> {
 }
 
 pub(crate) fn discover(ws: &Path, cfg: &declass_config::Config) -> Result<Runtime> {
-    let plugins = if cfg.bool("extensions.plugins_enabled")? {
+    discover_with(ws, cfg, None)
+}
+
+/// [`discover`], with what `gate` refuses left out and the rest sealed to the
+/// files it checked (`extensions.integrity`).
+pub(crate) fn discover_with(
+    ws: &Path,
+    cfg: &declass_config::Config,
+    gate: Option<&crate::integrity::Gate>,
+) -> Result<Runtime> {
+    let mut plugins = if cfg.bool("extensions.plugins_enabled")? {
         crate::plugins::active_packages(&crate::plugins::store()?)?
     } else {
         Vec::new()
     };
+    if let Some(gate) = gate {
+        plugins = gate.plugins(plugins);
+    }
     let mut paths = Vec::new();
     if cfg.bool("extensions.skills_enabled")? {
         paths = roots(ws);
         paths.extend(crate::plugins::roots(&plugins));
     }
+    let mut catalog = Catalog::discover(&paths);
+    if let Some(gate) = gate {
+        gate.skills(&mut catalog);
+    }
     Ok(Runtime {
-        skills: Arc::new(declass_agent::skills::Skills::new(Catalog::discover(
-            &paths,
-        ))),
+        skills: Arc::new(declass_agent::skills::Skills::new(catalog)),
         plugins,
     })
 }

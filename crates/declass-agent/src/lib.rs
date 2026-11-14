@@ -34,6 +34,9 @@ pub mod tools;
 pub mod transcript;
 pub mod web;
 
+#[cfg(test)]
+mod containment_tests;
+
 pub use compaction::Compaction;
 pub use embed::{EndHook, EndReport, Ending, Hooks, RunKind};
 pub use oversight::{ApproveMode, Approver, Oversight};

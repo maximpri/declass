@@ -1,0 +1,23 @@
+title: Repeated refused sends to third parties in one run
+id: 83886b0a-a4c0-4ecd-8edf-6d9bb8e2159d
+status: experimental
+description: >-
+  Five or more outbound requests refused within ten minutes of one run: the agent keeps trying to
+  send sensitive data out, possibly steered by injected instructions.
+references:
+  - https://github.com/maximpri/declass/blob/main/detections/sigma/README.md
+author: Declass
+date: 2026-10-19
+correlation:
+  type: event_count
+  rules:
+    - declass_outbound_refused
+  generate: true
+  group-by:
+    - run
+  timespan: 10m
+  condition:
+    gte: 5
+falsepositives:
+  - A task that repeatedly retries a request holding a withheld value
+level: high

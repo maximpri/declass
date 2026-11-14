@@ -15,7 +15,7 @@
 //! environment is used, bodies are size-capped and error bodies cut short.
 
 use crate::sse::Events;
-use crate::{MAX_MESSAGE_BYTES, McpError, answers, reply_to};
+use crate::{MAX_MESSAGE_BYTES, McpError, announces_tools_changed, answers, reply_to};
 use declass_boundary::third_party::{Guard, Method, Outgoing};
 use declass_net::{Client, Credentials, Options};
 use serde_json::Value;
@@ -31,6 +31,8 @@ pub struct Http {
     guard: Guard,
     pub(crate) session: Option<String>,
     pub(crate) version: Option<String>,
+    /// The server sent `notifications/tools/list_changed`.
+    pub(crate) tools_changed: bool,
 }
 
 fn is_loopback(host: &str) -> bool {
@@ -124,6 +126,7 @@ impl Http {
             guard,
             session: None,
             version: None,
+            tools_changed: false,
         })
     }
 
@@ -205,6 +208,8 @@ impl Http {
         for m in messages {
             if answers(&m, id) {
                 found = Some(m);
+            } else if announces_tools_changed(&m) {
+                self.tools_changed = true;
             } else if let Some(reply) = reply_to(&m) {
                 self.notify(&reply).await?;
             }

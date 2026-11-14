@@ -132,6 +132,42 @@ pub const REGISTRY: &[Setting] = &[
         "Load owner-installed plugin packages. Repositories may disable them; they cannot install or enable packages."
     ),
     s!(
+        "extensions.integrity",
+        Choice(&["off", "warn", "enforce"]),
+        r#""warn""#,
+        Project,
+        OnlyLaterChoice,
+        true,
+        "What a run or session does about a skill or plugin that differs from its pin (`declass extensions`): `off` checks nothing, `warn` loads it and says so, `enforce` leaves it out (and an unusable lock file stops the run). A repository may only raise it."
+    ),
+    s!(
+        "extensions.integrity_first_use",
+        Bool,
+        "true",
+        Project,
+        OnlyFalse,
+        true,
+        "Pin your own skills and installed plugins in your lock the first time a run loads them, so a later change is noticed. Off: one that is not pinned counts as changed. A repository may only turn it off."
+    ),
+    s!(
+        "extensions.advisory_urls",
+        List,
+        "[]",
+        Owner,
+        Any,
+        true,
+        "Advisory feeds about extensions in the OSV format (https, or http to a loopback address), fetched by `declass extensions advisories update`, never during a run. A revoked or malicious extension is left out in every mode."
+    ),
+    s!(
+        "extensions.advisory_max_age_days",
+        Int { min: 1, max: 365 },
+        "30",
+        Project,
+        OnlyLower,
+        false,
+        "After how many days without `declass extensions advisories update` the feeds count as out of date (`declass extensions verify` and `declass doctor` say so)."
+    ),
+    s!(
         "frontier.base_url",
         Str,
         r#""""#,
@@ -1141,6 +1177,24 @@ pub const REGISTRY: &[Setting] = &[
         "After the injection screen finds prompt injection in what the frontier read: `notice` only marks it; `approve` also asks the operator before sensitive_data commands, edit_protected, git commits, writes outside sources and web or network MCP calls for the rest of the run (refused where no one can answer)."
     ),
     s!(
+        "oversight.autorun_triggers",
+        Choice(&["note", "ask"]),
+        r#""ask""#,
+        Project,
+        OnlyLaterChoice,
+        true,
+        "Writes to files another tool runs without a further step (an editor's tasks, a direnv `.envrc`, a dev container, another coding agent's settings, MCP servers, skills or instructions): `ask` waits for the operator in any approval mode (refused where no one can answer); `note` writes and records them. A repository may only raise it."
+    ),
+    s!(
+        "oversight.build_triggers",
+        Choice(&["note", "ask"]),
+        r#""note""#,
+        Project,
+        OnlyLaterChoice,
+        true,
+        "Writes to files run when you build, test or commit (git and commit hooks, CI workflows, package scripts, Makefiles, build scripts, pytest's conftest.py): `note` writes and records them; `ask` waits for the operator. A repository may only raise it."
+    ),
+    s!(
         "git.commit",
         Choice(&["allow", "ask", "off"]),
         r#""ask""#,
@@ -1222,6 +1276,15 @@ pub const REGISTRY: &[Setting] = &[
         Any,
         true,
         "Network access for a stdio server's sandbox."
+    ),
+    s!(
+        "mcp.servers.*.read_home_secrets",
+        List,
+        "[]",
+        Owner,
+        Any,
+        true,
+        "Credential stores in the home directory a stdio server may read, as entries of the sandbox's list (such as `.kube`, `.aws`, `.config/gh` or `.npmrc`). Every other one is denied to the server, as to every command."
     ),
     s!(
         "mcp.servers.*.approve",

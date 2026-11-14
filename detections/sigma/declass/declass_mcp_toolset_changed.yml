@@ -1,0 +1,23 @@
+title: MCP server changed its tool definitions during a run
+name: declass_mcp_toolset_changed
+id: 1d966902-a886-4bb2-b36d-30cc815b845c
+status: experimental
+description: >-
+  An MCP server listed tools during a run that differ from those offered at its start (descriptions, schemas, new or removed tools), as the Deadbugz campaign did after a few calls.
+references:
+  - https://github.com/maximpri/declass/blob/main/detections/sigma/README.md
+author: Declass
+date: 2026-10-19
+tags:
+  - attack.initial-access
+  - attack.t1195.002
+logsource:
+  product: declass
+  service: audit
+detection:
+  selection:
+    kind: toolset_changed
+  condition: selection
+falsepositives:
+  - Servers that legitimately add tools during a session
+level: high

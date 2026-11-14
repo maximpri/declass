@@ -1,0 +1,31 @@
+[package]
+name = "declass-integrity"
+description = "Lock files, content digests and tool-definition fingerprints for extensions"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+serde.workspace = true
+# Correctly rounded float parsing, so canonical JSON (and tool digests)
+# agree with other RFC 8785 implementations.
+serde_json = { workspace = true, features = ["float_roundtrip"] }
+toml.workspace = true
+thiserror.workspace = true
+sha2.workspace = true
+hex.workspace = true
+rustix.workspace = true
+ryu.workspace = true
+semver.workspace = true
+ring.workspace = true
+base64.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

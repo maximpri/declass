@@ -4,14 +4,14 @@
 //! mode. Nothing here contacts a model server.
 #![cfg(any(target_os = "macos", target_os = "linux"))]
 
-use declass_agent::mcp::{Hub, Setup};
+use declass_agent::mcp::{Admission, Hub, Listing, Setup};
 use declass_agent::oversight::{Action, decide};
 use declass_agent::{ApproveMode, Approver, Oversight};
 use declass_boundary::audit::{AuditEvent, AuditHandle, AuditLog, Line, read};
 use declass_boundary::engine::Engine;
 use declass_boundary::policy::Policy;
 use declass_boundary::view::{PassThrough, Presenter, Source};
-use declass_mcp::mock::{Answer, HttpMock, Mock, SH_SERVER};
+use declass_mcp::mock::{Answer, HttpMock, Mock, SH_SERVER, SH_SWAP_SERVER};
 use declass_mcp::{Approve, Launch, ServerConfig, Trust};
 use serde_json::{Map, Value, json};
 use std::path::{Path, PathBuf};
@@ -88,6 +88,7 @@ fn server(name: &str, launch: Launch, trust: Trust) -> ServerConfig {
         headers_env: vec![],
         trust,
         network: false,
+        read_home_secrets: vec![],
         approve: Approve::Writes,
         timeout: Duration::from_secs(2),
     }
@@ -118,6 +119,7 @@ async fn start(f: &Fixture, servers: &[ServerConfig], presenter: &dyn Presenter)
             sandbox: declass_sandbox::detect().unwrap(),
             presenter,
             audit: Some(&f.audit),
+            admission: None,
         },
     )
     .await
@@ -414,6 +416,263 @@ async fn a_stdio_server_gets_the_commands_hidden_paths_and_named_variables_only(
     hub.shutdown().await;
 }
 
+/// Refuses servers at launch or by their listed tools, and keeps what it
+/// was shown.
+#[derive(Default)]
+struct Pins {
+    refuse_launch: bool,
+    seen: Mutex<Vec<Value>>,
+    /// Why each re-listing happened.
+    triggers: Mutex<Vec<String>>,
+}
+
+impl Admission for Pins {
+    fn launch(&self, _cfg: &ServerConfig, argv: Vec<String>) -> Result<Vec<String>, String> {
+        if self.refuse_launch {
+            Err("its program differs from its pin".into())
+        } else {
+            Ok(argv)
+        }
+    }
+
+    fn tools(&self, _cfg: &ServerConfig, listing: &Listing<'_>) -> Result<(), String> {
+        let raw: Vec<Value> = listing.tools.iter().map(|t| t.raw.clone()).collect();
+        self.seen.lock().unwrap().extend(raw.iter().cloned());
+        if raw.iter().any(|t| t.to_string().contains(".ssh")) {
+            Err("its tool definitions differ from its pin".into())
+        } else {
+            Ok(())
+        }
+    }
+
+    fn relisted(&self, _cfg: &ServerConfig, listing: &Listing<'_>, trigger: &str) -> bool {
+        self.triggers.lock().unwrap().push(trigger.to_owned());
+        !listing
+            .tools
+            .iter()
+            .any(|t| t.raw.to_string().contains(".ssh"))
+    }
+}
+
+async fn start_with(
+    f: &Fixture,
+    servers: &[ServerConfig],
+    presenter: &dyn Presenter,
+    admission: Arc<dyn Admission>,
+) -> Hub {
+    Hub::start(
+        servers,
+        &Setup {
+            workspace: &f.ws,
+            run_dir: &f.run,
+            sandbox: declass_sandbox::detect().unwrap(),
+            presenter,
+            audit: Some(&f.audit),
+            admission: Some(admission),
+        },
+    )
+    .await
+}
+
+fn swap(name: &str) -> ServerConfig {
+    server(
+        name,
+        Launch::Command {
+            command: "/bin/sh".into(),
+            args: vec!["-c".into(), SH_SWAP_SERVER.into(), "sh".into()],
+        },
+        Trust::Public,
+    )
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refused_server_never_runs_and_refused_tools_are_never_offered() {
+    let f = fixture();
+    let p = PassThrough { max_bytes: 60_000 };
+    // Refused at launch: the program never starts.
+    let marked = server(
+        "marked",
+        Launch::Command {
+            command: "/bin/sh".into(),
+            args: vec![
+                "-c".into(),
+                format!("touch started.txt; {SH_SERVER}"),
+                "sh".into(),
+            ],
+        },
+        Trust::Public,
+    );
+    let refuse = Arc::new(Pins {
+        refuse_launch: true,
+        ..Pins::default()
+    });
+    let hub = start_with(&f, &[marked], &p, refuse).await;
+    assert!(
+        matches!(&hub.reports()[0].result, Err(e) if e.starts_with("refused: its program")),
+        "{:?}",
+        hub.reports()
+    );
+    assert!(hub.specs().is_empty());
+    assert!(
+        !f.ws.join("started.txt").exists(),
+        "the refused program ran"
+    );
+
+    // Listed tools differ from the pin (a definition swapped after three
+    // calls in an earlier session): nothing is offered, the process stops.
+    std::fs::write(f.ws.join(".mcp-calls"), "3\n").unwrap();
+    let pins = Arc::new(Pins::default());
+    let hub = start_with(&f, &[swap("swap")], &p, pins.clone()).await;
+    assert!(
+        matches!(&hub.reports()[0].result, Err(e) if e.starts_with("refused: its tool definitions")),
+        "{:?}",
+        hub.reports()
+    );
+    assert!(hub.specs().is_empty());
+    // The admission saw each tool exactly as listed, annotations included.
+    let seen = pins.seen.lock().unwrap().clone();
+    assert_eq!(seen[0]["annotations"]["readOnlyHint"], true, "{seen:?}");
+
+    // Before the swap the same server is admitted.
+    std::fs::remove_file(f.ws.join(".mcp-calls")).unwrap();
+    let hub = start_with(&f, &[swap("swap")], &p, Arc::new(Pins::default())).await;
+    assert_eq!(hub.reports()[0].result, Ok(2), "{:?}", hub.reports());
+    hub.shutdown().await;
+
+    let outcomes: Vec<String> = events(&f.log)
+        .into_iter()
+        .filter_map(|e| match e {
+            AuditEvent::McpServer { outcome, .. } => Some(outcome),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(outcomes, ["refused", "refused", "started"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_server_that_rewrites_its_tools_during_the_run_is_withheld() {
+    for (notify, trigger) in [(false, "periodic"), (true, "list_changed")] {
+        let f = fixture();
+        let p = PassThrough { max_bytes: 60_000 };
+        let mut cfg = swap("swap");
+        if notify {
+            let Launch::Command { args, .. } = &mut cfg.launch else {
+                unreachable!()
+            };
+            args.push("notify".into());
+        }
+        let pins = Arc::new(Pins::default());
+        let hub = start_with(&f, &[cfg], &p, pins.clone()).await;
+        assert_eq!(hub.reports()[0].result, Ok(2), "{:?}", hub.reports());
+        let read = || call(&hub, &p, &f, "mcp__swap__cat", json!({"path": "README.md"}));
+        // Three calls: the server's line is crossed on the third.
+        for n in 1..=3 {
+            assert!(read().await.unwrap().contains(&format!("call {n}")));
+        }
+        // The fourth is checked (the server's notice, or the periodic
+        // check) and withheld, its answer too; so is every later call.
+        let fourth = read().await.unwrap_err();
+        assert!(fourth.contains("changed its tool definitions"), "{fourth}");
+        let fifth = read().await.unwrap_err();
+        assert!(fifth.contains("withheld"), "{fifth}");
+        assert_eq!(
+            std::fs::read_to_string(f.ws.join(".mcp-calls"))
+                .unwrap()
+                .trim(),
+            "4",
+            "a withheld server is not called again"
+        );
+        let triggers = pins.triggers.lock().unwrap().clone();
+        assert_eq!(
+            triggers.last().map(String::as_str),
+            Some(trigger),
+            "{triggers:?}"
+        );
+        // The periodic checks before it: after the first and second calls.
+        assert_eq!(triggers.len(), 3, "{triggers:?}");
+        assert_eq!(&outcomes(&f.log)[3..], ["cat:withheld", "cat:withheld"]);
+        hub.shutdown().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_server_whose_session_was_established_again_is_checked_again() {
+    let f = fixture();
+    let p = PassThrough { max_bytes: 60_000 };
+    let mock = Mock::default();
+    let http = HttpMock::start(mock.clone(), Answer::EventStream).await;
+    let pins = Arc::new(Pins::default());
+    let hub = start_with(
+        &f,
+        &[server(
+            "remote",
+            Launch::Url(http.url.clone()),
+            Trust::Public,
+        )],
+        &p,
+        pins.clone(),
+    )
+    .await;
+    assert!(hub.reports()[0].result.is_ok(), "{:?}", hub.reports());
+    let tool = hub
+        .specs()
+        .into_iter()
+        .map(|s| s.name)
+        .find(|n| n.starts_with("mcp__remote__"))
+        .unwrap();
+    // Calls 1 and 2 are checked periodically; call 3 is not, unless the
+    // server's session expired and was established again in between.
+    for _ in 0..2 {
+        let _ = call(&hub, &p, &f, &tool, json!({})).await;
+    }
+    *http.expire_next.lock().unwrap() = true;
+    let _ = call(&hub, &p, &f, &tool, json!({})).await;
+    let triggers = pins.triggers.lock().unwrap().clone();
+    assert_eq!(triggers, ["periodic", "periodic", "reinitialized"]);
+    hub.shutdown().await;
+}
+
+static SIGN_INS: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+fn sign_ins() -> Vec<PathBuf> {
+    SIGN_INS.get().cloned().into_iter().collect()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stdio_server_is_denied_what_every_process_is_denied() {
+    let f = fixture();
+    let p = PassThrough { max_bytes: 60_000 };
+    // As Declass registers its own sign-ins: the server's spec does not list
+    // them, the sandbox adds them.
+    let token = f.ws.join("credentials/token");
+    std::fs::create_dir_all(token.parent().unwrap()).unwrap();
+    std::fs::write(&token, format!("{GIT_TOKEN}\n")).unwrap();
+    SIGN_INS.set(token.parent().unwrap().to_path_buf()).unwrap();
+    declass_sandbox::deny_to_every_process(sign_ins);
+    let hub = start(&f, &[sh("files", Trust::Public, "Keeps a note.")], &p).await;
+    let read = call(
+        &hub,
+        &p,
+        &f,
+        "mcp__files__cat",
+        json!({"path": "credentials/token"}),
+    )
+    .await
+    .unwrap();
+    assert!(read.contains("denied:") && !read.contains("ghp_"), "{read}");
+    let readme = call(
+        &hub,
+        &p,
+        &f,
+        "mcp__files__cat",
+        json!({"path": "README.md"}),
+    )
+    .await
+    .unwrap();
+    assert!(readme.contains("readable: public readme"), "{readme}");
+    hub.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_server_that_stops_or_never_starts_costs_its_calls_not_the_run() {
     let f = fixture();
@@ -593,6 +852,7 @@ async fn live_reference_server_through_npx() {
             sandbox: declass_sandbox::detect().unwrap(),
             presenter: p,
             audit: Some(&f.audit),
+            admission: None,
         },
     )
     .await;

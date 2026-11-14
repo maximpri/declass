@@ -519,8 +519,10 @@ dependencies = [
  "declass-extensions",
  "declass-fs",
  "declass-git",
+ "declass-integrity",
  "declass-lsp",
  "declass-mcp",
+ "declass-net",
  "declass-provider",
  "declass-sandbox",
  "declass-tui",
@@ -636,6 +638,24 @@ dependencies = [
  "serde",
  "sysinfo",
  "tempfile",
+]
+
+[[package]]
+name = "declass-integrity"
+version = "0.2.0"
+dependencies = [
+ "base64",
+ "hex",
+ "ring",
+ "rustix 0.38.44",
+ "ryu",
+ "semver",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
+ "toml",
 ]
 
 [[package]]

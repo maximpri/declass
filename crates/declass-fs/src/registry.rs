@@ -55,6 +55,18 @@ pub const ENTRIES: &[Entry] = &[
         purpose: "project settings (tighten-only)",
     },
     Entry {
+        path: ".declass/advisories",
+        lifetime: Lifetime::Preserved,
+        sensitive: false,
+        purpose: "the project's own advisories about extensions (OSV format)",
+    },
+    Entry {
+        path: ".declass/extensions.lock",
+        lifetime: Lifetime::Preserved,
+        sensitive: false,
+        purpose: "project extension pins (tighten-only; meant to be committed)",
+    },
+    Entry {
         path: ".declass/git",
         lifetime: Lifetime::Preserved,
         sensitive: true,

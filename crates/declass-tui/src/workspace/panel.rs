@@ -318,6 +318,9 @@ impl Panel {
                 Style::new()
             };
             spans.push(Span::styled(crate::term::safe(&file.path), name_style));
+            if declass_fs::triggers::classify(std::path::Path::new(&file.path)).is_some() {
+                spans.push(Span::styled("  runs later", Style::new().fg(WARN)));
+            }
             if file.held.is_some() {
                 spans.push(Span::styled("  held locally", Style::new().fg(HELD)));
             } else {
@@ -352,6 +355,12 @@ impl Panel {
                     palette::muted(),
                 ));
             } else {
+                if let Some(t) = declass_fs::triggers::classify(std::path::Path::new(&file.path)) {
+                    lines.push(Line::styled(
+                        format!("runs later: {}; review it before that tool runs.", t.runner),
+                        Style::new().fg(WARN),
+                    ));
+                }
                 let numbers = file
                     .rows
                     .iter()

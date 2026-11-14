@@ -28,5 +28,13 @@ name = "declass-sandbox-bridge"
 path = "src/bin/declass-sandbox-bridge.rs"
 test = false
 
+# Tries to get out of its sandbox, for the containment tests
+# (tests/containment.rs). Never part of a release: tools/release.sh builds
+# only `declass`.
+[[bin]]
+name = "declass-probe"
+path = "tests/probe/declass-probe.rs"
+test = false
+
 [dev-dependencies]
 tempfile = "3"

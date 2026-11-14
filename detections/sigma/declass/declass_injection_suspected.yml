@@ -1,0 +1,22 @@
+title: Coding agent read suspected prompt injection
+name: declass_injection_suspected
+id: 10cd4e33-5274-4f2a-bd09-c31efe901e22
+status: experimental
+description: >-
+  Declass's local model judged that content the agent read (a file, a web page, command output, an MCP result) addresses an AI agent with instructions.
+references:
+  - https://github.com/maximpri/declass/blob/main/detections/sigma/README.md
+author: Declass
+date: 2026-10-19
+tags:
+  - attack.initial-access
+logsource:
+  product: declass
+  service: audit
+detection:
+  selection:
+    kind: injection_suspected
+  condition: selection
+falsepositives:
+  - Documentation or tests about prompt injection
+level: low

@@ -79,7 +79,8 @@ pub async fn edit_protected(
         if let (Some((path, content)), false) = (tests, tests_written) {
             let test_rel = declass_fs::writable_relative(path).map_err(fs_err)?;
             let content = ctx.presenter.resolve_for_write(&test_rel, content)?;
-            ctx.journal
+            let receipt = ctx
+                .journal
                 .write(
                     ctx.workspace,
                     &test_rel,
@@ -87,12 +88,15 @@ pub async fn edit_protected(
                     &Precondition::Any,
                 )
                 .map_err(fs_err)?;
+            crate::tools::record_write(ctx, "edit_protected", &test_rel, &receipt);
             tests_written = true;
         }
         let pre = Precondition::Sha256(declass_fs::sha256_hex(&bytes));
-        ctx.journal
+        let receipt = ctx
+            .journal
             .write(ctx.workspace, &rel, done.content.as_bytes(), &pre)
             .map_err(fs_err)?;
+        crate::tools::record_write(ctx, "edit_protected", &rel, &receipt);
         let (failed, report) = run_checks(ctx, &commands).await;
         let shown = ctx.presenter.present(&Source::Checks, &report);
         let verdict = if failed { "FAILED" } else { "passed" };

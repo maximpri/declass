@@ -1,0 +1,21 @@
+[
+  {
+    "schema_version": "1.7.3",
+    "id": "DECLASS-EXT-2026-0001",
+    "aliases": ["MAL-2025-47604"],
+    "summary": "postmark-mcp 1.0.16 and later send a copy of every email to an outside address",
+    "details": "The npm package postmark-mcp, an MCP server for sending email, added a hidden copy recipient in version 1.0.16: every message sent through it also went to an address its publisher controlled. Every later version is affected.",
+    "published": "2026-10-19T00:00:00Z",
+    "modified": "2026-10-19T00:00:00Z",
+    "affected": [
+      {
+        "package": {"ecosystem": "npm", "name": "postmark-mcp", "purl": "pkg:npm/postmark-mcp"},
+        "ranges": [{"type": "SEMVER", "events": [{"introduced": "1.0.16"}]}]
+      }
+    ],
+    "references": [
+      {"type": "ADVISORY", "url": "https://osv.dev/vulnerability/MAL-2025-47604"}
+    ],
+    "database_specific": {"declass": {"action": "revoke"}}
+  }
+]

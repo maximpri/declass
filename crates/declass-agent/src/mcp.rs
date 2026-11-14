@@ -54,6 +54,57 @@ pub struct Setup<'a> {
     pub sandbox: SandboxKind,
     pub presenter: &'a dyn Presenter,
     pub audit: Option<&'a AuditHandle>,
+    /// The host's checks of each server against its pin, if any; kept for
+    /// the run, to check servers that list their tools again.
+    pub admission: Option<Arc<dyn Admission>>,
+}
+
+/// The host's decision about a server: before a stdio server starts, and
+/// once a server has listed its tools (pins of servers and their tool
+/// definitions; see `declass extensions`). A refusal leaves the server out
+/// of the run, like a server that failed to start.
+pub trait Admission: Send + Sync {
+    /// The command line to start a stdio server with (its program may be
+    /// replaced by the path that was checked), or why it may not start.
+    fn launch(&self, cfg: &ServerConfig, argv: Vec<String>) -> Result<Vec<String>, String>;
+    /// Whether the tools a server listed may be offered.
+    fn tools(&self, cfg: &ServerConfig, listing: &Listing<'_>) -> Result<(), String>;
+    /// The tools a server listed again during the run: after it announced a
+    /// change (`trigger` `list_changed`), after its session was established
+    /// again (`reinitialized`), or after its 1st, 2nd, 4th, 8th... call
+    /// (`periodic`). Whether its tools may still be used; the definitions
+    /// offered at the start never change for the run.
+    fn relisted(&self, cfg: &ServerConfig, listing: &Listing<'_>, trigger: &str) -> bool {
+        let _ = (cfg, listing, trigger);
+        true
+    }
+}
+
+/// What a started server said about itself and its tools.
+pub struct Listing<'a> {
+    pub tools: &'a [Tool],
+    pub server_name: &'a str,
+    pub server_version: &'a str,
+    pub protocol_version: &'a str,
+}
+
+/// Why a server is not part of the run.
+enum Start {
+    Failed(String),
+    /// The host's [`Admission`] refused it.
+    Refused(String),
+}
+
+impl From<String> for Start {
+    fn from(why: String) -> Self {
+        Start::Failed(why)
+    }
+}
+
+impl From<&str> for Start {
+    fn from(why: &str) -> Self {
+        Start::Failed(why.to_owned())
+    }
 }
 
 /// How starting one server went.
@@ -75,6 +126,10 @@ struct Server {
     live: tokio::sync::Mutex<Option<Live>>,
     /// The end of a stdio server's error output.
     stderr: Arc<Mutex<Vec<u8>>>,
+    /// Calls made, for the periodic check of its tools.
+    calls: std::sync::atomic::AtomicU32,
+    /// Its tools changed during the run and the host withheld them.
+    withheld: AtomicBool,
 }
 
 struct Entry {
@@ -90,6 +145,7 @@ pub struct Hub {
     servers: Vec<Server>,
     tools: BTreeMap<String, Entry>,
     reports: Vec<ServerReport>,
+    admission: Option<Arc<dyn Admission>>,
 }
 
 fn trust_of(t: Trust) -> ServerTrust {
@@ -258,7 +314,7 @@ async fn connect(
     cfg: &ServerConfig,
     setup: &Setup<'_>,
     stderr: &Arc<Mutex<Vec<u8>>>,
-) -> Result<(Live, Vec<Tool>), String> {
+) -> Result<(Live, Vec<Tool>), Start> {
     let (transport, mut process) = match &cfg.launch {
         Launch::Command { command, args } => {
             let extra_env = cfg
@@ -279,11 +335,15 @@ async fn connect(
                     setup.workspace,
                     setup.run_dir,
                 ),
+                readable_home_secrets: cfg.read_home_secrets.clone(),
                 read_only: false,
             };
-            let argv: Vec<String> = std::iter::once(command.clone())
+            let mut argv: Vec<String> = std::iter::once(command.clone())
                 .chain(args.iter().cloned())
                 .collect();
+            if let Some(admission) = &setup.admission {
+                argv = admission.launch(cfg, argv).map_err(Start::Refused)?;
+            }
             let mut p = declass_sandbox::spawn(setup.sandbox, &spec, &argv, setup.workspace)
                 .await
                 .map_err(|e| e.to_string())?;
@@ -328,7 +388,24 @@ async fn connect(
     }
     .await;
     match started {
-        Ok((client, tools)) => Ok((Live { client, process }, tools)),
+        Ok((client, tools)) => {
+            if let Some(admission) = &setup.admission {
+                let listing = Listing {
+                    tools: &tools,
+                    server_name: &client.server_name,
+                    server_version: &client.server_version,
+                    protocol_version: &client.protocol_version,
+                };
+                if let Err(why) = admission.tools(cfg, &listing) {
+                    client.close().await;
+                    if let Some(p) = &mut process {
+                        p.stop(Duration::ZERO).await;
+                    }
+                    return Err(Start::Refused(why));
+                }
+            }
+            Ok((Live { client, process }, tools))
+        }
         Err(e) => {
             let mut why = e.to_string();
             if let Some(p) = &mut process {
@@ -339,7 +416,7 @@ async fn connect(
                 }
                 p.stop(Duration::ZERO).await;
             }
-            Err(format!("{why}{}", tail(stderr)))
+            Err(Start::Failed(format!("{why}{}", tail(stderr))))
         }
     }
 }
@@ -355,13 +432,18 @@ impl Hub {
                 cfg: cfg.clone(),
                 live: tokio::sync::Mutex::new(None),
                 stderr: Arc::new(Mutex::new(Vec::new())),
+                calls: std::sync::atomic::AtomicU32::new(0),
+                withheld: AtomicBool::new(false),
             })
             .collect();
         let started = futures_util::future::join_all(
             servers.iter().map(|s| connect(&s.cfg, setup, &s.stderr)),
         )
         .await;
-        let mut hub = Hub::default();
+        let mut hub = Hub {
+            admission: setup.admission.clone(),
+            ..Hub::default()
+        };
         let mut taken = BTreeSet::new();
         for (i, (server, outcome)) in servers.iter().zip(started).enumerate() {
             let cfg = &server.cfg;
@@ -387,13 +469,19 @@ impl Hub {
                     *server.live.lock().await = Some(live);
                     Ok(offered)
                 }
-                Err(e) => Err(e),
+                Err(Start::Failed(why)) => Err(why),
+                Err(Start::Refused(why)) => Err(format!("refused: {why}")),
             };
             if let Some(a) = setup.audit {
+                let outcome = match &result {
+                    Ok(_) => "started",
+                    Err(why) if why.starts_with("refused: ") => "refused",
+                    Err(_) => "failed",
+                };
                 a.record(AuditEvent::McpServer {
                     server: cfg.name.clone(),
                     transport: cfg.transport_name().into(),
-                    outcome: if result.is_ok() { "started" } else { "failed" }.into(),
+                    outcome: outcome.into(),
                     tools: *result.as_ref().unwrap_or(&0),
                 });
             }
@@ -537,6 +625,16 @@ impl Hub {
             unreachable!("an object stays an object")
         };
 
+        let withheld = || {
+            format!(
+                "MCP server `{}` changed its tool definitions during this run; its tools are withheld for the rest of it",
+                cfg.name
+            )
+        };
+        if server.withheld.load(std::sync::atomic::Ordering::Relaxed) {
+            record("withheld", resolved);
+            return Err(withheld());
+        }
         let mut live = server.live.lock().await;
         let Some(l) = live.as_mut() else {
             record("server_stopped", resolved);
@@ -560,6 +658,42 @@ impl Hub {
         };
         // Refusals of the transport's check go to the log now.
         drain(presenter, audit);
+        // A server that changes its tools after it was approved (the
+        // Deadbugz campaign) is checked again; one whose tools changed is
+        // withheld, and so is the answer it just gave.
+        if let Some(admission) = &self.admission {
+            let n = server
+                .calls
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                + 1;
+            let signals = l.client.take_signals();
+            let trigger = if signals.tools_changed {
+                Some("list_changed")
+            } else if signals.reinitialized {
+                Some("reinitialized")
+            } else if n.is_power_of_two() {
+                Some("periodic")
+            } else {
+                None
+            };
+            if let Some(trigger) = trigger
+                && let Ok(tools) = l.client.list_tools(cfg.timeout).await
+            {
+                let listing = Listing {
+                    tools: &tools,
+                    server_name: &l.client.server_name,
+                    server_version: &l.client.server_version,
+                    protocol_version: &l.client.protocol_version,
+                };
+                if !admission.relisted(cfg, &listing, trigger) {
+                    server
+                        .withheld
+                        .store(true, std::sync::atomic::Ordering::Relaxed);
+                    record("withheld", resolved);
+                    return Err(withheld());
+                }
+            }
+        }
         match answer {
             Ok(r) if !r.is_error => {
                 record("ok", resolved);

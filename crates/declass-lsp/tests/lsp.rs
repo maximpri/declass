@@ -394,6 +394,58 @@ async fn a_newly_hidden_path_restarts_the_server_without_it() {
     assert_eq!(events, ["started", "refreshed", "started"]);
 }
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+static SIGN_INS: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn sign_ins() -> Vec<PathBuf> {
+    SIGN_INS.get().cloned().into_iter().collect()
+}
+
+/// What every sandboxed process is denied reaches language servers too,
+/// though the caller's hidden paths do not list it.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[tokio::test]
+async fn a_sandboxed_server_is_denied_what_every_process_is_denied() {
+    let (d, ws) = workspace();
+    std::fs::create_dir_all(ws.join("src/sign_ins")).unwrap();
+    std::fs::write(
+        ws.join("src/sign_ins/token.rs"),
+        "fn token_fn() { add_one(5520417); }\n",
+    )
+    .unwrap();
+    SIGN_INS.set(ws.join("src/sign_ins")).unwrap();
+    declass_sandbox::deny_to_every_process(sign_ins);
+    let launcher = SandboxLauncher {
+        kind: declass_sandbox::detect().unwrap(),
+        workspace: ws.clone(),
+        scratch: d.path().join("scratch"),
+    };
+    let mut server = detected("rust", &["rs"]);
+    server.program = PathBuf::from(env!("CARGO_BIN_EXE_declass-lsp-mock"));
+    let lsp = Lsp::new(ws.clone(), vec![server], Box::new(launcher), settings());
+    let hidden = Vec::new;
+    let refs = lsp
+        .request(
+            Path::new("src/main.rs"),
+            MAIN,
+            &hidden,
+            "textDocument/references",
+            &at(Position {
+                line: 1,
+                character: 4,
+            }),
+        )
+        .await
+        .unwrap();
+    let files: Vec<String> = places(&refs, &ws).into_iter().map(|p| p.0).collect();
+    assert!(files.contains(&"src/util.rs".to_owned()), "{files:?}");
+    assert!(
+        !files.iter().any(|f| f.starts_with("src/sign_ins")),
+        "{files:?}"
+    );
+}
+
 /// The mock as a real process in the OS sandbox.
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 #[tokio::test]

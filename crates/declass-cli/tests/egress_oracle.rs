@@ -600,6 +600,7 @@ async fn mcp_arguments_reach_an_http_server_with_no_withheld_value() {
         headers_env: Vec::new(),
         trust: declass_mcp::Trust::Public,
         network: false,
+        read_home_secrets: Vec::new(),
         approve: declass_mcp::Approve::Auto,
         timeout: Duration::from_secs(10),
     };
@@ -611,6 +612,7 @@ async fn mcp_arguments_reach_an_http_server_with_no_withheld_value() {
             sandbox: f.cfg.sandbox,
             presenter: f.engine.as_ref(),
             audit: Some(f.gated.audit()),
+            admission: None,
         },
     )
     .await;

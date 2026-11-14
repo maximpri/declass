@@ -67,6 +67,7 @@ declass-provider    declass-fs    declass-governor    declass-review  (leaf crat
 declass-sandbox                 → declass-governor   (every command's and server's tree held to memory limits)
 declass-git, declass-config        → declass-fs
 declass-extensions              → declass-fs   (bounded portable-skill catalog; no execution or network)
+declass-integrity               (leaf: extension lock files, content and tool-definition digests; no execution or network)
 declass-boundary                → declass-provider, declass-fs, declass-review
 declass-net                     → declass-boundary   (the one HTTP client and resolver for third parties; reqwest)
 declass-mcp                     → declass-boundary, declass-net   (MCP client, JSON-RPC 2.0 over stdio and streamable HTTP)
@@ -74,7 +75,7 @@ declass-web                     → declass-boundary, declass-net, declass-mcp  
 declass-lsp                     → declass-sandbox   (language-server client; tokio, url)
 declass-egress                  → declass-boundary, declass-sandbox, declass-web   (host-side egress proxy for commands; tokio, url)
 declass-agent                   → declass-boundary, declass-review, declass-config, declass-extensions, declass-fs, declass-sandbox, declass-git, declass-web, declass-mcp, declass-lsp, declass-egress   (not declass-provider)
-declass-cli                     → all of the above (composition root)
+declass-cli                     → all of the above (composition root; the only user of declass-integrity)
 
 declass-evals links no declass crate but declass-governor (a leaf that watches process trees and knows
 nothing of the boundary): it drives the declass binary as a black box and has its own
@@ -91,7 +92,7 @@ declass-release (release tooling: the `declass-sbom` SBOM generator) links no de
 | `declass-provider` | Chat Completions (Responses and Anthropic Messages *planned*, M6), streaming assembly (and a read-only tap on it, `live`), retry, credentials, local-endpoint trust, context probes, `Usage`; images (`image`: decode, scale and re-encode PNG/JPEG/GIF/WebP, each dialect's wire form, digest redaction for audit, the vision probe) | Know about tools, policy or the boundary |
 | `declass-fs` | `PinnedParent` handle-relative I/O, atomic durable writes, private (0600) files, workspace lock, `.declass` path registry | Open a workspace path by string after validation |
 | `declass-governor` | Memory limits for a process tree: follows the tree from its root (id plus start time), reads the physical footprint, stops a process above the per-process limit, the largest above the tree limit or under critical machine pressure, and every member left when the watch ends; the configured limits (`set_limits`) | Signal a process outside the tree it watches |
-| `declass-sandbox` | Seatbelt/bwrap profiles (write and deny-read lists), network modes (`Network`: off, the egress proxy's route, all) and the bubblewrap bridge to the proxy (`bridge`), the list of credential stores in the home directory (`HOME_SECRETS`), env allowlist, output cap with spill file, process-tree capture and kill | Decide what a command is allowed to mean (no refusal logic) |
+| `declass-sandbox` | Seatbelt/bwrap profiles (write and deny-read lists; `effective_deny_read` adds the credential stores and the paths registered with `deny_to_every_process` to every process), a test-only escape probe (`declass-probe`, `tests/containment.rs`), network modes (`Network`: off, the egress proxy's route, all) and the bubblewrap bridge to the proxy (`bridge`), the list of credential stores in the home directory (`HOME_SECRETS`), env allowlist, output cap with spill file, process-tree capture and kill | Decide what a command is allowed to mean (no refusal logic) |
 | `declass-egress` | The egress proxy commands reach package registries through: `CONNECT` and plain-HTTP `GET`/`HEAD`, host allowlist (`Hosts`), its own name resolution with the web tools' address classes, the TLS server-name check, each plain request and tunnel host checked by the run's guard, one route per command, one event per connection | Look inside a TLS tunnel, or decide which command gets network |
 | `declass-net` | The product's one HTTP client and resolver for third parties: sends only a `declass_boundary::third_party::Checked` request (no redirects, no proxy from the environment, a checked address pinned), adds owner credentials after the check, resolves only a checked request's host | Build a request itself, or send anything unchecked |
 | `declass-git` | Private checkpoint store; the only function that spawns `git`; plumbing-only commits of given paths (`commit_paths`), operator identity, commit blockers; file listing (git, or outside a repository a walk honouring `.gitignore`, `walk`) | Inherit the user's git config, hooks or fsmonitor |
@@ -100,6 +101,7 @@ declass-release (release tooling: the `declass-sbom` SBOM generator) links no de
 | `declass-lsp` | Language-server client from the LSP 3.17 specification: `Content-Length` framing, requests with timeouts and `$/cancelRequest`, minimal answers to server requests, published diagnostics and work-done progress, per-language servers started lazily in the sandbox (`declass_sandbox::spawn`) and restarted once; built-in server table and `lsp.servers.<language>`; UTF-16 positions; a scripted mock server for tests | Decide what may be sent to a server or shown to the frontier (the caller does) |
 | `declass-config` | Settings registry, file loading, scope and tighten-only rules, the policy layer of an embedding program (`policy`, §13) | Accept owner-only keys from a project file, or any value past a loaded policy |
 | `declass-extensions` | Portable `SKILL.md` catalog, metadata parsing, bounded no-follow resource reads and instruction digests | Execute code, contact a model/server, or grant invocation permissions |
+| `declass-integrity` | The extension lock file (`lock`: ToolHive's entry fields for skills and plugins, Declass's `mcpServers`), ToolHive-compatible content digests (`content`), a bounded no-follow tree and file hash (`tree`), RFC 8785 canonical JSON (`jcs`), tool-definition fingerprints (`toolset`, `declass-tool-v1`), package launchers in a command line and whether their version is pinned (`launcher`), OSV advisories and their matching by package version, content, tool digest and URL (`osv`), OpenSSH `SSHSIG` signatures and `allowed_signers` (`sshsig`, Ed25519 via `ring`), findings as text, JSON and SARIF (`report`) | Start a process, open the network, or decide what to do about a finding (the CLI does) |
 | `declass-boundary` | Classification, transformation, vault, handles, bulky offload, condensed command output (`condense`), structure views and synthetic samples of sensitive data (`structure`), IP levels, local roles, local micro-eval, outbound gate, the third-party check (`third_party`: `Outgoing`, `Checked`, `Guard`), audit | Expose a way to reach the frontier without the gate, or to make a `Checked` request without the check |
 | `declass-agent` | Loop, tools, transcript, context manager (masking, compaction), termination, disclosure ledger, operator approval (`oversight`), disclosure report, sessions (operator turns, steering, undo), sub-agents (`delegate`), the local explorer (`explore`), root/scoped instructions (`instructions`), skill authorization and filtered loading (`skills`), changes outside git (`changes`) | Construct a frontier provider (it receives `GatedFrontier`) or a local one (the explorer receives a `LocalAgent`) |
 | `declass-cli` / `declass-tui` | User interfaces over config, runs and audits; the CLI is the only place providers are built; the operator's terminal (`term`: the chat console, its line editor, Markdown rendering of streamed text, `declass run` progress); `declass-cli` is also a library whose `main_with` is the whole command line for a program that embeds Declass (§13) | Contain policy logic (they edit the registry) |
@@ -562,8 +564,10 @@ Before any of that, `tools::sandboxed` checks the command line of an ordinary or
 command that would have network (`registries` or `all`) with the guard; one holding a placeholder
 or a withheld value runs with network off and a note in its output.
 
-The agent also denies every command `declass_sandbox::home_secrets` (credential stores and shell
-histories under `$HOME`), and gives commands with network package caches in the run's scratch
+The sandbox denies every process it starts the credential stores and shell histories under `$HOME`
+(`HOME_SECRETS`) and the paths the program registers with `deny_to_every_process` (Declass's
+sign-ins), on top of what its caller lists (`effective_deny_read`; an owner may exempt one MCP
+server from named stores). The agent gives commands with network package caches in the run's scratch
 directory (`egress::cache_env`; `CARGO_HOME` seeded with links to the operator's crates). A refused
 request is noted at the end of the command's output (`[sandbox] the egress proxy refused: ...`).
 `run_command`'s description names the run's mode (the tool set stays fixed for the run).
@@ -619,7 +623,14 @@ each enabled server in parallel, a stdio server through `declass_sandbox::spawn`
 `Presenter::hidden_from_commands` as deny-read, writes to the workspace and a per-server scratch
 directory, network per `network`, the base environment plus the variables named in `env`; under
 bubblewrap its input is a named pipe, since bubblewrap's standard input carries the seccomp
-filter), an HTTP server from the host. `initialize`, then `tools/list` once: the tools become
+filter), an HTTP server from the host. A host `Admission` (`Setup.admission`; the CLI's
+`integrity::Gate` under `extensions.integrity`) sees each stdio command line before it runs
+(`launch`: may refuse it, or replace the program with the path it checked) and each listing
+(`tools`: may refuse the server, which then offers nothing; `McpServer` outcome `refused`); the hub
+keeps it for the run and lists a server's tools again after `notifications/tools/list_changed`
+(noted by both transports, `Client::take_signals`), after an HTTP session is re-established, and
+after the 1st, 2nd, 4th, 8th... call (`relisted`: `false` withholds the server's tools, and that
+call's answer, for the rest of the run). `initialize`, then `tools/list` once: the tools become
 `mcp__<server>__<tool>` (`[A-Za-z0-9_-]`, at most 64 characters, a hash suffix when shortened or
 colliding), with descriptions and every schema string passed through `present(Source::Mcp {
 trust: Public })` and capped (1,024 characters; schemas 8 KiB, then without docs, then a bare

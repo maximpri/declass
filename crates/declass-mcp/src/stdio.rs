@@ -5,9 +5,10 @@
 //!
 //! Requests are sent one at a time. While waiting for an answer, messages from
 //! the server are handled in order: requests it makes are answered at once,
-//! notifications and answers to earlier (cancelled) requests are dropped.
+//! a notice that its tools changed is noted, other notifications and answers
+//! to earlier (cancelled) requests are dropped.
 
-use crate::{MAX_MESSAGE_BYTES, McpError, answers, reply_to};
+use crate::{MAX_MESSAGE_BYTES, McpError, announces_tools_changed, answers, reply_to};
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 
@@ -19,6 +20,8 @@ pub struct Stdio {
     partial: Vec<u8>,
     /// Bytes of an oversized line still being skipped.
     skipping: bool,
+    /// The server sent `notifications/tools/list_changed`.
+    pub(crate) tools_changed: bool,
 }
 
 fn closed(e: std::io::Error) -> McpError {
@@ -35,6 +38,7 @@ impl Stdio {
             output: BufReader::new(output),
             partial: Vec::new(),
             skipping: false,
+            tools_changed: false,
         }
     }
 
@@ -105,6 +109,8 @@ impl Stdio {
             for m in messages {
                 if answers(&m, id) {
                     found = Some(m);
+                } else if announces_tools_changed(&m) {
+                    self.tools_changed = true;
                 } else if let Some(reply) = reply_to(&m) {
                     self.send(&reply).await?;
                 }

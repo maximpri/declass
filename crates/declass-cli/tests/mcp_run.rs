@@ -87,6 +87,7 @@ fn server(name: &str, launch: Launch, trust: Trust) -> ServerConfig {
         headers_env: vec![],
         trust,
         network: false,
+        read_home_secrets: vec![],
         approve: Approve::Writes,
         timeout: Duration::from_secs(5),
     }
@@ -178,6 +179,7 @@ async fn mcp_tools_in_a_hybrid_run_leak_nothing_and_writes_need_approval() {
             sandbox,
             presenter: engine.as_ref(),
             audit: Some(gated.audit()),
+            admission: None,
         },
     )
     .await;

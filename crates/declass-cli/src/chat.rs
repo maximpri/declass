@@ -1251,6 +1251,15 @@ Add --no-privacy to confirm, or use --mode hybrid."
             },
         )?;
         drop(lock);
+        for line in crate::triggers::report(&audit_log_path(&ws, &manifest.run_id)) {
+            let line = declass_tui::term::safe(&line);
+            // A closed screen shows nothing more: the terminal does.
+            if switch.is_none() {
+                eprintln!("{line}");
+            } else {
+                screen.line(&line);
+            }
+        }
         let id = &manifest.run_id;
         if matches!(switch, Some(SessionChange::Planning)) {
             runtime_restart = true;

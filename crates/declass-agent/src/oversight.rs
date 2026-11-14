@@ -8,6 +8,11 @@
 //! - writes a file (`edit_file`, `write_file`) that is not an ordinary source
 //!   or test file (see [`is_source_or_test`]).
 //!
+//! Whatever the mode, a write to a file another tool runs later (an editor's
+//! tasks, a directory hook, another coding agent's settings or instructions,
+//! a build or git hook: `declass_fs::triggers`) is asked about when its kind
+//! is set to `ask` (`oversight.autorun_triggers`, `oversight.build_triggers`).
+//!
 //! MCP tools (see `crate::mcp`) follow their server's `approve` setting under
 //! `risky`: with `writes` (the default) a tool the server does not declare
 //! read-only needs approval, with `always` every tool, with `auto` none.
@@ -79,6 +84,8 @@ pub enum Risk {
     McpCall,
     /// A web request after prompt injection was read (`oversight.on_injection`).
     Network,
+    /// A write to a file another tool runs later (`declass_fs::triggers`).
+    ExecutionTrigger,
 }
 
 impl Risk {
@@ -93,6 +100,7 @@ impl Risk {
             Risk::McpWrite => "mcp_write",
             Risk::McpCall => "mcp_call",
             Risk::Network => "network",
+            Risk::ExecutionTrigger => "execution_trigger",
         }
     }
 
@@ -111,6 +119,9 @@ impl Risk {
             Risk::McpWrite => "calls an MCP tool that may change things (not declared read-only)",
             Risk::McpCall => "calls an MCP tool",
             Risk::Network => "sends a request to a third party on the web",
+            Risk::ExecutionTrigger => {
+                "writes a file another tool runs later (an editor, a shell hook, another coding agent, a build or git hook)"
+            }
         }
     }
 }
@@ -157,6 +168,36 @@ impl std::str::FromStr for InjectionPolicy {
     }
 }
 
+/// Whether a write to a kind of file another tool runs later is asked
+/// about (`ask`) or only recorded (`note`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum TriggerPolicy {
+    #[default]
+    Note,
+    Ask,
+}
+
+impl std::str::FromStr for TriggerPolicy {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, String> {
+        match s {
+            "note" => Ok(Self::Note),
+            "ask" => Ok(Self::Ask),
+            other => Err(format!("must be note or ask, not {other}")),
+        }
+    }
+}
+
+/// Writes to files that other tools run later, by when they run.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Triggers {
+    /// Run without a further step: opening the folder, entering the
+    /// directory, another agent's next session (`oversight.autorun_triggers`).
+    pub autorun: TriggerPolicy,
+    /// Run when the operator builds, tests or commits (`oversight.build_triggers`).
+    pub build: TriggerPolicy,
+}
+
 /// The run's approval setting and who is asked.
 #[derive(Clone, Default)]
 pub struct Oversight {
@@ -168,6 +209,8 @@ pub struct Oversight {
     /// `git.commit`: whether each `git_commit` needs approval (`ask`; `all`
     /// asks for every commit whatever this says).
     pub git_commit: crate::git_tools::CommitPolicy,
+    /// Writes to files other tools run later, asked about in any mode.
+    pub triggers: Triggers,
 }
 
 /// Extensions of files that are ordinary program source or tests.
@@ -342,6 +385,31 @@ fn commit_action(oversight: &Oversight, tool: &str, args: &Map<String, Value>) -
     })
 }
 
+/// A write to a file another tool runs later, when its kind is set to `ask`
+/// (under any mode; without an approver it is then denied).
+fn trigger_action(oversight: &Oversight, tool: &str, args: &Map<String, Value>) -> Option<Action> {
+    use declass_fs::triggers::Tier;
+    if !matches!(tool, "edit_file" | "write_file") {
+        return None;
+    }
+    let rel = declass_fs::writable_relative(string_arg(args, "path").ok()?).ok()?;
+    let trigger = declass_fs::triggers::classify(&rel)?;
+    let policy = match trigger.tier {
+        Tier::Autorun => oversight.triggers.autorun,
+        Tier::OnUse => oversight.triggers.build,
+    };
+    (policy == TriggerPolicy::Ask).then(|| Action {
+        tool: tool.to_owned(),
+        risk: Risk::ExecutionTrigger,
+        path: Some(format!("{} (run by {})", rel.display(), trigger.runner)),
+        command: None,
+        bytes: match tool {
+            "write_file" => args.get("content").and_then(Value::as_str).map(str::len),
+            _ => None,
+        },
+    })
+}
+
 /// Asks for approval when `tool` needs it. `Err` holds the tool error for a
 /// denied action; every decision is recorded in `audit`.
 pub fn review(
@@ -358,6 +426,7 @@ pub fn review(
         mode => mode,
     };
     let action = classify(mode, tool, args, presenter)
+        .or_else(|| trigger_action(oversight, tool, args))
         .or_else(|| commit_action(oversight, tool, args))
         .or_else(|| escalated.then(|| injected_action(tool, args)).flatten());
     decide(oversight, action, audit)
@@ -632,11 +701,32 @@ mod tests {
             answers: Mutex::new(vec![true; 8]),
             seen: Mutex::default(),
         });
+        // Writes to files other tools run later: asked in any mode when set to `ask`.
+        let trigger = |o: &Oversight, path: &str| {
+            let args = serde_json::json!({"path": path, "content": "x"});
+            trigger_action(o, "write_file", args.as_object().unwrap()).map(|a| a.risk)
+        };
+        let asking = Oversight {
+            triggers: Triggers {
+                autorun: TriggerPolicy::Ask,
+                build: TriggerPolicy::Note,
+            },
+            ..Oversight::default()
+        };
+        assert_eq!(trigger(&asking, ".envrc"), Some(Risk::ExecutionTrigger));
+        assert_eq!(
+            trigger(&asking, ".claude/settings.json"),
+            Some(Risk::ExecutionTrigger)
+        );
+        assert_eq!(trigger(&asking, "Makefile"), None);
+        assert_eq!(trigger(&asking, "src/lib.rs"), None);
+        assert_eq!(trigger(&Oversight::default(), ".envrc"), None);
         let with = |mode, git_commit, approver: Option<Arc<dyn Approver>>| Oversight {
             mode,
             approver,
             git_commit,
             on_injection: Default::default(),
+            triggers: Default::default(),
         };
         let asks = |o: &Oversight| commit_action(o, "git_commit", &commit).map(|a| a.risk);
         use ApproveMode::*;
