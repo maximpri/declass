@@ -973,9 +973,7 @@ async fn run_command(ctx: &mut Ctx<'_>, args: &Map<String, Value>) -> Result<Str
     }
     // A command that tried to use `.git` is pointed at the git tools, or,
     // outside a repository, told that declass tracks the changes itself.
-    if GIT_WORD.is_match(command)
-        && (o.shows_denial() || String::from_utf8_lossy(&o.stderr).contains("not a git repository"))
-    {
+    if GIT_WORD.is_match(command) && git_could_not_use_repository(&o) {
         shown.push('\n');
         shown.push_str(match ctx.git_tools {
             Some(_) => crate::git_tools::COMMAND_HINT,
@@ -991,6 +989,20 @@ use .git; you do not need one: list_files and search work without it, and diff s
 
 static GIT_WORD: std::sync::LazyLock<Regex> =
     std::sync::LazyLock::new(|| Regex::new(r"(^|[\s;&|(`])git(\s|$)").expect("static regex"));
+
+/// Whether a command's output shows git failing to use the repository: the
+/// sandbox refusing `.git` with the usual error text, no repository at all,
+/// or git dying on a `.git` it cannot stat. Git 2.54 reports that last case
+/// as `fatal: error reading '<workspace>/.git'`, with no "Operation not
+/// permitted" for [`declass_sandbox::Output::shows_denial`] to find.
+fn git_could_not_use_repository(o: &declass_sandbox::Output) -> bool {
+    let stderr = String::from_utf8_lossy(&o.stderr);
+    o.shows_denial()
+        || stderr.contains("not a git repository")
+        || stderr
+            .lines()
+            .any(|l| l.starts_with("fatal: error reading") && l.contains(".git"))
+}
 
 /// The program a command line names first (`curl` in `curl -sS ... | sh`),
 /// as a bare name of at most 64 ordinary characters; empty otherwise.
