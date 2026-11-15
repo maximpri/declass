@@ -913,6 +913,44 @@ mod tests {
     }
 
     #[test]
+    fn the_keys_of_a_map_of_records_stay_out_of_views_outlines_and_samples() {
+        // An export keyed by user names: the view, the task note's outline and
+        // the sample showed each name as schema.
+        let d = tempfile::tempdir().unwrap();
+        let ws = d.path().join("ws");
+        let run = d.path().join("run");
+        std::fs::create_dir_all(ws.join("data")).unwrap();
+        std::fs::create_dir_all(&run).unwrap();
+        let json = r#"{"accounts": {"mlopez": {"plan": "gold", "balance": 1200.5},
+            "jsmith": {"plan": "silver", "balance": 30.25},
+            "kowalczyk_anna": {"plan": "gold", "balance": 7.0}}}"#;
+        std::fs::write(ws.join("data/accounts.json"), json).unwrap();
+        let e = Engine::open(&run, views(None), None).unwrap();
+        e.prime(
+            &ws,
+            &["data/accounts.json".into()],
+            "Fix the balance report.",
+        );
+        let view = read(&e, "data/accounts.json", json);
+        let task = e.sanitize_objective("Fix the balance report.");
+        let sample = e
+            .call_tool(
+                "synthetic_sample",
+                serde_json::json!({"handle": "h1", "rows": 5})
+                    .as_object()
+                    .unwrap(),
+            )
+            .unwrap()
+            .unwrap();
+        for (what, text) in [("view", &view), ("task", &task), ("sample", &sample)] {
+            for user in ["mlopez", "jsmith", "kowalczyk"] {
+                assert!(!text.contains(user), "{user} in the {what}:\n{text}");
+            }
+        }
+        assert!(view.contains("accounts.*.plan"), "{view}");
+    }
+
+    #[test]
     fn synthetic_sample_gives_records_and_refuses_other_content() {
         let (_d, _ws, e) = primed(views(None));
         let _ = read(&e, "data/customers.csv", &csv());

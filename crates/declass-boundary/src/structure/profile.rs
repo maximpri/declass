@@ -13,7 +13,7 @@ use super::dates;
 use super::masked::{self, Template};
 use super::parse::{self, Json};
 use super::shape::{self, Detail};
-use super::{Format, Knowledge, SPECIAL_KEYS, schema_key};
+use super::{Format, Knowledge, SPECIAL_KEYS, keyed_by_records, schema_key, shown_key};
 use crate::detect::Kind;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
@@ -677,9 +677,10 @@ impl JsonWalk<'_, '_> {
         match node {
             Json::Object { entries, .. } => {
                 let mut seen: HashSet<&str> = HashSet::new();
+                let records = keyed_by_records(entries);
                 for (key, value) in entries {
                     let name = key.name.as_str();
-                    let shown = if schema_key(name, self.fields.k) {
+                    let shown = if shown_key(name, records, self.fields.k) {
                         self.schema.insert(name.to_owned());
                         name.to_owned()
                     } else {
@@ -866,7 +867,7 @@ fn profile_json(text: &str, root: &Json, k: &dyn Knowledge, lines: bool) -> Prof
     }
     if w.withheld_keys > 0 {
         anomalies.push(format!(
-            "{} key(s) look like data (ids, dates, detected values) and are shown as `*`",
+            "{} key(s) look like data (ids, dates, detected values, the keys of a map of records) and are shown as `*`",
             w.withheld_keys
         ));
     }
@@ -1581,6 +1582,31 @@ mod tests {
         assert!(view.contains("by_customer.*.n — integer; 2"), "{view}");
         assert!(view.contains("2 key(s) look like data"), "{view}");
         assert!(!view.contains("ann@x.net"), "{view}");
+    }
+
+    #[test]
+    fn the_keys_of_a_map_of_records_are_values_whatever_their_shape() {
+        // User names and ids with no run of four digits passed as schema.
+        let json = r#"{"accounts": {"mlopez": {"plan": "gold", "balance": 1200.5},
+            "kowalczyk_anna": {"plan": "silver", "balance": 7.0}},
+            "limits": {"retries": 3, "region": "eu"},
+            "envs": {"dev": {"host": "a"}, "staging": {"port": 1}}}"#;
+        let view = profile(json, None, &Nothing).unwrap().render();
+        assert!(
+            !view.contains("mlopez") && !view.contains("kowalczyk"),
+            "{view}"
+        );
+        assert!(view.contains("accounts.*.plan — string; 2"), "{view}");
+        assert!(view.contains("2 key(s) look like data"), "{view}");
+        // Objects of fields keep their keys: scalars, or objects that share
+        // no member.
+        assert!(
+            view.contains("limits.retries") && view.contains("envs.dev.host"),
+            "{view}"
+        );
+        // A key of a map that is a word the frontier has is shown.
+        let view = profile(json, None, &Toy).unwrap().render();
+        assert!(view.contains("accounts.mlopez.plan"), "{view}");
     }
 
     #[test]

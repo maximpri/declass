@@ -296,6 +296,47 @@ pub fn schema_key(key: &str, k: &dyn Knowledge) -> bool {
         && k.values(key).is_empty()
 }
 
+/// Whether an object's keys name records rather than fields: two or more
+/// members, each an object, sharing most of their member names
+/// (`{"mlopez": {"plan": …}, "jsmith": {"plan": …}}`, a map keyed by user
+/// names, ids or dates). Such keys are values, whatever their shape.
+pub fn keyed_by_records(entries: &[(parse::Key, parse::Json)]) -> bool {
+    if entries.len() < 2 {
+        return false;
+    }
+    let mut members: Vec<std::collections::HashSet<&str>> = Vec::new();
+    for (_, v) in entries {
+        match v {
+            parse::Json::Object { entries, .. } => {
+                members.push(entries.iter().map(|(k, _)| k.name.as_str()).collect());
+            }
+            _ => return false,
+        }
+    }
+    let all: std::collections::HashSet<&str> = members.iter().flatten().copied().collect();
+    let shared = all
+        .iter()
+        .filter(|name| members.iter().all(|m| m.contains(*name)))
+        .count();
+    shared > 0 && shared * 2 >= all.len()
+}
+
+/// Whether the key `name` of an object may be shown as written: schema
+/// ([`schema_key`]), and in an object keyed by records
+/// ([`keyed_by_records`]) only a word the frontier already has (of the
+/// public files, the task or the schema shown), every part of it.
+pub fn shown_key(name: &str, keyed_by_records: bool, k: &dyn Knowledge) -> bool {
+    schema_key(name, k)
+        && (!keyed_by_records || {
+            let lower = name.to_lowercase();
+            k.public_word(&lower)
+                || lower
+                    .split(|c: char| !c.is_alphanumeric())
+                    .filter(|w| !w.is_empty())
+                    .all(|w| k.public_word(w))
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

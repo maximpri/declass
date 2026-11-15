@@ -27,7 +27,7 @@ use super::dates;
 use super::parse::{self, Json};
 use super::profile::{has_header, json_records};
 use super::shape::{self, Class, Detail};
-use super::{Format, Knowledge, schema_key};
+use super::{Format, Knowledge, keyed_by_records, schema_key, shown_key};
 use crate::detect::{Detectors, Kind, scan_each};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
@@ -792,8 +792,9 @@ fn json_string(s: &str) -> String {
 fn json_values(node: &Json, text: &str, k: &dyn Knowledge, out: &mut Vec<(Role, String)>) {
     match node {
         Json::Object { entries, .. } => {
+            let records = keyed_by_records(entries);
             for (key, v) in entries {
-                if !schema_key(&key.name, k) {
+                if !shown_key(&key.name, records, k) {
                     out.push((Role::Key, key.name.clone()));
                 }
                 json_values(v, text, k, out);
@@ -819,8 +820,9 @@ fn json_replacements(
 ) {
     match node {
         Json::Object { entries, .. } => {
+            let records = keyed_by_records(entries);
             for (key, v) in entries {
-                if !schema_key(&key.name, f.k) {
+                if !shown_key(&key.name, records, f.k) {
                     out.push((key.span.clone(), json_string(&f.fake(Role::Key, &key.name))));
                 }
                 json_replacements(v, text, f, out);
@@ -1422,6 +1424,23 @@ mod tests {
         assert!(t.text.contains("URL=postgres://"), "{}", t.text);
         let limit = t.text.lines().find(|l| l.starts_with("LIMIT=")).unwrap();
         assert_eq!(limit.len(), "LIMIT=500".len());
+    }
+
+    #[test]
+    fn json_twins_fake_the_keys_of_a_map_of_records() {
+        let json = r#"{"accounts": {"mlopez": {"plan": "gold"}, "jsmith": {"plan": "silver"}},
+            "limits": {"retries": 3}}"#;
+        let t = twin(json, Some(Path::new("data/a.json")), &Nothing, 3, 5).unwrap();
+        assert!(
+            !t.text.contains("mlopez") && !t.text.contains("jsmith"),
+            "{}",
+            t.text
+        );
+        assert!(
+            t.text.contains("\"accounts\"") && t.text.contains("\"retries\""),
+            "{}",
+            t.text
+        );
     }
 
     #[test]

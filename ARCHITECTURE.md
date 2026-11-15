@@ -867,8 +867,10 @@ resolve_for_write(path, content) → note_fixture: every line from a sample show
     bytes hash to that digest
 ```
 
-Formats: JSON (records: the array itself, or the longest array of objects under a top-level key),
-JSON lines, delimited text (delimiter sniffed, RFC 4180 quoting, header detected), `KEY=value`,
+Formats: JSON (records: the array itself, or the longest array of objects under a top-level key;
+a key is shown only as schema (`schema_key`), and the keys of an object whose members are objects
+sharing most of their fields, a map keyed by its records, only when they are words the frontier
+already has (`shown_key`); others are `*`, and faked in a twin), JSON lines, delimited text (delimiter sniffed, RFC 4180 quoting, header detected), `KEY=value`,
 fixed-width (columns from blank gaps), simple XML (records: the root's children), logs (timestamp
 or level at line start) and other text (templates only). Dates are recognized by layout
 (`dates.rs`: ISO, compact `yyyyMMddHHmmss`, day/month orders, month names, zones) and generated in
