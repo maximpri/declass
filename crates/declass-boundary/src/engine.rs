@@ -54,8 +54,10 @@ fn safe_local_error(error: &ProviderError) -> String {
 
 pub use outbound::PART_WITHHELD;
 
+// Combining marks belong to the word: a name written decomposed
+// (`Jose\u{301}`) is a name too.
 static NAME: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"\b\p{Lu}\p{Ll}+(?:[ '-]\p{Lu}\p{Ll}+)+\b").expect("static regex")
+    Regex::new(r"\b\p{Lu}[\p{Ll}\p{M}]+(?:[ '-]\p{Lu}[\p{Ll}\p{M}]+)+\b").expect("static regex")
 });
 // Values of person/address fields (`name=Cher`, `"display_name": "Bjørn Ødegaard"`), whatever their shape.
 static PERSON_FIELD: LazyLock<Regex> = LazyLock::new(|| {
@@ -72,9 +74,10 @@ static ERROR_LINE: LazyLock<Regex> = LazyLock::new(|| {
 });
 static DISTINCTIVE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\b[A-Za-z0-9]{10,}\b").expect("static regex"));
-static WORD: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\p{L}+").expect("static regex"));
+static WORD: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"[\p{L}\p{M}]+").expect("static regex"));
 static TERM: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"[\p{L}\p{N}_]+").expect("static regex"));
+    LazyLock::new(|| Regex::new(r"[\p{L}\p{M}\p{N}_]+").expect("static regex"));
 
 fn words(text: &str) -> impl Iterator<Item = String> + '_ {
     TERM.find_iter(text).map(|m| m.as_str().to_lowercase())
@@ -1379,13 +1382,18 @@ ask questions with ask_local(handle=\"{}\", question=...).\n",
         read: &str,
         answer: Option<Answered<'_>>,
     ) -> (String, usize) {
+        // What the model wrote as its reader takes it: a value with a
+        // zero-width space inside, in full-width digits or written composed
+        // where the content has it decomposed is that value.
+        let text = &reencoded::fold(text);
         // Copied runs first, on the text as written: once known values become
         // placeholders, a copied line splits into runs shorter than the window
         // and a field between two values (a date of birth) passes.
         let s = st.overlap.redact_strict(text).0;
         st.structure.note_local_values(read, origin);
         let s = Self::respell(st, &s);
-        let words: std::collections::HashSet<String> = words(read).collect();
+        let words: std::collections::HashSet<String> =
+            words(read).chain(words(&reencoded::fold(read))).collect();
         let s = self.sanitize_read(st, &s, origin, true, Some(&words));
         let s = st.structure.clean_local_values(&s, &st.public_words);
         let s = st.overlap.redact(&s).0;
@@ -1531,6 +1539,7 @@ ask questions with ask_local(handle=\"{}\", question=...).\n",
     /// about sensitive content are not applied: here they would vault the
     /// frontier's own identifiers and replace them in every later request.
     fn clean_condensed(&self, st: &mut State, text: &str) -> String {
+        let text = &reencoded::fold(text);
         let s = st.overlap.redact_strict(text).0;
         let s = Self::respell(st, &s);
         let s = self.sanitize(st, &s, "compaction", false);
@@ -3008,6 +3017,54 @@ mod tests {
                 assert!(
                     !shown.contains(value),
                     "views={views}: {value} leaked: {shown}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn local_output_is_matched_as_its_reader_takes_it() {
+        // A value with a zero-width space or joiner inside, a card number in
+        // full-width or Arabic-Indic digits, a name written composed where the
+        // data has it decomposed: each passed every value filter.
+        let summary = "Rows: José García pays with \u{ff14}\u{ff15}\u{ff13}\u{ff19} \
+             \u{ff11}\u{ff14}\u{ff18}\u{ff18} \u{ff10}\u{ff13}\u{ff14}\u{ff13} \
+             \u{ff16}\u{ff14}\u{ff16}\u{ff17}; the second card is \u{665}\u{662}\u{669}\u{663} \
+             \u{667}\u{666}\u{661}\u{665} \u{668}\u{662}\u{660}\u{664} \u{669}\u{663}\u{667}\u{667}; \
+             passwords quartz\u{200b}-otter-5519 and velvet-lant\u{200d}ern-2231.";
+        let csv = "id,name,card,password\n1,Jose\u{301} Garci\u{301}a,4539148803436467,\
+             quartz-otter-5519\n2,Orla Brennvik,5293761582049377,velvet-lantern-2231\n";
+        for views in [false, true] {
+            let (local, _) = crate::testing::scripted_local(vec![
+                json!({"summary": summary, "facts": []}).to_string(),
+            ]);
+            let d = tempfile::tempdir().unwrap();
+            let mut p = policy();
+            p.structure.views = views;
+            let e = Engine::open(&d.path().join("run"), p, Some(local)).unwrap();
+            let shown = e.present(&file("data/customers.csv"), csv.as_bytes());
+            let (filter, _) = e.outbound();
+            let mut req = Request {
+                items: vec![Item::ToolResult {
+                    call_id: "c".into(),
+                    content: shown,
+                }],
+                ..Request::default()
+            };
+            filter.apply(&mut req);
+            let sent = serde_json::to_string(&req.items).unwrap();
+            let read = reencoded::fold(&sent);
+            for value in [
+                "José García",
+                "García",
+                "4539 1488 0343 6467",
+                "5293 7615 8204 9377",
+                "quartz-otter-5519",
+                "velvet-lantern-2231",
+            ] {
+                assert!(
+                    !read.contains(value),
+                    "views={views}: {value} reached the frontier:\n{sent}"
                 );
             }
         }

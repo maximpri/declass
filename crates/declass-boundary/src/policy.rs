@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Which content is sensitive, by where it came from.
 
+use crate::reencoded::nfc;
 use std::path::Path;
 
 /// Glob over `/`-separated paths: `*` and `?` stay within a segment, `**`
@@ -141,21 +142,12 @@ pub enum IpLevel {
     Sealed,
 }
 
-/// `s` in Unicode normalization form C. A file system that compares names
-/// regardless of normalization (macOS's) may store decomposed (`e` and a
-/// combining accent) a name a rule writes composed (`é`): what a rule
-/// protects is matched in one form.
-fn nfc(s: &str) -> std::borrow::Cow<'_, str> {
-    if s.is_ascii() {
-        std::borrow::Cow::Borrowed(s)
-    } else {
-        icu_normalizer::ComposingNormalizerBorrowed::new_nfc().normalize(s)
-    }
-}
-
-/// [`glob_match`] with both sides in normalization form C, for the rules
-/// that protect a path (sensitive, protected, interface-only, sealed); rules
-/// that allow something (secret sinks) keep matching as written.
+/// [`glob_match`] with both sides in normalization form C ([`nfc`]), for
+/// the rules that protect a path (sensitive, protected, interface-only,
+/// sealed): a file system that compares names regardless of normalization
+/// (macOS's) may store decomposed (`e` and a combining accent) a name a rule
+/// writes composed (`é`), so what a rule protects is matched in one form.
+/// Rules that allow something (secret sinks) keep matching as written.
 fn protects(pattern: &str, path: &str) -> bool {
     glob_match(&nfc(pattern), path)
 }

@@ -223,9 +223,16 @@ impl StructureState {
             .as_ref()
     }
 
-    /// Remembers the values of structured sensitive content.
+    /// Remembers the values of structured sensitive content, each also in
+    /// its folded form ([`crate::reencoded::fold`]), the form local output
+    /// is matched in.
     fn note_values(&mut self, values: Vec<String>) {
         let before = self.data_values.len();
+        let values = values.into_iter().flat_map(|v| {
+            let folded = crate::reencoded::fold(&v).into_owned();
+            let other = (folded != v).then_some(folded);
+            std::iter::once(v).chain(other)
+        });
         for v in values {
             if !v.chars().any(char::is_alphanumeric) || structure::marker_word(&v) {
                 continue;

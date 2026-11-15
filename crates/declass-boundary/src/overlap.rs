@@ -146,22 +146,37 @@ impl Default for OverlapIndex {
     }
 }
 
+/// `text`, and its folded form when that differs ([`crate::reencoded::fold`]):
+/// local output is matched folded, so sensitive content written decomposed
+/// or with invisible characters is indexed in that form too.
+fn forms(text: &str) -> Vec<std::borrow::Cow<'_, str>> {
+    let folded = crate::reencoded::fold(text);
+    match folded == text {
+        true => vec![text.into()],
+        false => vec![text.into(), folded],
+    }
+}
+
 impl OverlapIndex {
     pub fn add_sensitive(&mut self, text: &str) {
-        let tokens = tokens(text);
-        for level in [&mut self.normal, &mut self.strict] {
-            let w = level.window;
-            level
-                .sensitive
-                .extend(window_hashes(&tokens, w).map(|w| w.0));
+        for form in forms(text) {
+            let tokens = tokens(&form);
+            for level in [&mut self.normal, &mut self.strict] {
+                let w = level.window;
+                level
+                    .sensitive
+                    .extend(window_hashes(&tokens, w).map(|w| w.0));
+            }
         }
     }
 
     pub fn add_public(&mut self, text: &str) {
-        let tokens = tokens(text);
-        for level in [&mut self.normal, &mut self.strict] {
-            let w = level.window;
-            level.public.extend(window_hashes(&tokens, w).map(|w| w.0));
+        for form in forms(text) {
+            let tokens = tokens(&form);
+            for level in [&mut self.normal, &mut self.strict] {
+                let w = level.window;
+                level.public.extend(window_hashes(&tokens, w).map(|w| w.0));
+            }
         }
     }
 

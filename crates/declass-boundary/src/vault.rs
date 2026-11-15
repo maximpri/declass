@@ -175,9 +175,34 @@ impl Vault {
                 alias: false,
             },
         );
+        self.fold_alias(value);
         self.changed();
         self.persist()?;
         Ok(token)
+    }
+
+    /// Registers the folded form of `spelling` ([`crate::reencoded::fold`]),
+    /// a value or an alias already in the vault, as another spelling of the
+    /// same value when it differs: what a reader takes for the value (a name
+    /// written composed where the content has it decomposed, a value written
+    /// without the zero-width space inside it, full-width digits as digits).
+    fn fold_alias(&mut self, spelling: &str) {
+        let folded = crate::reencoded::fold(spelling);
+        if folded == spelling
+            || folded.len() < MIN_VALUE_BYTES
+            || self.by_value.contains_key(folded.as_ref())
+        {
+            return;
+        }
+        if let Some(entry) = self.by_value.get(spelling).cloned() {
+            self.by_value.insert(
+                folded.into_owned(),
+                Entry {
+                    alias: true,
+                    ..entry
+                },
+            );
+        }
     }
 
     /// Makes `spelling` another form of `value` (which must already have a token).
@@ -195,6 +220,7 @@ impl Vault {
                 ..entry
             },
         );
+        self.fold_alias(spelling);
         self.changed();
         self.persist()
     }
@@ -657,6 +683,30 @@ mod tests {
         assert_eq!(v.detokenize(&t).0, text);
         assert_eq!(v.detokenize(&format!("⟨{t}")).0, format!("⟨{text}"));
         assert_eq!(v.strip_tokens(&t), "key \0, mode \0, name \0");
+    }
+
+    #[test]
+    fn a_value_is_known_in_the_form_its_reader_takes_it() {
+        // Written decomposed in the data, composed by the local model; with a
+        // zero-width space inside; in full-width digits.
+        let mut v = Vault::in_memory();
+        let name = v
+            .token_for("Jose\u{301} Garci\u{301}a", Kind::Name, None, "data/c.csv")
+            .unwrap();
+        v.alias("Garci\u{301}a", "Jose\u{301} Garci\u{301}a")
+            .unwrap();
+        let pw = v
+            .token_for("quartz\u{200b}-otter", Kind::Secret, None, ".env")
+            .unwrap();
+        let digits = v
+            .token_for("\u{ff14}\u{ff15}\u{ff13}\u{ff19}88", Kind::Data, None, "x")
+            .unwrap();
+        let (t, n) = v.tokenize("José García, García, quartz-otter, 453988");
+        assert_eq!(n, 4, "{t}");
+        assert_eq!(t, format!("{name}, {name}, {pw}, {digits}"));
+        assert!(v.disclosed_in("dear José García").is_some());
+        // Restoring a token gives the value as written, never a folded form.
+        assert_eq!(v.detokenize(&name).0, "Jose\u{301} Garci\u{301}a");
     }
 
     #[test]

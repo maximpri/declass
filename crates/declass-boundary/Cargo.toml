@@ -35,9 +35,10 @@ aho-corasick.workspace = true
 toml.workspace = true
 # URLs of requests to third parties (`third_party`).
 url = "2"
-# Policy paths compared in Unicode normalization form C (`policy`): macOS
-# stores a name decomposed that a rule writes composed. Already in the tree
-# through `url`.
+# Unicode normalization (`reencoded`): policy paths compared in form C
+# (macOS stores a name decomposed that a rule writes composed), and text
+# folded in form KC to match values as its reader takes them. Already in the
+# tree through `url`.
 icu_normalizer = { version = "2.3", default-features = false, features = ["compiled_data"] }
 # Reads the structure of imported rules' expressions (which groups hold the secret).
 regex-syntax = "0.8"

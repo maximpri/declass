@@ -383,8 +383,11 @@ Layers run independently; the result is the most restrictive class any layer ass
 Every value found enters the run's **vault** under one token per value (`⟨kind:label#n⟩`). Values
 from sensitive text also register **aliases** for their other spellings (a surname alone; a
 number grouped, ungrouped or as minor units) unless the spelling is a word of the public files or
-the task; aliases map to the same token and are never written back. Values the frontier wrote
-itself (test data) are shown as written unless the same value is in the vault.
+the task; aliases map to the same token and are never written back. Every value and alias is also
+known in its folded form when that differs (`reencoded::fold`: default-ignorable characters
+removed, Unicode NFKC, every script's digits as ASCII), the form local output is matched in.
+Values the frontier wrote itself (test data) are shown as written unless the same value is in the
+vault.
 
 ### 5.2 Transformation
 
@@ -460,6 +463,11 @@ characters is chunked; one retry on unparseable output, then an error the fronti
 "unavailable" — never an invented answer.
 
 Every local output is cleaned before it enters a view (`Engine::clean_local_counted`):
+0. folded as its reader takes it (`reencoded::fold`): zero-width spaces and joiners, soft hyphens,
+   bidirectional controls and other default-ignorable characters removed, compatibility forms
+   folded (NFKC: full-width and mathematical digits and letters; a decomposed `é` composed), every
+   script's decimal digits as ASCII digits; the folded text is what is cleaned and shown (image
+   descriptions, explorer reports and compaction summaries are folded the same way);
 1. the 4-token copy window on the text as written (before placeholders split a copied line);
 2. other spellings (`reencoded.rs`): spaced-out runs (`V a k d r i l`, `4-5-3-9`) matched against
    the vault's skeletons (letters and digits, lower-cased) and replaced by the value's token;

@@ -18,6 +18,67 @@
 /// Shown in place of an encoded run that decodes to sensitive content.
 pub const ENCODED: &str = "⟨redacted:encoded-sensitive-text⟩";
 
+/// Whether `c` is a default-ignorable code point (Unicode's
+/// `Default_Ignorable_Code_Point`): drawn as nothing, so a reader sees a
+/// value with one inside it as the value. Zero-width spaces and joiners,
+/// the soft hyphen, bidirectional controls, variation selectors, tags.
+fn ignorable(c: char) -> bool {
+    matches!(c as u32,
+        0x00AD | 0x034F | 0x061C | 0x115F..=0x1160 | 0x17B4..=0x17B5 | 0x180B..=0x180F
+        | 0x200B..=0x200F | 0x202A..=0x202E | 0x2060..=0x206F | 0x3164 | 0xFE00..=0xFE0F
+        | 0xFEFF | 0xFFA0 | 0xFFF0..=0xFFF8 | 0x1BCA0..=0x1BCA3 | 0x1D173..=0x1D17A
+        | 0xE0000..=0xE0FFF)
+}
+
+/// Whether `c` is a decimal digit of any script (`\p{Nd}`).
+fn decimal(c: char) -> bool {
+    static ND: std::sync::LazyLock<regex::Regex> =
+        std::sync::LazyLock::new(|| regex::Regex::new(r"^\p{Nd}$").expect("static regex"));
+    ND.is_match(c.encode_utf8(&mut [0; 4]))
+}
+
+/// The ASCII digit of a decimal digit of another script (`٤`, `४`), else
+/// `c`. Unicode encodes each script's digits zero to nine in a row, and
+/// runs of digits are whole such rows.
+fn ascii_digit(c: char) -> char {
+    if c.is_ascii() || !c.is_numeric() || !decimal(c) {
+        return c;
+    }
+    let mut first = c;
+    while let Some(p) = char::from_u32(first as u32 - 1).filter(|p| decimal(*p)) {
+        first = p;
+    }
+    char::from(b'0' + ((c as u32 - first as u32) % 10) as u8)
+}
+
+/// `text` in Unicode normalization form C: a letter and the combining
+/// accents after it written as one precomposed letter (`é`), as git, rules
+/// and models write names. Policy paths are compared in this form
+/// ([`crate::policy`]); [`fold`] goes further, for values in text.
+pub fn nfc(text: &str) -> std::borrow::Cow<'_, str> {
+    if text.is_ascii() {
+        std::borrow::Cow::Borrowed(text)
+    } else {
+        icu_normalizer::ComposingNormalizerBorrowed::new_nfc().normalize(text)
+    }
+}
+
+/// `text` as its reader takes it, for matching values in what the local
+/// model writes: default-ignorable code points removed (a zero-width space
+/// inside a password), compatibility forms folded (NFKC: full-width
+/// `４５３９`, ligatures, mathematical letters and digits; a decomposed `é`
+/// becomes the precomposed one) and other scripts' digits as ASCII digits.
+/// The folded text is what is cleaned and shown. Letters that only look
+/// alike (Cyrillic `а` for Latin `a`) are not folded.
+pub fn fold(text: &str) -> std::borrow::Cow<'_, str> {
+    if text.is_ascii() {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    let visible: String = text.chars().filter(|c| !ignorable(*c)).collect();
+    let folded = icu_normalizer::ComposingNormalizerBorrowed::new_nfkc().normalize(&visible);
+    std::borrow::Cow::Owned(folded.chars().map(ascii_digit).collect())
+}
+
 /// Characters that end a spaced-out run (punctuation between list items).
 /// Any other character that is not a letter or digit may stand between the
 /// characters of a spaced-out value (` `, `-`, `.`, `_`, `@`, ...).
@@ -454,6 +515,41 @@ pub fn spelled_digits(text: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn folding_reads_a_value_as_its_reader_does() {
+        for (written, read) in [
+            ("quartz\u{200b}-otter-5519", "quartz-otter-5519"),
+            ("velvet-lant\u{200d}ern\u{ad}-2231", "velvet-lantern-2231"),
+            ("\u{202e}9155\u{2066}", "9155"),
+            (
+                "\u{ff14}\u{ff15}\u{ff13}\u{ff19} \u{ff11}\u{ff14}\u{ff18}\u{ff18}",
+                "4539 1488",
+            ),
+            ("\u{664}\u{665}\u{663}\u{669} \u{96a}\u{96b}", "4539 45"),
+            ("\u{1d7d2}\u{1d7d3}", "45"),
+            ("Jose\u{301} Garci\u{301}a", "José García"),
+            ("\u{fb01}le", "file"),
+            ("ascii stays as it is", "ascii stays as it is"),
+        ] {
+            assert_eq!(fold(written), read, "{written:?}");
+        }
+        // Letters that only look alike are other letters.
+        assert_eq!(fold("p\u{430}ss"), "p\u{430}ss");
+    }
+
+    #[test]
+    fn every_decimal_digit_folds_to_its_ascii_digit() {
+        // Unicode's decimal digits come in rows of zero to nine.
+        for c in (0..=0x10FFFFu32).filter_map(char::from_u32) {
+            if !c.is_ascii() && decimal(c) {
+                let d = ascii_digit(c);
+                assert!(d.is_ascii_digit(), "{c:?}");
+                let zero = char::from_u32(c as u32 - d.to_digit(10).unwrap()).unwrap();
+                assert!(decimal(zero) && ascii_digit(zero) == '0', "{c:?}");
+            }
+        }
+    }
 
     #[test]
     fn html_unescape_survives_characters_across_its_window() {
