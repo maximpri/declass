@@ -1161,3 +1161,267 @@ mod tests {
         }
     }
 }
+
+/// The screening set against the expressions it screens for: for any text,
+/// the set rules out no expression that matches it, and scanning with the
+/// set finds what scanning without it finds, for each detector alone and
+/// all together, with and without a path. The texts mix values with names
+/// composed and decomposed, other forms of digits and letters, invisible
+/// characters and the labels and keys the detectors read (a PIN, an OTP, a
+/// card's security code among them). A review's exhaustive run of these
+/// (20,000 cases each, and every value beside every character below) found
+/// no difference; here they run at the gate's small case count, and the
+/// exhaustive sweep is ignored (see it for how to run it).
+#[cfg(test)]
+mod screening {
+    use super::*;
+    use proptest::prelude::*;
+    use proptest::test_runner::TestCaseError;
+
+    #[rustfmt::skip]
+    const FRAGMENTS: &[&str] = &[
+        // Names, composed and decomposed, and marks alone.
+        "Jose\u{301} Garci\u{301}a", "Jose\u{301}", "Garci\u{301}a", "Mu\u{308}ller", "Zoe\u{308}",
+        "Ren\u{e9}e", "Bjørn Ødegaard", "\u{301}", "\u{308}", "\u{20dd}", "\u{336}", "\u{fe0f}",
+        "\u{e0041}", "\u{1f600}", "\u{1f469}\u{200d}\u{1f4bb}",
+        // Full-width, other scripts' digits, mathematical digits.
+        "４５３９", "１４８８", "０３４３", "６４６７", "ｓｋ＿ｌｉｖｅ＿", "ＰＡＳＳＷＯＲＤ＝", "＠", "．", "：",
+        "＝", "٤٥٣٩", "١٢٣-٤٥-٦٧٨٩", "४५३९", "\u{1d7d2}\u{1d7d3}", "①", "²",
+        // Invisible and unusual spaces.
+        "\u{200b}", "\u{200d}", "\u{200c}", "\u{feff}", "\u{ad}", "\u{2060}", "\u{202e}",
+        "\u{a0}", "\u{202f}", "\u{3000}", "\u{2028}", "\u{85}", "\t", "\r\n", "\r",
+        // Labels and keys.
+        "card ", "credit card: ", "acct ", "account number ", "routing ", "passport no. ", "ssn ",
+        "IBAN ", "PIN=", "pin: ", "OTP: ", "otp_code=", "cvv=", "CVC: ", "tel: ", "phone: ",
+        "isbn ", "sort code ", "tax id ",
+        "DB_PASSWORD=", "API_KEY: ", "\"secret\": \"", "token=", "Auth=", "SIGNING_KEY=",
+        "password:'", "x-api-key=", "private_key = \"", "export ", "set ", "# ",
+        // Values.
+        "Xy7!pQr9sT2", "S3cr3tPw", "hunter2hunter2", "quartz-otter-5519", "quartz\u{200b}-otter-5519",
+        "4539148803436467", "4539 1488 0343 6467", "5293-7615-8204-9377", "42977600076546677",
+        "123-45-6789", "021000021000", "120382716455", "203.0.113.41", "10.0.0.1",
+        "255.255.255.255", "127.0.0.1", "DE89370400440532013000", "AB 12 34 56 C",
+        // Tokens.
+        "sk_live_", "sk_test_", "ghp_", "github_pat_", "xoxb-", "AKIA", "AIza", "sk-proj-", "sk-ant-",
+        "glpat-", "eyJ", "eyJhbGciOiJIUzI1", "A1b2C3d4E5f6G7h8I9j0KlMnOp",
+        "Qz8vW3nL5kR2xT7mY4pB9cH6dJ1sF0aGeU2i", "ABCDEFGHIJKLMNOP", "Zq9xW2vL7mK4",
+        // Mail, URLs, phones, keys.
+        "amelia", "@", "mailbox-311.net", "é.amelia@mailbox-311.net", "jose\u{301}@corp.io",
+        "user@例え.jp", "postgres://", "app:", "S3cr3tPw@", "db.internal",
+        "https://us\u{e9}r:pa\u{301}ss@host/", "+1 (415) ", "555-0199", "(415) 555-0199",
+        "415.555.0199", "+44 20 7946 0958", "-----BEGIN PRIVATE KEY-----\n", "MIIabc\n",
+        "-----END PRIVATE KEY-----", "-----BEGIN RSA PRIVATE KEY-----",
+        "-----END RSA PRIVATE KEY-----",
+        // Punctuation and odd letters.
+        " ", "-", ".", "\n", "_", "=", ":", "'", "\"", "#", ",", ";", "/", "⟨", "⟩", "$", "<", "\\",
+        "0", "9", "1234", "٣", "é", "日本", "ключ", "ß", "İ", "ǅ", "ﬁ", "K", "Å",
+    ];
+
+    /// Values of every detector, for the context sweeps.
+    const VALUES: &[&str] = &[
+        concat!("sk_", "live_A1b2C3d4E5f6G7h8I9j0KlMnOp"),
+        concat!("gh", "p_Qz8vW3nL5kR2xT7mY4pB9cH6dJ1sF0aGeU2i"),
+        concat!("AK", "IAABCDEFGHIJKLMNOP"),
+        "eyJhbGciOiJIUzI1.eyJzdWIiOiIxMjM0.SflKxwRJSMeKKF2QT4",
+        "-----BEGIN PRIVATE KEY-----\nMIIabc\n-----END PRIVATE KEY-----",
+        "postgres://app:S3cr3tPw@db",
+        "DB_PASSWORD=Xy7pQr9sT2",
+        "api_key: 'Zq9xW2vL7mK4'",
+        "amelia@mailbox-311.net",
+        "+1 (415) 555-0199",
+        "415 555 0199",
+        "123-45-6789",
+        "203.0.113.41",
+        "4539 1488 0343 6467",
+        "card 42977600076546677",
+        "A1b2C3d4E5f6G7h8I9j0KlMnOpQrSt",
+    ];
+
+    /// Ranges of characters the values are put beside: Latin, Greek,
+    /// Cyrillic, Hebrew, Arabic, Devanagari, combining marks, general
+    /// punctuation and invisible characters, combining marks for symbols,
+    /// CJK punctuation, variation selectors and full-width forms.
+    const CONTEXTS: &[std::ops::Range<u32>] = &[
+        0..0x800,
+        0x900..0x980,
+        0x1AB0..0x1B00,
+        0x2000..0x2070,
+        0x20D0..0x2100,
+        0x3000..0x3010,
+        0xFE00..0xFE30,
+        0xFF00..0xFFF0,
+        0x1D7D2..0x1D7D3,
+        0x1F600..0x1F601,
+        0xE0041..0xE0042,
+        0xE0100..0xE0101,
+        0x10FFFD..0x10FFFE,
+    ];
+
+    fn detectors() -> [Detectors; 4] {
+        [
+            Detectors::default(),
+            Detectors {
+                secrets: true,
+                pii: false,
+                entropy: false,
+            },
+            Detectors {
+                secrets: false,
+                pii: true,
+                entropy: false,
+            },
+            Detectors {
+                secrets: false,
+                pii: false,
+                entropy: true,
+            },
+        ]
+    }
+
+    /// The set rules out no expression that matches `text`.
+    fn set_admits(text: &str) -> Result<(), String> {
+        let set = OWN.matches(text);
+        for (i, o) in Own::SCREENED.iter().enumerate() {
+            if o.regex().is_match(text) && !set.matched(i) {
+                return Err(format!("{o:?} matches {text:?} but the set rules it out"));
+            }
+        }
+        Ok(())
+    }
+
+    fn check(text: &str) -> Result<(), TestCaseError> {
+        set_admits(text).map_err(TestCaseError::fail)?;
+        for d in detectors() {
+            for path in [None, Some("infra/main.tf")] {
+                prop_assert_eq!(
+                    scan_screened(text, d, path, true),
+                    scan_screened(text, d, path, false),
+                    "screening changed the findings of {:?}",
+                    text
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// The gate's small case count, or `PROPTEST_CASES`.
+    fn config() -> ProptestConfig {
+        ProptestConfig {
+            cases: std::env::var("PROPTEST_CASES")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(48),
+            failure_persistence: None,
+            ..ProptestConfig::default()
+        }
+    }
+
+    /// A text an expression matches (`\b` left out), with fragments and any
+    /// characters around it.
+    fn sample_in_context() -> impl Strategy<Value = String> {
+        let samples: Vec<BoxedStrategy<String>> = Own::SCREENED
+            .iter()
+            .map(|o| {
+                proptest::string::string_regex(&without_word_boundaries(o.regex().as_str()))
+                    .unwrap_or_else(|e| panic!("{o:?}: {e}"))
+                    .boxed()
+            })
+            .collect();
+        let fragments = || {
+            proptest::collection::vec(proptest::sample::select(FRAGMENTS), 0..4)
+                .prop_map(|v| v.concat())
+        };
+        (
+            fragments(),
+            proptest::strategy::Union::new(samples),
+            fragments(),
+            proptest::collection::vec(any::<char>(), 0..3),
+        )
+            .prop_map(|(a, s, b, cs)| {
+                let c: String = cs.into_iter().collect();
+                format!("{a}{c}{s}{c}{b}")
+            })
+    }
+
+    proptest! {
+        #![proptest_config(config())]
+
+        #[test]
+        fn fragments_screen_as_they_scan(
+            parts in proptest::collection::vec(proptest::sample::select(FRAGMENTS), 1..24)
+        ) {
+            check(&parts.concat())?;
+        }
+
+        #[test]
+        fn pattern_samples_screen_as_they_scan_in_context(text in sample_in_context()) {
+            check(&text)?;
+        }
+
+        #[test]
+        fn any_text_screens_as_it_scans(
+            parts in proptest::collection::vec(
+                prop_oneof![
+                    proptest::sample::select(FRAGMENTS).prop_map(str::to_owned),
+                    proptest::collection::vec(any::<char>(), 1..6)
+                        .prop_map(|v| v.into_iter().collect::<String>()),
+                ],
+                1..16,
+            )
+        ) {
+            check(&parts.concat())?;
+        }
+    }
+
+    /// Each value with `c` beside it: on both sides, before, after, and
+    /// doubled on both sides.
+    fn sweep(contexts: impl Iterator<Item = char>) -> usize {
+        let mut n = 0;
+        for c in contexts {
+            for v in VALUES {
+                for text in [
+                    format!("{c}{v}{c}"),
+                    format!("{c}{v}"),
+                    format!("{v}{c}"),
+                    format!("{c}{c}{v}{c}{c}"),
+                ] {
+                    if let Err(why) = set_admits(&text) {
+                        panic!("{why}");
+                    }
+                    assert_eq!(
+                        scan_screened(&text, Detectors::default(), None, true),
+                        scan_screened(&text, Detectors::default(), None, false),
+                        "{text:?}"
+                    );
+                    n += 1;
+                }
+            }
+        }
+        n
+    }
+
+    /// Every value beside a sample of the context characters: the first,
+    /// last and every 41st of each range.
+    #[test]
+    fn values_screen_as_they_scan_beside_any_character() {
+        let sample = CONTEXTS.iter().flat_map(|r| {
+            r.clone()
+                .filter(move |c| (c - r.start) % 41 == 0 || *c == r.end - 1)
+                .filter_map(char::from_u32)
+        });
+        assert!(sweep(sample) > 1_000);
+    }
+
+    /// Every value beside every context character: about 170,000 texts,
+    /// some ten minutes in a debug build. Run it with
+    /// `cargo test -p declass-boundary --lib -- --ignored screening::`
+    /// after changing an expression or the set.
+    #[test]
+    #[ignore = "exhaustive: minutes in a debug build"]
+    fn values_screen_as_they_scan_beside_every_character() {
+        let every = CONTEXTS
+            .iter()
+            .flat_map(|r| r.clone().filter_map(char::from_u32));
+        assert!(sweep(every) > 100_000);
+    }
+}
