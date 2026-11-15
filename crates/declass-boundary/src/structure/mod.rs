@@ -202,7 +202,9 @@ pub fn values(text: &str, path: Option<&Path>) -> Vec<String> {
         }
         Format::Delimited { delimiter } => {
             if let Some(rows) = parse::delimited(body, delimiter) {
-                let skip = usize::from(profile::has_header(&rows, &Nothing));
+                // A first row of names is skipped, header or not: a header's
+                // words as values would be masked wherever they appear.
+                let skip = usize::from(profile::named_first_row(&rows, &Nothing));
                 for r in &rows[skip..] {
                     out.extend(r.cells.iter().map(|c| c.value.trim().to_owned()));
                 }
@@ -326,15 +328,19 @@ pub fn keyed_by_records(entries: &[(parse::Key, parse::Json)]) -> bool {
 /// ([`keyed_by_records`]) only a word the frontier already has (of the
 /// public files, the task or the schema shown), every part of it.
 pub fn shown_key(name: &str, keyed_by_records: bool, k: &dyn Knowledge) -> bool {
-    schema_key(name, k)
-        && (!keyed_by_records || {
-            let lower = name.to_lowercase();
-            k.public_word(&lower)
-                || lower
-                    .split(|c: char| !c.is_alphanumeric())
-                    .filter(|w| !w.is_empty())
-                    .all(|w| k.public_word(w))
-        })
+    schema_key(name, k) && (!keyed_by_records || known_words(name, k))
+}
+
+/// Whether `name` is made of words the frontier already has (of the
+/// public files, the task or the schema shown): the whole name, or every
+/// part of it.
+pub fn known_words(name: &str, k: &dyn Knowledge) -> bool {
+    let lower = name.to_lowercase();
+    k.public_word(&lower)
+        || lower
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|w| !w.is_empty())
+            .all(|w| k.public_word(w))
 }
 
 #[cfg(test)]

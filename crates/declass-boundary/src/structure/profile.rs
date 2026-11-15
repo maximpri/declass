@@ -895,9 +895,10 @@ fn duplicate_records(raw: &[&str]) -> usize {
     raw.iter().filter(|r| !seen.insert(hash(r.trim()))).count()
 }
 
-/// Whether the first row of delimited text is a header: every cell a
-/// distinct name (not a number, date or detected value).
-pub fn has_header(rows: &[parse::Row], k: &dyn Knowledge) -> bool {
+/// Whether the first row of delimited text may be a header: every cell a
+/// distinct name (not a number, date or detected value). The values of
+/// structured data ([`super::values`]) skip such a row.
+pub fn named_first_row(rows: &[parse::Row], k: &dyn Knowledge) -> bool {
     let Some(first) = rows.first() else {
         return false;
     };
@@ -914,6 +915,31 @@ pub fn has_header(rows: &[parse::Row], k: &dyn Knowledge) -> bool {
             && k.values(v).is_empty()
             && names.insert(v.to_owned())
     })
+}
+
+/// Whether the first row of delimited text is a header, shown as column
+/// names: a named row ([`named_first_row`]) that is not just one more
+/// record. A headerless export's first record passes for names too (a user
+/// name, a city, a status): when each of its cells has a kind
+/// ([`Detail::Loose`]) its column's other cells have, it is a header only
+/// if its cells are words the frontier already has ([`super::known_words`]).
+pub fn has_header(rows: &[parse::Row], k: &dyn Knowledge) -> bool {
+    if !named_first_row(rows, k) {
+        return false;
+    }
+    let first = &rows[0];
+    let like_a_record = first.cells.iter().enumerate().all(|(i, c)| {
+        let kind = shape::shape(c.value.trim(), Detail::Loose);
+        rows[1..]
+            .iter()
+            .filter_map(|r| r.cells.get(i))
+            .any(|o| shape::shape(o.value.trim(), Detail::Loose) == kind)
+    });
+    !like_a_record
+        || first
+            .cells
+            .iter()
+            .all(|c| super::known_words(c.value.trim(), k))
 }
 
 /// The name a column is shown by.
@@ -1607,6 +1633,34 @@ mod tests {
         // A key of a map that is a word the frontier has is shown.
         let view = profile(json, None, &Toy).unwrap().render();
         assert!(view.contains("accounts.mlopez.plan"), "{view}");
+    }
+
+    #[test]
+    fn a_headerless_export_keeps_its_first_record_out_of_the_column_names() {
+        // Its first record held no number, date or known value, so it passed
+        // for a header and its values were shown as column names.
+        let csv = "mlopez,platinum,Springfield,suspended\njsmith,silver,Shelbyville,closed\n\
+                   akowalczyk,gold,Ogdenville,active\n";
+        let path = Some(Path::new("data/users.csv"));
+        let view = profile(csv, path, &Nothing).unwrap().render();
+        for value in ["mlopez", "platinum", "Springfield", "suspended"] {
+            assert!(!view.contains(value), "{value}:\n{view}");
+        }
+        assert!(view.contains("3 rows of 4 fields, no header row"), "{view}");
+        // A header is one when its names differ in kind from their columns'
+        // values, or when they are words the frontier has.
+        let typed = "id,user,joined\n1,mlopez,2026-01-02\n2,jsmith,2026-02-03\n";
+        let view = profile(typed, path, &Nothing).unwrap().render();
+        assert!(
+            view.contains("after a header row") && view.contains("user — "),
+            "{view}"
+        );
+        let named = format!("user,plan,city,state\n{csv}");
+        let view = profile(&named, path, &Toy).unwrap().render();
+        assert!(
+            view.contains("after a header row") && view.contains("state — "),
+            "{view}"
+        );
     }
 
     #[test]
