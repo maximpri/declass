@@ -176,9 +176,18 @@ pub struct Implemented {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct EditView {
     pieces: Vec<(String, String)>,
+    /// What a line break the frontier writes stands for in the file (`\r\n`
+    /// in a file whose lines end so); empty: itself.
+    line_break: String,
 }
 
 impl EditView {
+    /// Makes a line break the frontier writes stand for `line_break` in the
+    /// file, as the file's own do (`\r\n`), so an edit keeps its line ends.
+    pub fn set_line_break(&mut self, line_break: &str) {
+        self.line_break = line_break.to_owned();
+    }
+
     /// Appends a piece: `shown` stands for `file`.
     pub fn push(&mut self, shown: &str, file: &str) {
         if !(shown.is_empty() && file.is_empty()) {
@@ -237,8 +246,9 @@ impl EditView {
         if cuts {
             return false;
         }
-        let mut out = Vec::with_capacity(self.pieces.len() + with.pieces.len());
-        let mut with = Some(with.pieces);
+        let with = self.with_line_breaks(with);
+        let mut out = Vec::with_capacity(self.pieces.len() + with.len());
+        let mut with = Some(with);
         for ((shown, file), (s, e)) in std::mem::take(&mut self.pieces).into_iter().zip(spans) {
             // A piece shown as nothing is before, after or inside the range
             // by where it stands.
@@ -267,6 +277,36 @@ impl EditView {
         out.extend(with.take().unwrap_or_default());
         self.pieces = out;
         true
+    }
+
+    /// The pieces of `with`, each line break of the text it holds as
+    /// written (not of a value it restores) standing for the file's.
+    fn with_line_breaks(&self, with: EditView) -> Vec<(String, String)> {
+        if self.line_break.is_empty() || self.line_break == "\n" {
+            return with.pieces;
+        }
+        let mut out = EditView::default();
+        for (shown, file) in with.pieces {
+            if shown != file {
+                out.push(&shown, &file);
+                continue;
+            }
+            let mut rest = shown.as_str();
+            while let Some(n) = rest.find('\n') {
+                let line = &rest[..n];
+                match line.strip_suffix('\r') {
+                    // A `\r\n` written as such stays.
+                    Some(_) => out.push(&rest[..=n], &rest[..=n]),
+                    None => {
+                        out.push(line, line);
+                        out.push("\n", &self.line_break);
+                    }
+                }
+                rest = &rest[n + 1..];
+            }
+            out.push(rest, rest);
+        }
+        out.pieces
     }
 }
 
@@ -577,5 +617,12 @@ mod tests {
         assert!(v.replace(0, end, with));
         assert_eq!(v.file(), "PASSWORD=zz!\nLEVEL=debug");
         assert_eq!(v.shown(), "PASSWORD=⟨secret:PASSWORD#1⟩!\nLEVEL=debug");
+        // In a file whose lines end with `\r\n`, a line break written stands
+        // for one (one written as `\r\n` stays).
+        v.set_line_break("\r\n");
+        let end = v.shown().len();
+        let with = EditView::written("\nNEW=1\nOLD=2\r\n", &|t| t.to_owned());
+        assert!(v.replace(end, end, with));
+        assert_eq!(v.file(), "PASSWORD=zz!\nLEVEL=debug\r\nNEW=1\r\nOLD=2\r\n");
     }
 }

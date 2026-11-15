@@ -394,7 +394,7 @@ vault.
 | Class | View body |
 |---|---|
 | Raw (public) | the content, with detected and known values replaced and copied sensitive spans removed |
-| Tokenized (secret-bearing files) | structure intact, every value → placeholder. Assignments are read as the structure view reads them (`structure::parse::assignments`): a key is a name, and a quoted value ends at its closing quote on its own line or, when its line does not close it, on the later line that does (a private key, a JSON document), one placeholder between its quotes; a line whose key is not a name has what follows its first `=` withheld all the same (placeholder named by kind); a line without `=` is sanitized as sensitive text. The view is built from pieces (text shown, text of the file) that `edit_file` also reads (§5.5) |
+| Tokenized (secret-bearing files) | structure intact, every value → placeholder. Assignments are read as the structure view reads them (`structure::parse::assignments`): a key is a name, and a quoted value ends at its closing quote on its own line or, when its line does not close it, on the later line that does (a private key, a JSON document), one placeholder between its quotes; only spaces and a `#` comment may follow a closing quote (other text makes the value unquoted), and an unquoted value ends before a `#` after a space; quotes and the comment after a value are pieces of their own (the comment shown as sensitive text, what follows a `=` in it withheld). A line whose key is not a name has what follows its first `=` withheld all the same (placeholder named by kind); a comment is sanitized as sensitive text; any other line without `=` is withheld whole unless every word of it is a public word. The view is built from pieces (text shown, text of the file) that `edit_file` also reads (§5.5): a placeholder written back between its quotes restores the value byte for byte |
 | HandleSummary (sensitive files, large command output, `sensitive_data` output) | handle + size + up to 12 error lines (sanitized) + repeated line shapes for texts over 40 lines (digits as `#`, values as `⟨…⟩`) + local summary and facts. With `sensitivity.structure_views` (§5.12): the structure view (or a log's line templates) in place of the line shapes and, for a data file, the first record of its synthetic sample; for `sensitive_data` output up to 80 lines, the masked output in place of the error lines; short `sensitive_data` output past its budget: a fixed text, no handle |
 | Tokenized: synthetic sample (`synthetic_sample`) | the file's records with every value a rule-generated fake, checked before it is shown |
 | Command output ≤ 6,000 chars (not allowlisted) | shown sanitized, no local call |
@@ -540,7 +540,8 @@ as written is edited through `Presenter::edit_view`: a sensitive `KEY=value` fil
 into pieces (the text shown, the text of the file it stands for); each anchor is found in the text
 shown, never in the file, must take a placeholder or a line shown with values withheld whole, and
 the edit is made at the text those pieces stand for (`EditView::replace`), so success or failure
-answers no guess. Other sensitive files (shown as summaries) and protected source refuse anchor
+answers no guess. Each line of the view ends with `\n`, as `read_file` shows it, the last one too;
+in a file whose lines end with `\r\n` a line break written stands for one. Other sensitive files (shown as summaries) and protected source refuse anchor
 edits before any comparison. A write that resolves a placeholder into a
 file that is not sensitive already (a secret sink outside the sensitivity globs, such as
 `config/*.toml`) first records that file as derived (`derived.json`, as a `sensitive_data`

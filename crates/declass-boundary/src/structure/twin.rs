@@ -1099,14 +1099,15 @@ fn twin_env(text: &str, seed: u64, k: &dyn Knowledge) -> Twin {
                 None => fake,
             };
             // The line the value ends on (its own, or the one closing a
-            // multi-line value).
+            // multi-line value). What follows the value there (a comment) is
+            // prose, like a comment's line: only its line break is kept.
             let last_end = a.span.end
                 + text[a.span.end..]
                     .find('\n')
                     .map_or(text.len() - a.span.end, |n| n + 1);
             out.push_str(&text[offset..a.span.start]);
             out.push_str(&written);
-            out.push_str(&text[a.span.end..last_end]);
+            out.push_str(&text[a.tail(text).end..last_end]);
             written_to = last_end;
         } else if body.trim().is_empty() {
             out.push_str(eol);
@@ -1444,6 +1445,14 @@ mod tests {
         assert!(t.text.contains("URL=postgres://"), "{}", t.text);
         let limit = t.text.lines().find(|l| l.starts_with("LIMIT=")).unwrap();
         assert_eq!(limit.len(), "LIMIT=500".len());
+        // What follows a value on its line is a comment, or part of the
+        // value: never copied.
+        let text = "LOG_LEVEL=\"info\" # pw=hunter2secretKKK\nDEBUG='true'tailsecretMMM\n\
+                    KEY=\"-----BEGIN-----\nQWxh\n-----END-----\" # pem kq7v\n";
+        let t = twin(text, Some(Path::new(".env")), &Nothing, 9, 5).unwrap();
+        for copied in ["hunter2secretKKK", "tailsecretMMM", "kq7v", "#"] {
+            assert!(!t.text.contains(copied), "{copied}: {}", t.text);
+        }
     }
 
     #[test]

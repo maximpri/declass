@@ -408,7 +408,9 @@ pub fn sniff_delimiter(text: &str, hint: Option<char>) -> Option<char> {
 pub struct Assignment {
     pub key: String,
     /// The value as written (quotes included). A multi-line value's span
-    /// runs over the lines it holds, to its closing quote.
+    /// runs over the lines it holds, to its closing quote. What follows it
+    /// on the line it ends on is spaces and a comment, if anything
+    /// ([`Assignment::tail`]).
     pub span: Range<usize>,
     /// The value without surrounding quotes.
     pub value: String,
@@ -424,13 +426,43 @@ impl Assignment {
         text.get(self.span.clone())
             .is_some_and(|v| v.contains('\n'))
     }
+
+    /// What follows the value in `text` on the line it ends on, its line
+    /// break left out: nothing, spaces, or spaces and a `#` comment.
+    pub fn tail(&self, text: &str) -> Range<usize> {
+        let rest = &text[self.span.end..];
+        let line = &rest[..rest.find('\n').unwrap_or(rest.len())];
+        self.span.end..self.span.end + line.trim_end_matches('\r').len()
+    }
+}
+
+/// Whether `rest`, what follows a closing quote on its line, leaves the
+/// quote closing the value: nothing, or spaces and then nothing or a `#`
+/// comment. Text against the quote (`"x"y`, `"x"#y`) or after a space
+/// (`"x" y`) is part of an unquoted value, as dotenv and the shell read it.
+fn ends_quoted(rest: &str) -> bool {
+    let rest = rest.trim_end_matches('\r');
+    let after = rest.trim_start_matches([' ', '\t']);
+    rest.is_empty() || (after.len() < rest.len() && (after.is_empty() || after.starts_with('#')))
+}
+
+/// The length of the unquoted value at the start of `v` (a line's text
+/// after `=`, spaces around it trimmed): up to a `#` after a space, which
+/// starts a comment, the spaces before it left out.
+fn unquoted_len(v: &str) -> usize {
+    let bytes = v.as_bytes();
+    let end = (1..bytes.len())
+        .find(|&i| bytes[i] == b'#' && matches!(bytes[i - 1], b' ' | b'\t'))
+        .unwrap_or(bytes.len());
+    v[..end].trim_end().len()
 }
 
 /// Where the quoted value that `quote` opens at byte `open` of `text` ends,
 /// as dotenv reads it: at the first quote after it on its own line (for a
-/// double quote, one no backslash escapes), whatever follows it there;
-/// else at the first one on a later line that only spaces and a `#`
-/// comment follow. `None`: nothing closes it.
+/// double quote, one no backslash escapes), whatever follows it there (text
+/// against it makes the value unquoted: see [`assignments`]); else at the
+/// first one on a later line that only spaces and a `#` comment follow
+/// ([`ends_quoted`]). `None`: nothing closes it.
 fn closing_quote(text: &str, open: usize, quote: char) -> Option<usize> {
     let bytes = text.as_bytes();
     let q = quote as u8;
@@ -446,8 +478,7 @@ fn closing_quote(text: &str, open: usize, quote: char) -> Option<usize> {
     (line_end..bytes.len()).find(|&i| {
         closes(i) && {
             let rest = &text[i + 1..];
-            let after = rest[..rest.find('\n').unwrap_or(rest.len())].trim_start();
-            after.is_empty() || after.starts_with('#')
+            ends_quoted(&rest[..rest.find('\n').unwrap_or(rest.len())])
         }
     })
 }
@@ -455,10 +486,13 @@ fn closing_quote(text: &str, open: usize, quote: char) -> Option<usize> {
 /// The assignments of a `KEY=value` file (`export` allowed, `#` comments
 /// skipped, a byte order mark ignored). A key is a name ([`is_env_key`]). A
 /// quoted value ends at its closing quote ([`closing_quote`]): on its own
-/// line (a comment or other text may follow), or, when its line does not
-/// close it, on a later line, as dotenv reads it. The lines between (a
-/// private key, a JSON document) are part of the value, never assignments
-/// or other lines of their own. A quote nothing closes ends with its line.
+/// line, or, when its line does not close it, on a later line, as dotenv
+/// reads it. The lines between (a private key, a JSON document) are part of
+/// the value, never assignments or other lines of their own. Only spaces
+/// and a comment may follow a closing quote: a value with other text after
+/// its quote (`"x"y`, `"x" y`), and a quote nothing closes, are read
+/// unquoted. An unquoted value ends with its line, or before a `#` after a
+/// space, which starts a comment.
 pub fn assignments(text: &str) -> Vec<Assignment> {
     let mut lines: Vec<(usize, &str)> = Vec::new();
     let mut offset = 0;
@@ -495,6 +529,10 @@ pub fn assignments(text: &str) -> Vec<Assignment> {
         let opened = v.chars().next().filter(|q| *q == '"' || *q == '\'');
         if let Some(q) = opened
             && let Some(close) = closing_quote(text, start, q)
+            && ends_quoted({
+                let rest = &text[close + 1..];
+                &rest[..rest.find('\n').unwrap_or(rest.len())]
+            })
         {
             out.push(Assignment {
                 key: key.trim().to_owned(),
@@ -509,10 +547,17 @@ pub fn assignments(text: &str) -> Vec<Assignment> {
             }
             continue;
         }
+        // A comment after spaces with nothing before it (`KEY= # note`)
+        // leaves the value empty.
+        let len = if lead_ws > 0 && v.starts_with('#') {
+            0
+        } else {
+            unquoted_len(v)
+        };
         out.push(Assignment {
             key: key.trim().to_owned(),
-            span: start..start + v.len(),
-            value: v.to_owned(),
+            span: start..start + len,
+            value: v[..len].to_owned(),
             quote: None,
             export,
         });
@@ -839,14 +884,13 @@ mod tests {
 
     #[test]
     fn a_quote_closed_on_its_own_line_ends_the_value_there() {
-        // A comment or other text after the closing quote: the value ends
-        // there, and the lines after it are their own (they were taken into
-        // the value up to the next line ending in a quote).
+        // A comment after the closing quote: the value ends there, and the
+        // lines after it are their own (they were taken into the value up to
+        // the next line ending in a quote).
         for text in [
             "A=\"x\" # c\nB=1\nC=\"y\"\nD=3\n",
             "A='x' # c\nB=1\nC='y'\nD=3\n",
             "A=\"x\" # c\r\nB=1\r\nC=\"y\"\r\nD=3\r\n",
-            "A=\"x\"y\nB=1\nC=\"y\"\nD=3\n",
             "export\tA=\"x\" # c\nB=1\nC=\"y\"\nD=3\n",
         ] {
             let a = assignments(text);
@@ -861,6 +905,43 @@ mod tests {
             );
             assert!(!a.iter().any(|a| a.multiline(text)), "{text:?}");
         }
+    }
+
+    #[test]
+    fn what_follows_a_value_is_read_as_dotenv_reads_it() {
+        // Text against a closing quote, or after it and a space, is part of
+        // an unquoted value; a `#` after a space starts a comment, which is
+        // no part of the value (it was, so a comment's text was taken for
+        // the value, and a public value's comment was shown with it).
+        let text = "A=\"x\"y\nB='x' y # c\nC=plain # note\nD=a#b\nE= # only a comment\n\
+                    F=\"q\"   \nG=\"q\" # c\r\nH=\"q\"#c\n";
+        let a = assignments(text);
+        let got: Vec<(&str, &str, Option<char>, &str)> = a
+            .iter()
+            .map(|a| {
+                (
+                    a.key.as_str(),
+                    &text[a.span.clone()],
+                    a.quote,
+                    &text[a.tail(text)],
+                )
+            })
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("A", "\"x\"y", None, ""),
+                ("B", "'x' y", None, " # c"),
+                ("C", "plain", None, " # note"),
+                ("D", "a#b", None, ""),
+                ("E", "", None, "# only a comment"),
+                ("F", "\"q\"", Some('"'), "   "),
+                ("G", "\"q\"", Some('"'), " # c"),
+                ("H", "\"q\"#c", None, ""),
+            ]
+        );
+        assert_eq!(a[2].value, "plain");
+        assert_eq!(a[5].value, "q");
     }
 
     #[test]

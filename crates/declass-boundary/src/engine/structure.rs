@@ -1158,10 +1158,12 @@ mod tests {
         for want in [
             "PAYMENTS_API_KEY — double-quoted; exported; secret-like, 32 chars: A-Z a-z 0-9 _",
             "LIMIT — integer, 4 digits",
-            "1 line(s) that are neither assignments nor comments: a a a ×1",
+            "1 line(s) that are neither assignments nor comments: 16 chars: a-z",
         ] {
             assert!(view.contains(want), "missing {want:?}:\n{view}");
         }
+        // A line in no assignment syntax is withheld whole.
+        assert!(!view.contains("broken line here"), "{view}");
         // The key is withheld; a limit is a plainly public setting, shown as it is.
         assert!(
             !view.contains("Qm8v") && view.contains("LIMIT=5000"),

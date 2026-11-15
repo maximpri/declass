@@ -2354,7 +2354,7 @@ mod sensitive_command_tests {
         let edit = |path: &str, old: &str, new: &str| json!({"path": path, "edits": [{"old": old, "new": new}]});
         let shown = call(&mut ctx, "read_file", json!({"path": ".env"})).await;
         assert!(
-            shown.contains("DB_PASSWORD=⟨secret:DB_PASSWORD#1⟩"),
+            shown.contains("DB_PASSWORD=\"⟨secret:DB_PASSWORD#1⟩\""),
             "{shown}"
         );
         // A right and a wrong guess get the same answer, and nothing changes.
@@ -2367,7 +2367,7 @@ mod sensitive_command_tests {
         let cut = call(
             &mut ctx,
             "edit_file",
-            edit(".env", "DB_PASSWORD=⟨secret:DB_PASS", "x"),
+            edit(".env", "DB_PASSWORD=\"⟨secret:DB_PASS", "x"),
         )
         .await;
         assert!(cut.contains("take it whole"), "{cut}");

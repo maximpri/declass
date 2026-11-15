@@ -78,10 +78,66 @@ static WORD: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"[\p{L}\p{M}]+").expect("static regex"));
 static TERM: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"[\p{L}\p{M}\p{N}_]+").expect("static regex"));
+/// Terms joined by `-` or `.` (`readme-version-two`, `us-east-1`, `v1.2`),
+/// or a term alone.
+static RUN: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"[\p{L}\p{M}\p{N}_]+(?:[-.][\p{L}\p{M}\p{N}_]+)*").expect("static regex")
+});
 
 fn words(text: &str) -> impl Iterator<Item = String> + '_ {
     TERM.find_iter(text).map(|m| m.as_str().to_lowercase())
 }
+
+/// The words of public text ([`State::public_words`]): its terms, and its
+/// terms joined by `-` or `.` as one word, so a setting public content
+/// names (`readme-version-two`) is known whole.
+fn public_terms(text: &str) -> impl Iterator<Item = String> + '_ {
+    words(text).chain(
+        RUN.find_iter(text)
+            .filter(|m| m.as_str().contains(['-', '.']))
+            .map(|m| m.as_str().to_lowercase()),
+    )
+}
+
+/// Whether `key` is plainly a name: one letter case throughout, words
+/// joined by `_`, `.` or `-` (`DATABASE_URL`, `db.host`), unlike a run of
+/// base64 (`kY8cq5Ytb`).
+fn plain_name(key: &str) -> bool {
+    let sep = |b: u8| b.is_ascii_digit() || b"_.-".contains(&b);
+    key.bytes().all(|b| b.is_ascii_uppercase() || sep(b))
+        || key.bytes().all(|b| b.is_ascii_lowercase() || sep(b))
+}
+
+/// Values of a setting that are public whatever the key: booleans, levels,
+/// environment names.
+const SETTING_WORDS: &[&str] = &[
+    "true",
+    "false",
+    "yes",
+    "no",
+    "on",
+    "off",
+    "enabled",
+    "disabled",
+    "none",
+    "null",
+    "trace",
+    "debug",
+    "info",
+    "warn",
+    "warning",
+    "error",
+    "fatal",
+    "production",
+    "prod",
+    "staging",
+    "stage",
+    "development",
+    "dev",
+    "test",
+    "testing",
+    "local",
+];
 
 /// Other forms the same value takes once code touches it: a person's surname
 /// alone; a number without or with digit grouping, or read as minor units.
@@ -574,13 +630,13 @@ impl Engine {
         let files = &self.ip_split(all_files);
         {
             let mut st = self.lock();
-            st.public_words.extend(words(objective));
+            st.public_words.extend(public_terms(objective));
             // The paths are public (the file list, the task note's list of
             // sensitive files); so is the text of public files, before the
             // frontier reads it: a local answer quoting a file name or the
             // program's own error message copies nothing from sensitive data.
             let paths = files.join("\n");
-            st.public_words.extend(words(&paths));
+            st.public_words.extend(public_terms(&paths));
             st.overlap.add_public(&paths);
             for f in files {
                 let path = Path::new(f);
@@ -591,7 +647,7 @@ impl Engine {
                     && sniff(&bytes).is_none()
                 {
                     let text = String::from_utf8_lossy(&bytes);
-                    st.public_words.extend(words(&text));
+                    st.public_words.extend(public_terms(&text));
                     st.overlap.add_public(&text);
                 }
             }
@@ -949,12 +1005,13 @@ impl Engine {
     /// ([`crate::structure::parse::assignments`]): a key is a name, and a
     /// value that opens a quote its line does not close runs to the line
     /// that closes it (a private key, a JSON document), so its lines are
-    /// withheld with it, shown as one placeholder between its quotes. Any
-    /// other line (a comment, a line in another syntax) is sanitized as
-    /// sensitive text. Reading every line holding a `=` as an assignment put
-    /// the text before its `=` (a line of a private key, the start of a
-    /// password inside a JSON value) on show and into the placeholder's
-    /// name. `read_file`'s line numbers are kept.
+    /// withheld with it, shown as one placeholder between its quotes. Text
+    /// after a value is a comment, shown as one; any other line is withheld
+    /// unless it is plainly public ([`Self::unnamed_line`]). Reading every
+    /// line holding a `=` as an assignment put the text before its `=` (a
+    /// line of a private key, the start of a password inside a JSON value)
+    /// on show and into the placeholder's name. `read_file`'s line numbers
+    /// are kept.
     fn tokenized_view(&self, st: &mut State, path: &str, text: &str) -> String {
         // The text without `read_file`'s numbers, and each line's number.
         let (numbers, plain): (Vec<&str>, std::borrow::Cow<'_, str>) =
@@ -984,8 +1041,13 @@ impl Engine {
     /// The lines of the `KEY=value` file `plain` as its view shows them
     /// ([`Self::tokenized_view`]), each cut into pieces: the text shown and
     /// the text of the file it stands for. The view and `edit_file` read the
-    /// file through these, so an edit matches what was shown.
+    /// file through these, so an edit matches what was shown. An assignment
+    /// is its key and the spaces after `=`, its quotes, its value (withheld
+    /// as the file holds it, so its placeholder written back between the
+    /// quotes restores the value byte for byte), and what follows the value
+    /// on its line: spaces and a comment, shown as a comment.
     fn env_lines(&self, st: &mut State, path: &str, plain: &str) -> Vec<EnvLine> {
+        let literal = |t: &str| (t.to_owned(), t.to_owned());
         let assignments = crate::structure::parse::assignments(plain);
         let mut next = assignments.iter().peekable();
         let mut out = Vec::new();
@@ -1006,70 +1068,107 @@ impl Engine {
             };
             let assigned =
                 next.next_if(|a| a.span.start >= start && a.span.start <= start + body.len());
-            let Some(a) = assigned.filter(|a| !a.value.trim().is_empty()) else {
+            let Some(a) = assigned else {
                 shown.pieces = self.unnamed_line(st, path, body);
                 out.push(shown);
                 continue;
             };
-            let key_part = plain[start..a.span.start].to_owned();
-            shown.pieces.push((key_part.clone(), key_part));
-            if a.multiline(plain) {
-                shown_to = a.span.end;
-                let token = st
-                    .vault
-                    .token_for(&a.value, Kind::Secret, Some(&a.key), path)
-                    .unwrap_or_default();
-                let quote = a.quote.map(String::from).unwrap_or_default();
-                shown.pieces.push((
-                    format!("{quote}{token}{quote}"),
-                    plain[a.span.clone()].to_owned(),
-                ));
-                // What follows the closing quote on its line (a comment).
-                let rest = &plain[a.span.end..];
-                let closing = &rest[..rest.find('\n').map_or(rest.len(), |n| n + 1)];
-                let tail = closing.trim_end_matches(['\n', '\r']);
-                shown
-                    .pieces
-                    .push((self.sanitize(st, tail, path, true), tail.to_owned()));
-                shown.line_break = closing[tail.len()..].to_owned();
+            // A key with nothing after it but `=` (base64's padding) that is
+            // no plain name is a line of encoded data, a private key's last
+            // line outside quotes (`kY8cq5Ytb==`): withheld whole.
+            if a.value.bytes().all(|b| b == b'=') && !plain_name(&a.key) {
+                shown.pieces = self.withheld_text(st, path, body);
                 out.push(shown);
                 continue;
             }
-            let v = a.value.trim().trim_matches(|c| c == '"' || c == '\'');
+            shown.pieces.push(literal(&plain[start..a.span.start]));
+            let quote = a.quote.map(String::from).unwrap_or_default();
+            shown.pieces.push(literal(&quote));
+            let v = a.value.trim();
             // A plainly public setting is shown as it is: in the vault
             // it would be replaced wherever it appears, public code
             // included, and refuse every request holding it (X1's
             // `GATEWAY_DIALECT=postgresql` refused postgresql.org).
-            if self.public_setting(st, &a.key, v) {
-                let value = plain[a.span.start..start + body.len()].to_owned();
-                shown.pieces.push((value.clone(), value));
-                out.push(shown);
-                continue;
-            }
-            let token = st
-                .vault
-                .token_for(v, Kind::Secret, Some(&a.key), path)
-                .unwrap_or_default();
+            let multiline = a.multiline(plain);
+            let public = v.is_empty()
+                || (!multiline
+                    && self.public_setting(st, &a.key, v.trim_matches(|c| c == '"' || c == '\'')));
+            shown.pieces.push(match public {
+                true => literal(&a.value),
+                false => (
+                    self.withhold(st, &a.value, Some(&a.key), path),
+                    a.value.clone(),
+                ),
+            });
+            shown.pieces.push(literal(&quote));
+            // What follows the value on the line it ends on.
+            let tail = a.tail(plain);
+            let after = &plain[tail.clone()];
+            let comment = after.trim_start_matches([' ', '\t']);
             shown
                 .pieces
-                .push((token, plain[a.span.start..start + body.len()].to_owned()));
+                .push(literal(&after[..after.len() - comment.len()]));
+            if !comment.is_empty() {
+                shown.pieces.extend(self.unnamed_line(st, path, comment));
+            }
+            if multiline {
+                shown_to = a.span.end;
+                let rest = &plain[tail.end..];
+                let break_len = rest.find('\n').map_or(0, |n| n + 1);
+                shown.line_break = rest[..break_len].to_owned();
+            }
             out.push(shown);
         }
         out
     }
 
-    /// The pieces of a line of a `KEY=value` file that is not an assignment
-    /// to a name (`set KEY=…`, `"KEY"=…`, `KEY:=…`, `my key=…`, a comment
-    /// holding an old value, a line in another syntax). What follows its
-    /// first `=` is withheld all the same (from the quote, when the `=`
-    /// stands inside a quoted string), unless it is a plainly public setting;
-    /// what comes before is shown as sensitive text. The placeholder is named
-    /// by kind only: a name taken from such a line could hold part of a
-    /// value. A line without `=` is shown as sensitive text.
+    /// The placeholder of `value`, a value of a `KEY=value` file exactly as
+    /// the file holds it (the placeholder written back restores it byte for
+    /// byte), with the forms its reader may take it in as other spellings:
+    /// without the spaces around it, and without the quotes around a value
+    /// read unquoted (`"x"y"`).
+    fn withhold(&self, st: &mut State, value: &str, label: Option<&str>, path: &str) -> String {
+        let token = st
+            .vault
+            .token_for(value, Kind::Secret, label, path)
+            .unwrap_or_default();
+        let trimmed = value.trim();
+        let unquoted = ['"', '\'']
+            .into_iter()
+            .find_map(|q| trimmed.strip_prefix(q)?.strip_suffix(q))
+            .unwrap_or(trimmed);
+        for form in [trimmed, unquoted] {
+            if form != value && !form.is_empty() {
+                let _ = st.vault.alias(form, value);
+            }
+        }
+        token
+    }
+
+    /// The pieces of a line of a `KEY=value` file that is no assignment to a
+    /// name, or of the comment after a value. What follows its first `=`
+    /// (`set KEY=…`, `"KEY"=…`, `KEY:=…`, `my key=…`, a comment holding an
+    /// old value) is withheld (from the quote, when the `=` stands inside a
+    /// quoted string) unless it is a plainly public setting, and what comes
+    /// before it is shown as sensitive text; the placeholder is named by kind
+    /// only, since a name taken from such a line could hold part of a value.
+    /// Without a `=`, a comment is shown as sensitive text, and any other
+    /// line (a stray value, `hunter2`, a line of a key outside quotes) is
+    /// withheld whole unless it is plainly public ([`Self::public_text`]).
     fn unnamed_line(&self, st: &mut State, path: &str, body: &str) -> Vec<(String, String)> {
+        let literal = |t: &str| (t.to_owned(), t.to_owned());
+        // A byte order mark opening the file is no part of its first line.
+        if let Some(rest) = body.strip_prefix('\u{feff}') {
+            let mut pieces = vec![literal("\u{feff}")];
+            pieces.extend(self.unnamed_line(st, path, rest));
+            return pieces;
+        }
         let whole = |st: &mut State| vec![(self.sanitize(st, body, path, true), body.to_owned())];
         let Some(eq) = body.find('=') else {
-            return whole(st);
+            return match body.trim_start().starts_with('#') {
+                true => whole(st),
+                false => self.withheld_text(st, path, body),
+            };
         };
         let open = ['"', '\'']
             .into_iter()
@@ -1077,8 +1176,9 @@ impl Engine {
             .filter_map(|q| body[..eq].rfind(q))
             .min();
         let (before, value) = body.split_at(open.unwrap_or(eq + 1));
-        let v = value.trim().trim_matches(|c| c == '"' || c == '\'');
-        if v.is_empty() {
+        let core = value.trim_matches([' ', '\t']);
+        let v = core.trim_matches(|c| c == '"' || c == '\'');
+        if v.trim().is_empty() {
             return whole(st);
         }
         let shown_before = match open {
@@ -1089,25 +1189,56 @@ impl Engine {
             ),
         };
         let public = open.is_none() && self.public_setting(st, before[..eq].trim(), v);
-        let shown_value = match public {
-            true => value.to_owned(),
-            false => st
-                .vault
-                .token_for(v, Kind::Secret, None, path)
-                .unwrap_or_default(),
-        };
+        let lead = value.len() - value.trim_start_matches([' ', '\t']).len();
         vec![
             (shown_before, before.to_owned()),
-            (shown_value, value.to_owned()),
+            literal(&value[..lead]),
+            match public {
+                true => literal(core),
+                false => (self.withhold(st, core, None, path), core.to_owned()),
+            },
+            literal(&value[lead + core.len()..]),
         ]
+    }
+
+    /// `body`, a line of a sensitive `KEY=value` file in no assignment
+    /// syntax, withheld whole (the spaces around it kept) unless it is
+    /// plainly public ([`Self::public_text`]).
+    fn withheld_text(&self, st: &mut State, path: &str, body: &str) -> Vec<(String, String)> {
+        let text = body.trim_matches([' ', '\t']);
+        if text.is_empty() || self.public_text(st, text) {
+            return vec![(self.sanitize(st, body, path, true), body.to_owned())];
+        }
+        let lead = body.len() - body.trim_start_matches([' ', '\t']).len();
+        let literal = |t: &str| (t.to_owned(), t.to_owned());
+        vec![
+            literal(&body[..lead]),
+            (self.withhold(st, text, None, path), text.to_owned()),
+            literal(&body[lead + text.len()..]),
+        ]
+    }
+
+    /// Whether `text`, a line of a sensitive `KEY=value` file in no
+    /// assignment syntax, is plainly public: no detector finds anything in
+    /// it, and each of its words (letters and digits, joined by `-` or `.`)
+    /// is one that public content uses, or a setting's word.
+    fn public_text(&self, st: &State, text: &str) -> bool {
+        scan_each_in(text, self.detectors, None).is_empty()
+            && self.custom.find(text).is_empty()
+            && RUN.find_iter(text).all(|w| {
+                let w = w.as_str().to_lowercase();
+                st.public_words.contains(&w) || SETTING_WORDS.contains(&w.as_str())
+            })
     }
 
     /// What `edit_file` matches anchors against in the sensitive file at
     /// `path` (see [`Presenter::edit_view`]): a `KEY=value` file's view, cut
-    /// into the pieces it is made of. Any other sensitive file was shown as a
-    /// summary, not as its text, so it has none; protected source is
-    /// changed only with `edit_protected`. Either refusal comes before the
-    /// file is compared with anything, so it answers no guess.
+    /// into the pieces it is made of, each line ending in `\n` as
+    /// `read_file` shows it (the last one too); a line break `edit_file`
+    /// writes stands for the file's own (`\r\n`). Any other sensitive file
+    /// is shown as a summary, not as its text, so it has none; protected
+    /// source is changed only with `edit_protected`. Either refusal comes
+    /// before the file is compared with anything, so it answers no guess.
     fn file_edit_view(&self, path: &Path, text: &str) -> Option<Result<EditView, String>> {
         if let Err(why) = self.ip_guard_write(path) {
             return Some(Err(why));
@@ -1117,21 +1248,20 @@ impl Engine {
         }
         if !is_secret_bearing(path) {
             return Some(Err(format!(
-                "{} is sensitive and you were shown a summary of it, not its text, so edit_file has \
-nothing to match `old` against. Write the whole file with write_file (placeholders are restored \
+                "{} is sensitive, so read_file shows a summary of it, not its text, and edit_file has \
+no text to match `old` against. Write the whole file with write_file (placeholders are restored \
 locally), or change it with run_command and sensitive_data.",
                 path.display()
             )));
         }
         let mut st = self.lock();
         let mut view = EditView::default();
+        view.set_line_break(if text.contains("\r\n") { "\r\n" } else { "\n" });
         for line in self.env_lines(&mut st, &path.display().to_string(), text) {
             for (shown, file) in &line.pieces {
                 view.push(shown, file);
             }
-            if !line.line_break.is_empty() {
-                view.push("\n", &line.line_break);
-            }
+            view.push("\n", &line.line_break);
         }
         Some(Ok(view))
     }
@@ -1139,13 +1269,14 @@ locally), or change it with run_command and sensitive_data.",
     /// Whether `KEY=value` in an environment file is a plainly public
     /// setting: the key names nothing secret or personal, no detector finds
     /// anything in the value, and the value is a boolean, a level or an
-    /// environment name, a number of five digits at most (or any number
-    /// under a limit-like key: a size, a timeout, a port), or one word that
-    /// public content already uses (a dialect, an encoding, a region).
+    /// environment name ([`SETTING_WORDS`]), a number of five digits at most
+    /// (or any number under a limit-like key: a size, a timeout, a port), or
+    /// a word public content already uses (a dialect, an encoding, a region;
+    /// words joined by `-` or `.` count as one, `us-east-1`).
     fn public_setting(&self, st: &State, key: &str, value: &str) -> bool {
         static PRIVATE_KEY: LazyLock<Regex> = LazyLock::new(|| {
             Regex::new(
-                r"(?i)key|secret|token|pass|pwd|credential|private|auth|session|cookie|salt|sign|cert|dsn|webhook|conn|account|iban|card|ssn|email|mail|user|login|owner|phone|address|name|host|url|uri|endpoint|domain|ip\b",
+                r"(?i)key|secret|token|pass|pwd|credential|private|auth|session|cookie|salt|sign|cert|dsn|webhook|conn|account|iban|card|ssn|(?:^|_|\b)pin(?:$|_|\b)|otp|cvv|cvc|email|mail|user|login|owner|phone|address|name|host|url|uri|endpoint|domain|ip\b",
             )
             .expect("static regex")
         });
@@ -1155,34 +1286,6 @@ locally), or change it with run_command and sensitive_data.",
             )
             .expect("static regex")
         });
-        const WORDS: &[&str] = &[
-            "true",
-            "false",
-            "yes",
-            "no",
-            "on",
-            "off",
-            "enabled",
-            "disabled",
-            "none",
-            "null",
-            "trace",
-            "debug",
-            "info",
-            "warn",
-            "warning",
-            "error",
-            "fatal",
-            "production",
-            "prod",
-            "staging",
-            "stage",
-            "development",
-            "dev",
-            "test",
-            "testing",
-            "local",
-        ];
         if value.is_empty() || PRIVATE_KEY.is_match(key) {
             return false;
         }
@@ -1192,7 +1295,7 @@ locally), or change it with run_command and sensitive_data.",
             return false;
         }
         let lower = value.to_lowercase();
-        if WORDS.contains(&lower.as_str()) {
+        if SETTING_WORDS.contains(&lower.as_str()) {
             return true;
         }
         if value.bytes().all(|b| b.is_ascii_digit()) {
@@ -3390,13 +3493,108 @@ mod tests {
             "set KEY=⟨secret:secret#",
             "KEY:=⟨secret:secret#",
             "  export\tKEY=⟨secret:KEY#",
-            "A=⟨secret:A#1⟩",
+            "A=\"⟨secret:A#1⟩\" # c",
             "B=⟨secret:B#1⟩",
-            "C=⟨secret:C#1⟩",
+            "C=\"⟨secret:C#1⟩\"",
             "D=3",
         ] {
             assert!(shown.contains(line), "missing {line:?}:\n{shown}");
         }
+        // What follows a public setting's closing quote, a comment or text
+        // against it, was shown with the setting. A line in no assignment
+        // syntax was shown as written, and so was a PIN, as a small number.
+        let env = "LOG_LEVEL=\"info\" # pw=hunter2secretKKK\nDEBUG='true'tailsecretMMM\n\
+                   hunter2\ncorrect-horse-battery-staple\nPIN_CODE=48213\nAPP_PIN=7731\n\
+                   kY8cq5Ytb==\nPORT=8080 # the api\n";
+        let shown = e.present(&file(".env"), numbered(env).as_bytes());
+        for value in [
+            "hunter2",
+            "tailsecret",
+            "correct-horse",
+            "48213",
+            "7731",
+            "kY8cq5Ytb",
+        ] {
+            assert!(!shown.contains(value), "{value}: {shown}");
+        }
+        for line in ["LOG_LEVEL=\"info\" # pw=⟨secret:", "PORT=8080 # the api"] {
+            assert!(shown.contains(line), "missing {line:?}:\n{shown}");
+        }
+    }
+
+    #[test]
+    fn what_was_shown_written_back_leaves_the_file_as_it_was() {
+        // A placeholder stood for a value without its quotes, and for the
+        // comment after it: written back, a quoted value lost its quotes
+        // (and with them what a space, `#` or `$` in it means) and a comment
+        // its line. A line break written into a CRLF file was a bare `\n`.
+        let (_d, e) = engine();
+        let env = "\u{feff}# creds\r\nA=\"first secret #1\" # note\r\n\
+                   B=second-secret-2 # pw=hunter2secretKKK\r\nexport C='x y'\r\nD=\"q\"y\r\n\
+                   E= # empty\r\nF=\r\nG=\"\"\r\nLOG_LEVEL=\"info\" # pw=swordfish\r\n\
+                   PEM=\"-----BEGIN-----\r\nAAA\r\n-----END-----\" # pem\r\nset K=v\r\n\
+                   hunter2\r\nkY8cq5Ytb==\r\nLAST=1\r\n";
+        let view = e.edit_view(Path::new(".env"), env).unwrap().unwrap();
+        assert_eq!(view.file(), env);
+        let shown = view.shown();
+        for value in [
+            "first secret",
+            "second-secret",
+            "hunter2",
+            "swordfish",
+            "AAA",
+            "kY8cq",
+            "\"q\"y",
+        ] {
+            assert!(!shown.contains(value), "{value}: {shown}");
+        }
+        for line in [
+            "# creds\n",
+            "A=\"⟨secret:A#",
+            "\" # note\n",
+            "E= # empty\n",
+            "G=\"\"\n",
+        ] {
+            assert!(shown.contains(line), "{line:?}: {shown}");
+        }
+        let written = |text: &str| EditView::written(text, &|t| e.detokenize(t));
+        // Every placeholder, every line and the whole view, written back as
+        // shown, leave the file byte for byte as it was.
+        let mut parts: Vec<(usize, &str)> = Vec::new();
+        let mut at = 0;
+        for line in shown.split_inclusive('\n') {
+            parts.push((at, line));
+            for token in crate::vault::Vault::tokens_in(line) {
+                let s = at + line.find(&token).unwrap();
+                parts.push((s, &shown[s..s + token.len()]));
+            }
+            at += line.len();
+        }
+        parts.push((0, &shown));
+        for (start, text) in parts {
+            let mut v = view.clone();
+            assert!(
+                v.replace(start, start + text.len(), written(text)),
+                "{text:?}"
+            );
+            assert_eq!(v.file(), env, "{text:?}");
+        }
+        // A line added keeps the file's line ends.
+        let mut v = view.clone();
+        let at = shown.find("F=\n").unwrap();
+        assert!(v.replace(at, at + 3, written("F=\nNEW=1\n")));
+        assert!(v.file().contains("\r\nF=\r\nNEW=1\r\nG="), "{:?}", v.file());
+        // A last line without a line break is shown with one, as read_file
+        // shows it, so an anchor ending in one matches there too; its
+        // placeholder written back leaves the file as it was.
+        let env = "A=first-secret-1";
+        let view = e.edit_view(Path::new(".env"), env).unwrap().unwrap();
+        let shown = view.shown();
+        let token = crate::vault::Vault::tokens_in(&shown).remove(0);
+        assert_eq!(shown, format!("A={token}\n"));
+        let mut v = view.clone();
+        assert!(v.replace(2, 2 + token.len(), written(&token)));
+        assert_eq!(v.file(), env);
     }
 
     #[test]
