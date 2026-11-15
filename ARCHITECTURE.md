@@ -332,8 +332,8 @@ inbox, goals, plans, attachments), `acp::Editor` an editor's, one `Session::turn
 editor ─stdin─▶ reader thread ─┬─ answers to Declass's requests (wire::Pending) ─▶ EditorApprover
                                ├─ session/cancel ─▶ Flags: the turn's interrupt, steering stop
                                └─ requests ─▶ dispatcher: initialize, session/new, session/prompt
-                                                │ (first prompt: manifest, lock, converse(Editor))
-transcript.jsonl ─Follow─┐                      ▼
+                                                │ (first prompt: Server::ready, then acp::spawn)
+transcript.jsonl ─Follow─┐                      ▼ session thread: manifest, lock, converse(Editor)
 provider stream ─Ordered─┴─▶ acp::updates (the workspace's display rules) ─▶ stdout (wire::Wire)
 ```
 
@@ -342,17 +342,24 @@ descriptors 0 and 1, descriptor 1 becomes standard error and descriptor 0 `/dev/
 from any crate, or a child process, writes to the log. One thread reads the editor's messages.
 Answers to Declass's own requests (`session/request_permission`) and `session/cancel` are handled
 on it, so they arrive while the session works or waits in an approval (`acp::EditorApprover`
-blocks on `wire::Pending`, as the terminal's approver blocks on the inbox); requests go to the
-dispatcher, which runs on the runtime's main task with the session. Prompts are numbered as they
-are read, and a cancellation covers every prompt read before it. `acp::prompt` makes a prompt's
-content blocks the operator's message: a file is named by its workspace path, never inlined;
-text attached from elsewhere is kept apart, and when the turn runs it is presented as
-`Source::Web` and framed with a random tag (`prompt::framed`). `acp::updates` makes the
+blocks on `wire::Pending`, as the terminal's approver blocks on the inbox; an answer read after a
+cancellation does not count); requests go to the dispatcher, on the runtime's main task. The
+running session has a thread of its own (`acp::spawn`: the runtime's `Handle::block_on`), so what
+it waits for (an approval, the local model's `block_in_place` calls, a command) never holds up the
+dispatcher. Prompts are numbered as they are read, and a cancellation covers every prompt read
+before it. `acp::prompt` makes a prompt's content blocks the operator's message: a file is named
+by its workspace path, never inlined, and only an existing one under a path that reads as nothing
+else (`prompt::plain`); text under an `http:` or `https:` address is kept apart, and when the turn
+runs it is presented as `Source::Web` and framed with a random tag (`prompt::framed`), unless the
+address names a path the boundary holds back (`prompt::withheld`), with an `editor_attachment`
+audit event either way; under any other scheme it is not used. `acp::updates` makes the
 transcript's entries and the stream `session/update` notifications by the rules
 `workspace::cells` follows on the screen. A thread's session starts with its first prompt and its
 id is the run id. One session runs at a time (the workspace lock): a prompt to another thread
-leaves the running session open and starts or resumes that thread's, as `declass --resume` would
-(`chat::resumed`, `chat::recover_plans`), so every thread stays usable.
+leaves the running session open, once what the new one needs has been checked (`Server::ready`:
+its configuration, mode and setup or its resumed record, and its oversight), and starts or resumes
+that thread's, as `declass --resume` would (`chat::resumed`, `chat::recover_plans`), so every
+thread stays usable.
 
 ## 5. Boundary internals
 

@@ -286,6 +286,7 @@ impl Disclosure {
                     | AuditEvent::IntegritySummary { .. }
                     | AuditEvent::ExtensionPinned { .. }
                     | AuditEvent::WebRequest { .. }
+                    | AuditEvent::EditorAttachment { .. }
                     | AuditEvent::OperatorMessage { .. }
                     | AuditEvent::GitCommit { .. }
                     | AuditEvent::McpServer { .. }

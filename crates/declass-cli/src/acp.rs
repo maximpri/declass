@@ -22,8 +22,12 @@
 //! lock requires: a prompt to another thread leaves the running session open
 //! and starts or resumes that thread's (as `declass --resume` resumes it), so
 //! every thread stays usable. While a turn runs, another thread's prompt is
-//! refused with its own error. When the editor goes away (the end of input,
-//! SIGTERM or SIGINT) a running turn is stopped and the session is left open.
+//! refused with its own error. The session runs on a thread of its own, so
+//! whatever it waits for (a permission answer, the local model, a command)
+//! never holds up the dispatcher, which goes on answering the editor; the
+//! reader acts on a cancellation as it reads it. When the editor goes away
+//! (the end of input, SIGTERM or SIGINT) a running turn is stopped and the
+//! session is left open.
 
 mod prompt;
 mod schema;
@@ -38,7 +42,9 @@ use declass_agent::questions::QuestionOptions;
 use declass_agent::session::Steering;
 use declass_agent::transcript::Entry;
 use declass_agent::{ApproveMode, Approver, Oversight, Session, Terminal, TurnEnd};
+use declass_boundary::audit::AuditEvent;
 use declass_boundary::live::{StreamEvent, StreamTap};
+use declass_boundary::view::{Presenter, ViewClass};
 use declass_tui::term::safe;
 use futures_util::FutureExt;
 use schema::{
@@ -48,14 +54,13 @@ use schema::{
 };
 use serde_json::{Value, json};
 use std::collections::HashMap;
-use std::future::Future;
 use std::io::BufReader;
-use std::path::PathBuf;
-use std::pin::Pin;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
+use tokio::sync::oneshot;
 use updates::Updates;
 use wire::{Message, Pending, RpcError, Wire};
 
@@ -95,14 +100,14 @@ boundary off and is not offered to an editor"
     );
     let mut server = Server {
         shared,
-        emb,
+        emb: emb.clone(),
         mode: args.mode,
         initialized: false,
         sessions: HashMap::new(),
         running: None,
+        failed: false,
     };
-    server.run(from).await;
-    Ok(0)
+    Ok(server.run(from).await)
 }
 
 /// What the reader thread, the dispatcher, the session and its approver share.
@@ -269,6 +274,8 @@ struct Prompt {
     message: String,
     /// Third-party text the editor attached, presented when the turn runs.
     attached: Vec<prompt::Attached>,
+    /// What of the prompt is not used, and why (the operator is told).
+    declined: Vec<String>,
 }
 
 /// Where a thread's session is.
@@ -290,62 +297,62 @@ struct Thread {
     phase: Phase,
 }
 
-/// The running session: where its prompts go, and the work that answers
-/// them, which ends saying where the session is then.
-struct Running<'e> {
+/// The running session: where its prompts go, and the end of the thread that
+/// answers them ([`spawn`]), which says where the session is then.
+struct Running {
     id: String,
     prompts: UnboundedSender<Prompt>,
-    work: Pin<Box<dyn Future<Output = Phase> + 'e>>,
+    done: oneshot::Receiver<Phase>,
 }
 
-struct Server<'e> {
+struct Server {
     shared: Arc<Shared>,
-    emb: &'e Embedding,
+    emb: Embedding,
     mode: Option<Mode>,
     initialized: bool,
     sessions: HashMap<String, Thread>,
-    running: Option<Running<'e>>,
+    running: Option<Running>,
+    /// A session's thread ended without saying where its session is (it
+    /// panicked): the agent stops, as a terminal session would.
+    failed: bool,
 }
 
 enum Event {
     Request(Incoming),
-    /// The running session's work ended, saying where the session is.
-    Ended(Phase),
+    /// The running session's thread ended, saying where the session is
+    /// (an error when it could not).
+    Ended(Result<Phase, oneshot::error::RecvError>),
     /// The editor went away, or a signal asks to stop.
     Gone,
 }
 
-impl<'e> Server<'e> {
-    async fn run(&mut self, mut from: UnboundedReceiver<Incoming>) {
-        let mut terminate =
-            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).ok();
-        loop {
+impl Server {
+    /// Serves until the editor goes away; returns the exit code.
+    async fn run(&mut self, mut from: UnboundedReceiver<Incoming>) -> i32 {
+        use tokio::signal::unix::{SignalKind, signal};
+        // Each made once, so a signal that arrives between two waits counts.
+        let mut terminate = signal(SignalKind::terminate()).ok();
+        let mut interrupt = signal(SignalKind::interrupt()).ok();
+        while !self.failed {
             let event = {
-                let work = self.running.as_mut().map(|r| &mut r.work);
+                let done = self.running.as_mut().map(|r| &mut r.done);
                 tokio::select! {
                     incoming = from.recv() => incoming.map_or(Event::Gone, Event::Request),
-                    phase = async {
-                        match work {
-                            Some(work) => work.await,
+                    ended = async {
+                        match done {
+                            Some(done) => done.await,
                             None => std::future::pending().await,
                         }
-                    } => Event::Ended(phase),
-                    _ = tokio::signal::ctrl_c() => Event::Gone,
-                    () = async {
-                        match terminate.as_mut() {
-                            Some(signal) => {
-                                signal.recv().await;
-                            }
-                            None => std::future::pending().await,
-                        }
-                    } => Event::Gone,
+                    } => Event::Ended(ended),
+                    () = received(&mut terminate) => Event::Gone,
+                    () = received(&mut interrupt) => Event::Gone,
                 }
             };
             match event {
                 Event::Request(incoming) => self.request(incoming).await,
-                Event::Ended(phase) => {
+                Event::Ended(ended) => {
                     if let Some(r) = self.running.take() {
-                        self.settle(&r.id, phase);
+                        self.settle(&r.id, ended);
                     }
                 }
                 Event::Gone => break,
@@ -360,22 +367,28 @@ impl<'e> Server<'e> {
             }
             self.leave(r).await;
         }
+        i32::from(self.failed)
     }
 
-    /// Where a thread's session is once its work ended.
-    fn settle(&mut self, id: &str, phase: Phase) {
+    /// Where a thread's session is once its thread ended.
+    fn settle(&mut self, id: &str, ended: Result<Phase, oneshot::error::RecvError>) {
+        let phase = ended.unwrap_or_else(|_| {
+            eprintln!("declass acp: session {id} stopped unexpectedly; the agent stops");
+            self.failed = true;
+            Phase::Ended(format!("session {id} stopped unexpectedly"))
+        });
         if let Some(thread) = self.sessions.get_mut(id) {
             thread.phase = phase;
         }
     }
 
-    /// Ends the running session's work (its queue is empty): the session is
-    /// left open, as `/quit` leaves it.
-    async fn leave(&mut self, running: Running<'e>) {
-        let Running { id, prompts, work } = running;
+    /// Ends the running session's thread (its queue is empty): the session
+    /// is left open, as `/quit` leaves it.
+    async fn leave(&mut self, running: Running) {
+        let Running { id, prompts, done } = running;
         drop(prompts);
-        let phase = work.await;
-        self.settle(&id, phase);
+        let ended = done.await;
+        self.settle(&id, ended);
     }
 
     async fn request(&mut self, incoming: Incoming) {
@@ -471,7 +484,7 @@ impl<'e> Server<'e> {
             .ok_or_else(|| invalid(format!("cwd {} is not a directory", params.cwd)))?;
         // The workspace's own configuration, as a `declass` session there reads
         // it (read again whenever the session starts or resumes).
-        let cfg = load_config(&ws, self.emb).map_err(refused)?;
+        let cfg = load_config(&ws, &self.emb).map_err(refused)?;
         let mode = crate::overrides::resolve_mode(&cfg, self.mode, false).map_err(refused)?;
         set_up(&cfg, mode)?;
         approve::editor_oversight(&cfg, |_| -> Arc<dyn Approver> { Arc::new(Deny) })
@@ -533,39 +546,35 @@ starts only the servers in its own configuration, where they are pinned, checked
         let (Some(thread), Some(number)) = (self.sessions.get(&session), number) else {
             return Err(unknown("no such session on this connection"));
         };
-        if let Phase::Ended(why) = &thread.phase {
-            return Err(unknown(why));
-        }
-        let flags = thread.flags.clone();
-        let composed = prompt::compose(&params.prompt, &thread.ws);
-        if !composed.declined.is_empty() {
-            updates::say(
-                &self.shared.wire,
-                &session,
-                &format!(
-                    "Not used, and nothing of it was sent: {}.\n\n",
-                    composed.declined.join("; ")
-                ),
-            );
-        }
-        let done = |reason: StopReason| {
-            Ok(Some(json!(PromptResult {
-                stop_reason: reason
-            })))
+        // `None` while the session runs; otherwise whether it resumes.
+        let resume = match &thread.phase {
+            Phase::Ended(why) => return Err(unknown(why)),
+            Phase::Running => None,
+            Phase::New => Some(false),
+            Phase::Open => Some(true),
         };
-        if flags.cancelled(number) {
-            return done(StopReason::Cancelled);
-        }
-        if composed.is_empty() {
-            return done(StopReason::EndTurn);
+        let (flags, ws) = (thread.flags.clone(), thread.ws.clone());
+        let composed = prompt::compose(&params.prompt, &ws);
+        let cancelled = flags.cancelled(number);
+        if cancelled || composed.is_empty() {
+            not_used(&self.shared.wire, &session, &composed.declined);
+            return Ok(Some(json!(PromptResult {
+                stop_reason: if cancelled {
+                    StopReason::Cancelled
+                } else {
+                    StopReason::EndTurn
+                }
+            })));
         }
         let prompt = Prompt {
             id: id.clone(),
             number,
             message: composed.message,
             attached: composed.attached,
+            declined: composed.declined,
         };
-        if matches!(thread.phase, Phase::Running) {
+        let Some(resume) = resume else {
+            // It waits for the turns before it.
             flags.outstanding.fetch_add(1, Ordering::SeqCst);
             if let Some(r) = self.running.as_ref().filter(|r| r.id == session)
                 && r.prompts.send(prompt).is_ok()
@@ -574,7 +583,7 @@ starts only the servers in its own configuration, where they are pinned, checked
             }
             flags.answered();
             return Err(unknown("the session ended"));
-        }
+        };
         // One session runs at a time (the workspace lock): another thread's is
         // left open first, unless it is working.
         if let Some(other) = &self.running
@@ -587,41 +596,118 @@ stop it first",
             )
             .with_data(json!({"sessionId": session, "busy": other.id})));
         }
+        // What the session needs is checked before the other is left for it.
+        // What only starting it can show (the workspace lock held by a
+        // terminal session, the local model server) shows after: the other
+        // session is then left open, and its thread's next prompt resumes it.
+        let verb = if resume { "resume" } else { "start" };
+        let could_not = |why: &dyn std::fmt::Display| {
+            RpcError::new(
+                wire::TURN_FAILED,
+                format!("the session could not {verb}: {why}"),
+            )
+        };
+        let ready = self
+            .ready(&session, &ws, &flags, resume)
+            .map_err(|why| could_not(&why))?;
         if let Some(other) = self.running.take() {
             self.leave(other).await;
         }
-        let Some(thread) = self.sessions.get_mut(&session) else {
-            return Err(unknown("no such session on this connection"));
-        };
-        let resume = match std::mem::replace(&mut thread.phase, Phase::Running) {
-            Phase::New => false,
-            Phase::Open => true,
-            other => {
-                thread.phase = other;
-                return Err(unknown("the session is not available"));
-            }
-        };
+        if self.failed {
+            return Err(could_not(&"Declass stopped unexpectedly"));
+        }
         flags.outstanding.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = unbounded_channel();
-        let work = hold(
-            Start {
-                shared: self.shared.clone(),
-                emb: self.emb,
-                id: session.clone(),
-                ws: thread.ws.clone(),
-                flags,
-                mode: self.mode,
-                resume,
-            },
-            prompt,
-            rx,
-        );
+        let start = Start {
+            shared: self.shared.clone(),
+            emb: self.emb.clone(),
+            id: session.clone(),
+            ws,
+            flags: flags.clone(),
+            ready,
+        };
+        let done = match spawn(start, prompt, rx) {
+            Ok(done) => done,
+            Err(e) => {
+                flags.answered();
+                return Err(could_not(&e));
+            }
+        };
+        if let Some(thread) = self.sessions.get_mut(&session) {
+            thread.phase = Phase::Running;
+        }
         self.running = Some(Running {
             id: session,
             prompts: tx,
-            work: Box::pin(work),
+            done,
         });
         Ok(None)
+    }
+
+    /// What a thread's session starts (or resumes) with, checked before
+    /// another thread's session is left for it: the workspace's configuration
+    /// as it is now (as a `declass` session reads it when it starts), a new
+    /// session's mode and setup or a resumed one's own record, and the
+    /// oversight that asks the editor.
+    fn ready(
+        &self,
+        id: &str,
+        ws: &Path,
+        flags: &Arc<Flags>,
+        resume: bool,
+    ) -> Result<Ready, String> {
+        let error = |e: anyhow::Error| format!("{e:#}");
+        let cfg = load_config(ws, &self.emb).map_err(error)?;
+        let how = if resume {
+            let manifest = chat::resumed(ws, Some(id.to_owned())).map_err(error)?;
+            crate::overrides::check(&cfg, &manifest).map_err(error)?;
+            How::Resume(Box::new(manifest))
+        } else {
+            let mode = crate::overrides::resolve_mode(&cfg, self.mode, false).map_err(error)?;
+            set_up(&cfg, mode).map_err(|e| e.message)?;
+            if mode != Mode::TopClearance {
+                crate::setup::require_frontier(&cfg, None, None).map_err(error)?;
+            }
+            How::New(mode)
+        };
+        let oversight = approve::editor_oversight(&cfg, |mode| -> Arc<dyn Approver> {
+            Arc::new(EditorApprover {
+                mode,
+                session: id.to_owned(),
+                shared: self.shared.clone(),
+                flags: flags.clone(),
+            })
+        })
+        .map_err(error)?;
+        Ok(Ready {
+            cfg,
+            oversight,
+            how,
+        })
+    }
+}
+
+/// The next delivery of `signal`; never, without one.
+async fn received(signal: &mut Option<tokio::signal::unix::Signal>) {
+    match signal {
+        Some(signal) => {
+            signal.recv().await;
+        }
+        None => std::future::pending().await,
+    }
+}
+
+/// Tells the operator what of their prompt was not used, and why.
+fn not_used(wire: &Wire, session: &str, notes: &[String]) {
+    if !notes.is_empty() {
+        updates::say(
+            wire,
+            session,
+            &format!(
+                "Not used, and nothing of it was sent: {}.\n\n",
+                notes.join("; ")
+            ),
+        );
     }
 }
 
@@ -665,17 +751,47 @@ the editor's settings for this agent (env), or save the key with `declass setup`
     Err(RpcError::new(wire::NOT_SET_UP, message).with_data(json!({"missing": missing})))
 }
 
+/// What a session starts (or resumes) with ([`Server::ready`]).
+struct Ready {
+    cfg: declass_config::Config,
+    oversight: Oversight,
+    how: How,
+}
+
+enum How {
+    /// A new session, in this mode.
+    New(Mode),
+    /// A session left open, with its own record (as `declass --resume`).
+    Resume(Box<RunManifest>),
+}
+
 /// What starting (or resuming) a thread's session takes.
-struct Start<'e> {
+struct Start {
     shared: Arc<Shared>,
-    emb: &'e Embedding,
+    emb: Embedding,
     id: String,
     ws: PathBuf,
     flags: Arc<Flags>,
-    /// `declass acp --mode`.
-    mode: Option<Mode>,
-    /// The session was left open and continues (as `declass --resume`).
-    resume: bool,
+    ready: Ready,
+}
+
+/// Starts the thread that holds a session ([`hold`]), on the runtime the
+/// dispatcher runs on: whatever the session waits for (a permission answer,
+/// the local model, a command) holds up that thread only. The receiver gets
+/// where the session is when it ends.
+fn spawn(
+    start: Start,
+    first: Prompt,
+    prompts: UnboundedReceiver<Prompt>,
+) -> std::io::Result<oneshot::Receiver<Phase>> {
+    let (tx, done) = oneshot::channel();
+    let runtime = tokio::runtime::Handle::current();
+    std::thread::Builder::new()
+        .name("acp-session".into())
+        .spawn(move || {
+            let _ = tx.send(runtime.block_on(hold(start, first, prompts)));
+        })?;
+    Ok(done)
 }
 
 /// One session invocation, from the prompt that starts or resumes it to its
@@ -683,16 +799,21 @@ struct Start<'e> {
 /// directory, the conversation (`chat::converse` with [`Editor`]), and its
 /// conclusion. Returns where the session is then: left open (its thread's
 /// next prompt resumes it), ended, or, when it could not start, as it was.
-async fn hold(start: Start<'_>, first: Prompt, mut prompts: UnboundedReceiver<Prompt>) -> Phase {
+async fn hold(start: Start, first: Prompt, mut prompts: UnboundedReceiver<Prompt>) -> Phase {
     let Start {
         shared,
         emb,
         id,
         ws,
         flags,
-        mode,
-        resume,
+        ready,
     } = start;
+    let Ready {
+        cfg,
+        oversight,
+        how,
+    } = ready;
+    let resume = matches!(how, How::Resume(_));
     // Every prompt not answered yet (queued ones too) is answered with `why`.
     let refuse = |prompts: &mut UnboundedReceiver<Prompt>, first: Option<Value>, why: &str| {
         prompts.close();
@@ -710,17 +831,19 @@ async fn hold(start: Start<'_>, first: Prompt, mut prompts: UnboundedReceiver<Pr
     // A session that could not start (or resume) can be tried again.
     let before = || if resume { Phase::Open } else { Phase::New };
     let verb = if resume { "resume" } else { "start" };
-    let found = setup(&shared, emb, &id, &ws, &flags, mode, resume, &first).await;
-    let (cfg, manifest, oversight) = match found {
-        Ok(found) => found,
-        Err(why) => {
-            refuse(
-                &mut prompts,
-                Some(first.id),
-                &format!("the session could not {verb}: {why}"),
-            );
-            return before();
-        }
+    let manifest = match how {
+        How::Resume(manifest) => *manifest,
+        How::New(mode) => match opening(&cfg, &id, mode, &first).await {
+            Ok(manifest) => manifest,
+            Err(why) => {
+                refuse(
+                    &mut prompts,
+                    Some(first.id),
+                    &format!("the session could not {verb}: {why}"),
+                );
+                return before();
+            }
+        },
     };
     let (workspace_lock, run_dir) =
         match chat::session_dir(&ws, &manifest).and_then(|(held, dir)| {
@@ -779,7 +902,7 @@ async fn hold(start: Start<'_>, first: Prompt, mut prompts: UnboundedReceiver<Pr
     refuse(&mut editor.prompts, first, &why);
     *lock(&flags.steering) = None;
     if let Err(e) =
-        chat::conclude_session(&ws, &manifest, &cfg, emb, audit, &terminal, &stats, resume)
+        chat::conclude_session(&ws, &manifest, &cfg, &emb, audit, &terminal, &stats, resume)
     {
         eprintln!("declass acp: session {id} not concluded: {e:#}");
     }
@@ -798,43 +921,16 @@ async fn hold(start: Start<'_>, first: Prompt, mut prompts: UnboundedReceiver<Pr
     }
 }
 
-/// The session's configuration (read now, as a `declass` session reads it
-/// when it starts), its manifest and its oversight. A new session's first
-/// prompt is its objective, and the configuration gives everything else (an
-/// editor passes no overrides); a resumed one keeps its own record.
-#[allow(clippy::too_many_arguments)]
-async fn setup(
-    shared: &Arc<Shared>,
-    emb: &Embedding,
+/// A new session's manifest: its first prompt is its objective, and the
+/// configuration gives everything else (an editor passes no overrides).
+async fn opening(
+    cfg: &declass_config::Config,
     id: &str,
-    ws: &std::path::Path,
-    flags: &Arc<Flags>,
-    mode: Option<Mode>,
-    resume: bool,
+    mode: Mode,
     first: &Prompt,
-) -> Result<(declass_config::Config, RunManifest, Oversight), String> {
+) -> Result<RunManifest, String> {
     let error = |e: anyhow::Error| format!("{e:#}");
-    let cfg = load_config(ws, emb).map_err(error)?;
-    let oversight = approve::editor_oversight(&cfg, |mode| -> Arc<dyn Approver> {
-        Arc::new(EditorApprover {
-            mode,
-            session: id.to_owned(),
-            shared: shared.clone(),
-            flags: flags.clone(),
-        })
-    })
-    .map_err(error)?;
-    if resume {
-        let manifest = chat::resumed(ws, Some(id.to_owned())).map_err(error)?;
-        crate::overrides::check(&cfg, &manifest).map_err(error)?;
-        return Ok((cfg, manifest, oversight));
-    }
-    let mode = crate::overrides::resolve_mode(&cfg, mode, false).map_err(error)?;
-    set_up(&cfg, mode).map_err(|e| e.message)?;
-    if mode != Mode::TopClearance {
-        crate::setup::require_frontier(&cfg, None, None).map_err(error)?;
-    }
-    let local = match chat::local_endpoint(&cfg, mode).await.map_err(error)? {
+    let local = match chat::local_endpoint(cfg, mode).await.map_err(error)? {
         Ok(local) => local,
         Err(_) => {
             return Err(
@@ -850,7 +946,7 @@ async fn setup(
         first.message.clone()
     };
     let manifest = chat::new_manifest(
-        &cfg,
+        cfg,
         NewSession {
             run_id: id.to_owned(),
             mode,
@@ -864,8 +960,8 @@ async fn setup(
         },
     )
     .map_err(error)?;
-    crate::overrides::check(&cfg, &manifest).map_err(error)?;
-    Ok((cfg, manifest, oversight))
+    crate::overrides::check(cfg, &manifest).map_err(error)?;
+    Ok(manifest)
 }
 
 /// The editor's side of an open session: one turn per prompt.
@@ -935,7 +1031,9 @@ impl Editor {
         updates: &Arc<Mutex<Updates>>,
         prompt: &Prompt,
     ) -> Result<StopReason, RpcError> {
+        let not_used = |notes: &[String]| not_used(&self.shared.wire, &self.session, notes);
         if self.flags.cancelled(prompt.number) {
+            not_used(&prompt.declined);
             return Ok(StopReason::Cancelled);
         }
         // The answer to declass's question, as a terminal session sends it.
@@ -946,19 +1044,30 @@ impl Editor {
             }) if !prompt.message.is_empty() => match answer(options, &prompt.message) {
                 Ok(message) => message,
                 Err(why) => {
+                    not_used(&prompt.declined);
                     lock(updates).paragraph(&why);
                     return Ok(StopReason::EndTurn);
                 }
             },
             _ => prompt.message.clone(),
         };
-        // What the editor attached from elsewhere: data the boundary presents
+        // What the editor attached from web pages: data the boundary presents
         // (as a fetched page), framed so it cannot pass for these words.
+        let mut declined = prompt.declined.clone();
         for attached in &prompt.attached {
-            if !message.is_empty() {
-                message.push_str("\n\n");
+            match attach(open, attached) {
+                Ok(framed) => {
+                    if !message.is_empty() {
+                        message.push_str("\n\n");
+                    }
+                    message.push_str(&framed);
+                }
+                Err(why) => declined.push(why),
             }
-            message.push_str(&prompt::framed(open.presenter, attached));
+        }
+        not_used(&declined);
+        if message.is_empty() {
+            return Ok(StopReason::EndTurn);
         }
         let end = self
             .turn(session, open, updates, &message, prompt.number)
@@ -1028,6 +1137,61 @@ continue the session in a terminal with `declass --resume {}`.",
         *lock(&self.flags.turn) = None;
         end
     }
+}
+
+/// Text the editor attached from a web page, framed for the operator's
+/// message; or, when its address names a path the boundary holds back, why
+/// none of it is used. Either way an `editor_attachment` event (the host,
+/// never the text) goes to the session's audit log, after what the
+/// boundary decided while presenting it.
+fn attach(open: &Open<'_>, attached: &prompt::Attached) -> Result<String, String> {
+    let presenter = open.presenter;
+    // Earlier decisions are recorded first, so `injection` is this text's.
+    for event in presenter.take_events() {
+        open.audit.record(event);
+    }
+    let record = |outcome: &str, injection: bool| {
+        open.audit.record(AuditEvent::EditorAttachment {
+            host: presenter
+                .outbound_guard()
+                .name(attached.url.host_str().unwrap_or_default()),
+            bytes: attached.text.len() as u64,
+            outcome: outcome.to_owned(),
+            screened: presenter.can_condense()
+                && open
+                    .cfg
+                    .bool("sensitivity.injection_screen")
+                    .unwrap_or(false),
+            injection,
+        });
+    };
+    if let Some(path) = prompt::withheld(&attached.url, open.ws, |p| held(presenter, p)) {
+        record("withheld", false);
+        return Err(format!(
+            "{}: its address names {}, which Declass keeps from the cloud model",
+            prompt::shown(attached.url.as_str()),
+            prompt::shown(&path)
+        ));
+    }
+    let _ = presenter.take_view_class();
+    let framed = prompt::framed(presenter, attached);
+    let offloaded = presenter.take_view_class() == Some(ViewClass::BulkyHandle);
+    let mut injection = false;
+    for event in presenter.take_events() {
+        injection |= matches!(event, AuditEvent::InjectionSuspected { .. });
+        open.audit.record(event);
+    }
+    record(if offloaded { "offloaded" } else { "shown" }, injection);
+    Ok(framed)
+}
+
+/// Whether the boundary keeps the workspace path `path` from the frontier:
+/// sensitive, protected source, hidden, or Declass's own state.
+fn held(presenter: &dyn Presenter, path: &Path) -> bool {
+    declass_fs::is_reserved(path)
+        || presenter.path_sensitive(path)
+        || presenter.protection(path).is_some()
+        || !presenter.path_visible(path)
 }
 
 /// The frontier's response as it streams, to the editor.
@@ -1129,7 +1293,8 @@ impl EditorApprover {
 
 impl Approver for EditorApprover {
     fn approve(&self, action: &Action) -> bool {
-        // Waiting blocks; the runtime's other tasks keep running.
+        // Waiting blocks the session's own thread ([`spawn`]); the dispatcher
+        // and the runtime's tasks go on.
         match tokio::runtime::Handle::try_current().map(|h| h.runtime_flavor()) {
             Ok(tokio::runtime::RuntimeFlavor::MultiThread) => {
                 tokio::task::block_in_place(|| self.ask(action))

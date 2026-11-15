@@ -312,16 +312,18 @@ impl Pending {
         self.ready.notify_all();
     }
 
-    /// Waits for the answer to `id`; `None` once `give_up` says so first.
+    /// Waits for the answer to `id`; `None` once `give_up` says so, even
+    /// when an answer is there too. Messages are read in order, so an answer
+    /// read after what made `give_up` true (a cancellation) never counts.
     pub(crate) fn wait(&self, id: u64, give_up: impl Fn() -> bool) -> Option<Result<Value, Value>> {
         let mut slots = self.slots.lock().unwrap_or_else(PoisonError::into_inner);
         loop {
-            if slots.get(&id).is_some_and(Option::is_some) {
-                return slots.remove(&id).flatten();
-            }
             if give_up() {
                 slots.remove(&id);
                 return None;
+            }
+            if slots.get(&id).is_some_and(Option::is_some) {
+                return slots.remove(&id).flatten();
             }
             slots = self
                 .ready
@@ -461,5 +463,11 @@ mod tests {
         assert_eq!(pending.wait(2, || stop.load(Ordering::SeqCst)), None);
         cancel.join().unwrap();
         assert!(!pending.deliver(&json!(2), Ok(json!("late"))));
+        // A cancellation and then an answer, both read before the waiter
+        // looks: the answer came after the cancellation and does not count.
+        pending.expect(3);
+        assert!(pending.deliver(&json!(3), Ok(json!("allow after cancel"))));
+        assert_eq!(pending.wait(3, || true), None);
+        assert!(!pending.deliver(&json!(3), Ok(json!("later still"))));
     }
 }

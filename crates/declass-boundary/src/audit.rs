@@ -148,6 +148,21 @@ pub enum AuditEvent {
         /// `ok`, `truncated`, or why it failed (`refused`, `timeout`, ...).
         outcome: String,
     },
+    /// (Session) Text the operator attached in an editor from a web page
+    /// (`declass acp`): the page's host as the outbound check allows naming
+    /// it, never the address's path or the text. `outcome` is `shown`
+    /// (scanned, as a fetched page is), `offloaded` (bulky: the frontier got
+    /// a handle) or `withheld` (its address names a path the boundary holds
+    /// back: none of it was sent). `screened` when the local injection
+    /// screen read it; `injection` when it found instructions aimed at an
+    /// agent there (an `injection_suspected` event says why).
+    EditorAttachment {
+        host: String,
+        bytes: u64,
+        outcome: String,
+        screened: bool,
+        injection: bool,
+    },
     /// Text for a third party was refused by the outbound check (a
     /// placeholder or a known sensitive value in it). Never holds the text.
     OutboundRefused {
@@ -493,6 +508,7 @@ impl AuditEvent {
             AuditEvent::ExtensionPinned { .. } => "extension_pinned",
             AuditEvent::OperatorMessage { .. } => "operator_message",
             AuditEvent::WebRequest { .. } => "web_request",
+            AuditEvent::EditorAttachment { .. } => "editor_attachment",
             AuditEvent::OutboundRefused { .. } => "outbound_refused",
             AuditEvent::GitCommit { .. } => "git_commit",
             AuditEvent::McpServer { .. } => "mcp_server",

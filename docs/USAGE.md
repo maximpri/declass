@@ -611,15 +611,18 @@ everything on your machine. Other ACP clients need the same two things: the comm
 the argument `acp`. Declass speaks protocol version 1 on standard input and output; its log is
 standard error, which editors show among their logs.
 
-- **Your messages.** What you type is your message, sanitized as a typed message is. A file you
-  @-mention becomes its path in the message, never its content, even when the editor sends the
-  content along: the frontier reads the file with Declass's tools, through the boundary, so a
-  `.env` or a customer CSV is read only by the local model. Declass reads the file as saved, not
-  unsaved changes in the editor. Text the editor attaches from elsewhere (a page it fetched, a
-  rule, a selection in an unsaved buffer) is not your words: Declass checks it as it checks a web
-  page its own tools fetch (scanned, screened for prompt injection, held locally when large) and
-  gives it to the frontier marked as data, not instructions. Files outside the thread's
-  directory, links, images and audio are not used: the agent says so, and nothing of them is sent.
+- **Your messages.** What you type is your message, sanitized as a typed message is. A file or
+  folder you @-mention becomes its path in the message, never its content, even when the editor
+  sends the content along: the frontier reads the file with Declass's tools, through the boundary,
+  so a `.env` or a customer CSV is read only by the local model. Declass reads the file as saved,
+  not unsaved changes in the editor. A page the editor fetched for you (an `http` or `https`
+  address) is not your words: Declass checks it as it checks a web page its own tools fetch
+  (scanned, screened for prompt injection, held locally when large) and gives it to the frontier
+  marked as data, not instructions. A page whose address names a file Declass keeps from the cloud
+  model (`…/.env`, `…/data/customers.csv`) is not used. Nothing else the editor attaches is used:
+  rules, other threads, unsaved buffers, files on a remote host, files outside the thread's
+  directory or missing from it, links, images and audio. The agent says what it did not use, and
+  nothing of it is sent.
 - **What you see.** Replies stream in with placeholders restored, as in the workspace. Each tool
   call shows its arguments and its result as the frontier saw it; an edit shows its diff (a file
   that is sensitive by policy is named, never shown). What the boundary withheld from a request
@@ -627,16 +630,20 @@ standard error, which editors show among their logs.
 - **Approvals.** What `declass` asks at a terminal (`oversight.approve`, commits under
   `git.commit = "ask"`, files another tool runs later) the editor asks in its permission dialog,
   with Allow once and Reject. Anything else denies: rejecting, closing the dialog, stopping the
-  turn. Declass remembers no answer.
+  turn (an Allow that arrives after you stopped it denies too). Declass remembers no answer.
 - **Stopping.** The editor's stop button stops the turn at once, as Ctrl-C does at a terminal;
   the session stays open and Declass is told with your next message.
 - **Threads.** Each thread keeps its session. One session runs at a time, as in a terminal: a
   message in another thread leaves the running session open and starts or resumes that thread's
-  (resuming takes a moment). While a turn works, a message in another thread is refused with a
-  note to send it again when the turn ends, or to stop the turn first.
+  (resuming takes a moment). While a turn works, or waits for your answer to a permission
+  question, a message in another thread is refused at once with a note to send it again when the
+  turn ends, or to stop the turn first.
 - **Continuing.** A thread's session id is its run id: `declass --resume <id>` continues it in a
   terminal, and `declass audit show <id>` shows what it sent. Closing the editor leaves the
-  sessions open.
+  sessions open. From a thread's first message until you close the editor, or send a message in
+  a thread of another directory, Declass holds the thread's directory's workspace lock:
+  `declass --resume <id>` there is refused meanwhile, for any of the editor's sessions, and works
+  once the editor has closed.
 
 Not yet: reopening a session from an earlier editor run; two threads working at once; slash
 commands such as `/plan`, `/goal` and `/undo` (typed in the editor they are a message; use them at
