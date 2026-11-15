@@ -789,6 +789,7 @@ async fn approval_follows_the_servers_setting_under_oversight() {
     let refused = decide(
         &oversight,
         hub.action(oversight.mode, "mcp__writes__write", &a),
+        &declass_boundary::view::PassThrough { max_bytes: 60_000 },
         Some(&f.audit),
     );
     assert!(refused.unwrap_err().contains("did not approve"));

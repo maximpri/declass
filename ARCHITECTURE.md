@@ -464,11 +464,12 @@ characters is chunked; one retry on unparseable output, then an error the fronti
 "unavailable" — never an invented answer.
 
 Every local output is cleaned before it enters a view (`Engine::clean_local_counted`):
-0. folded as its reader takes it (`reencoded::fold`): zero-width spaces and joiners, soft hyphens,
+0. each line whose folded form (`reencoded::fold`: zero-width spaces and joiners, soft hyphens,
    bidirectional controls and other default-ignorable characters removed, compatibility forms
-   folded (NFKC: full-width and mathematical digits and letters; a decomposed `é` composed), every
-   script's decimal digits as ASCII digits; the folded text is what is cleaned and shown (image
-   descriptions, explorer reports and compaction summaries are folded the same way);
+   folded by NFKC, a decomposed `é` composed, every script's decimal digits as ASCII digits) holds
+   more that is withheld (known or structured values, detected values, copied runs) is folded
+   (`Engine::fold_hidden`); other lines keep their characters (image descriptions, explorer reports
+   and compaction summaries are treated the same way);
 1. the 4-token copy window on the text as written (before placeholders split a copied line);
 2. other spellings (`reencoded.rs`): spaced-out runs (`V a k d r i l`, `4-5-3-9`) matched against
    the vault's skeletons (letters and digits, lower-cased) and replaced by the value's token;
@@ -503,16 +504,18 @@ The gate applies filters to the request, then checks, then appends to the audit 
 - **Copied-span index:** hashes of 8-token windows of every sensitive text; ≥3 consecutive
   matching windows (~24 tokens) not also present in public files are replaced.
 - **Final check:** no vault value (≥6 characters, raw or JSON-escaped) may appear anywhere in the
-  serialized body. A hit blocks the send (`BlockedSend` event) and the run fails; nothing is sent.
+  serialized body, every text read folded (`reencoded::fold`); the filter folds a text where that
+  reveals a value (`Vault::tokenize_folded`), so the two agree. A hit blocks the send (`BlockedSend` event) and the run fails; nothing is sent.
 - **Audit record:** `{seq, prev, unix_ms, endpoint, model, request_sha256, request (after
   substitution), interventions[]}`; `declass audit verify` recomputes the chain.
 - **Audit events** share the chain: run start (boundary on/off) and end, local-endpoint trust,
   sandbox denials, `sensitive_data` commands (command, exit code, files marked derived), blocked
   sends (check name), requests sent with parts withheld (check name, parts), protected edits, images (origin, size, digest, destination, rule),
   `ask_local` probes of a value (handle, rule, pieces withheld, count). Names, paths and outcomes
-  only, never content; a command, and a path the frontier wrote or a command created (a
-  sensitive command's derived files, a trigger file), is recorded through
-  `Presenter::redact_known`, every known value as its placeholder.
+  only, never content; a command is recorded through `Presenter::redact_known` (every known value
+  as its placeholder), and a path the frontier wrote or a command created (file writes, trigger
+  files, a sensitive command's derived files, commits, protected edits, approvals) through
+  `Presenter::redact_known_path`, which replaces values only in components holding one of 6+ bytes.
 - **Images in the body:** checks and the audit record see each image's data replaced by a digest
   marker (`[image sha256:…, N bytes]`; `declass_provider::image::redact`), and `request_sha256` is of
   that form; the provider sends the real body. Every check also gets the digests
@@ -885,9 +888,9 @@ resolve_for_write(path, content) → note_fixture: every line from a sample show
 ```
 
 Formats: JSON (records: the array itself, or the longest array of objects under a top-level key;
-a key is shown only as schema (`schema_key`), and the keys of an object whose members are objects
-sharing most of their fields, a map keyed by its records, only when they are words the frontier
-already has (`shown_key`); others are `*`, and faked in a twin), JSON lines, delimited text (delimiter sniffed, RFC 4180 quoting, header detected: a row of distinct names that is
+a key is shown only as schema (`schema_key`) and not as a record's name (`record_keys`: a map's keys,
+a key only one of several records has) unless the frontier already has it (`known_key`); others
+are `*`, and faked in a twin), JSON lines, delimited text (delimiter sniffed, RFC 4180 quoting, header detected: a row of distinct names that is
 not one more record, its cells of kinds their columns' values do not have or words the frontier
 already has, `has_header`), `KEY=value`,
 fixed-width (columns from blank gaps), simple XML (records: the root's children), logs (timestamp

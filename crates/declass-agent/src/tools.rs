@@ -113,7 +113,8 @@ this machine, as a description by the local model.",
         t(
             "search",
             "Search file contents with a regular expression. Returns path:line: text for each match. \
-Sensitive files (data, logs, secrets) are not searched: read_file gives their structure and a handle for ask_local.",
+Sensitive files (data, logs, secrets) and protected source are not searched: read_file gives their structure \
+(a handle for ask_local) or their interface.",
             json!({"type": "object", "properties": {
                 "pattern": {"type": "string"},
                 "dir": {"type": "string", "description": "Limit the search to this directory."}
@@ -309,10 +310,11 @@ fn search(ctx: &Ctx<'_>, args: &Map<String, Value>) -> Result<String, String> {
     let mut out = String::new();
     let mut count = 0;
     for f in visible_files(ctx, args.get("dir").and_then(Value::as_str))? {
-        // Sensitive files are not searched: which of their lines a pattern
-        // the frontier chose matches (or how many do) reads them one guess
-        // at a time, with no budget and no audit.
-        if ctx.presenter.path_sensitive(Path::new(&f)) {
+        // Sensitive files and protected source are not searched: which of
+        // their lines a pattern the frontier chose matches (or how many do)
+        // reads them one guess at a time, with no budget and no audit.
+        let path = Path::new(&f);
+        if ctx.presenter.path_sensitive(path) || ctx.presenter.protection(path).is_some() {
             continue;
         }
         let Ok(bytes) = declass_fs::read_file(ctx.workspace, Path::new(&f), MAX_READ_BYTES) else {
@@ -637,6 +639,7 @@ fn edit_file(ctx: &mut Ctx<'_>, args: &Map<String, Value>) -> Result<String, Str
         })?,
     };
     // Placeholders in the new text are resolved locally (and checked against secret sinks).
+    let was_sensitive = presenter.path_sensitive(&rel);
     let updated = presenter.resolve_for_write(&rel, &updated)?;
     let pre = Precondition::Sha256(declass_fs::sha256_hex(&bytes));
     let receipt = ctx
@@ -645,11 +648,26 @@ fn edit_file(ctx: &mut Ctx<'_>, args: &Map<String, Value>) -> Result<String, Str
         .map_err(fs_err)?;
     record_write(ctx, "edit_file", &rel, &receipt);
     Ok(format!(
-        "edited {} ({} edit{})",
+        "edited {} ({} edit{}){}",
         rel.display(),
         edits.len(),
-        if edits.len() == 1 { "" } else { "s" }
+        if edits.len() == 1 { "" } else { "s" },
+        restored_note(presenter, &rel, was_sensitive)
     ))
+}
+
+/// What the frontier is told when a write restored a value into a file
+/// that was not sensitive: it is now, so a command that later cannot read
+/// it fails for a reason the frontier knows.
+fn restored_note(presenter: &dyn Presenter, rel: &Path, was_sensitive: bool) -> String {
+    match !was_sensitive && presenter.path_sensitive(rel) {
+        true => format!(
+            "\n[{} now holds a value restored from a placeholder, so it is sensitive: commands cannot \
+read it unless they run with sensitive_data, read_file shows its structure, and git_commit refuses it]",
+            rel.display()
+        ),
+        false => String::new(),
+    }
 }
 
 fn write_file(ctx: &mut Ctx<'_>, args: &Map<String, Value>) -> Result<String, String> {
@@ -660,6 +678,7 @@ fn write_file(ctx: &mut Ctx<'_>, args: &Map<String, Value>) -> Result<String, St
         .map_err(fs_err)?
         .is_some();
     ctx.presenter.note_authored(content);
+    let was_sensitive = ctx.presenter.path_sensitive(&rel);
     let content = ctx.presenter.resolve_for_write(&rel, content)?;
     let receipt = ctx
         .journal
@@ -667,10 +686,11 @@ fn write_file(ctx: &mut Ctx<'_>, args: &Map<String, Value>) -> Result<String, St
         .map_err(fs_err)?;
     record_write(ctx, "write_file", &rel, &receipt);
     Ok(format!(
-        "{} {} ({} bytes)",
+        "{} {} ({} bytes){}",
         if existed { "replaced" } else { "created" },
         rel.display(),
-        content.len()
+        content.len(),
+        restored_note(ctx.presenter, &rel, was_sensitive)
     ))
 }
 
@@ -684,7 +704,7 @@ pub(crate) fn record_write(
     receipt: &declass_fs::WriteReceipt,
 ) {
     let trigger = declass_fs::triggers::classify(rel);
-    let path = ctx.presenter.redact_known(&rel.display().to_string());
+    let path = ctx.presenter.redact_known_path(&rel.display().to_string());
     ctx.record(AuditEvent::FileWrite {
         tool: tool.into(),
         path: path.clone(),
@@ -1031,7 +1051,7 @@ async fn run_command(ctx: &mut Ctx<'_>, args: &Map<String, Value>) -> Result<Str
             exit_code,
             derived_files: changed
                 .iter()
-                .map(|p| ctx.presenter.redact_known(&p.display().to_string()))
+                .map(|p| ctx.presenter.redact_known_path(&p.display().to_string()))
                 .collect(),
         });
         Source::SensitiveCommand {
@@ -1180,7 +1200,7 @@ fn record_command_triggers(
         let sha256 = declass_fs::read_file(ctx.workspace, &rel, MAX_READ_BYTES)
             .ok()
             .map(|b| declass_fs::sha256_hex(&b));
-        let path = ctx.presenter.redact_known(&rel.display().to_string());
+        let path = ctx.presenter.redact_known_path(&rel.display().to_string());
         ctx.record(AuditEvent::TriggerWritten {
             path: path.clone(),
             by: "command".into(),
@@ -2389,6 +2409,12 @@ mod sensitive_command_tests {
         )
         .await;
         assert!(public.starts_with("edited src/lib.rs"), "{public}");
+        // Searches look into neither sensitive files nor protected source:
+        // which of their lines match would answer a guess.
+        for pattern in ["1_337", "1987-03", "quartz"] {
+            let found = call(&mut ctx, "search", json!({"pattern": pattern})).await;
+            assert_eq!(found, "no matches", "{pattern}");
+        }
     }
 
     #[tokio::test]

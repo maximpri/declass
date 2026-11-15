@@ -436,6 +436,15 @@ pub trait Presenter: Send + Sync {
     fn redact_known(&self, text: &str) -> String {
         text.to_owned()
     }
+    /// The workspace path `path` as a security event records it: each
+    /// component holding a known value long enough for the outbound check
+    /// to refuse (a file a command named after the data) with its values as
+    /// placeholders, every other component as written, so the operator can
+    /// still find the file (`declass triggers` lists these paths). The
+    /// default (pass-through) changes nothing.
+    fn redact_known_path(&self, path: &str) -> String {
+        path.to_owned()
+    }
     /// Content about to be written to `path`, with placeholders resolved locally.
     /// `Err` explains why a placeholder may not be written there.
     fn resolve_for_write(&self, _path: &std::path::Path, text: &str) -> Result<String, String> {

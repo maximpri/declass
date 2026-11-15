@@ -27,7 +27,7 @@ use super::dates;
 use super::parse::{self, Json};
 use super::profile::{has_header, json_records};
 use super::shape::{self, Class, Detail};
-use super::{Format, Knowledge, keyed_by_records, schema_key, shown_key};
+use super::{Format, Knowledge, record_keys, schema_key};
 use crate::detect::{Detectors, Kind, scan_each};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
@@ -788,21 +788,40 @@ fn json_string(s: &str) -> String {
     serde_json::to_string(s).unwrap_or_else(|_| "\"\"".into())
 }
 
+/// Keys of a JSON document that are faked: those that are not schema, and
+/// those that name records ([`record_keys`]).
+struct FakedKeys(std::collections::HashSet<Range<usize>>);
+
+impl FakedKeys {
+    fn of(root: &Json, k: &dyn Knowledge) -> Self {
+        Self(record_keys(root, k))
+    }
+
+    fn faked(&self, key: &parse::Key, k: &dyn Knowledge) -> bool {
+        !schema_key(&key.name, k) || self.0.contains(&key.span)
+    }
+}
+
 /// Every value of `node` in document order, for the fakes' seeds.
-fn json_values(node: &Json, text: &str, k: &dyn Knowledge, out: &mut Vec<(Role, String)>) {
+fn json_values(
+    node: &Json,
+    text: &str,
+    k: &dyn Knowledge,
+    keys: &FakedKeys,
+    out: &mut Vec<(Role, String)>,
+) {
     match node {
         Json::Object { entries, .. } => {
-            let records = keyed_by_records(entries);
             for (key, v) in entries {
-                if !shown_key(&key.name, records, k) {
+                if keys.faked(key, k) {
                     out.push((Role::Key, key.name.clone()));
                 }
-                json_values(v, text, k, out);
+                json_values(v, text, k, keys, out);
             }
         }
         Json::Array { items, .. } => {
             for v in items {
-                json_values(v, text, k, out);
+                json_values(v, text, k, keys, out);
             }
         }
         Json::String { value, .. } => out.push((Role::Text, value.clone())),
@@ -816,21 +835,21 @@ fn json_replacements(
     node: &Json,
     text: &str,
     f: &mut Faker<'_>,
+    keys: &FakedKeys,
     out: &mut Vec<(Range<usize>, String)>,
 ) {
     match node {
         Json::Object { entries, .. } => {
-            let records = keyed_by_records(entries);
             for (key, v) in entries {
-                if !shown_key(&key.name, records, f.k) {
+                if keys.faked(key, f.k) {
                     out.push((key.span.clone(), json_string(&f.fake(Role::Key, &key.name))));
                 }
-                json_replacements(v, text, f, out);
+                json_replacements(v, text, f, keys, out);
             }
         }
         Json::Array { items, .. } => {
             for v in items {
-                json_replacements(v, text, f, out);
+                json_replacements(v, text, f, keys, out);
             }
         }
         Json::String { span, value } => {
@@ -867,8 +886,9 @@ fn twin_json(
     rows: usize,
     lines: bool,
 ) -> Twin {
+    let keys = FakedKeys::of(root, k);
     let mut all = Vec::new();
-    json_values(root, text, k, &mut all);
+    json_values(root, text, k, &keys, &mut all);
     let mut f = Faker::new(f_seed, k, all);
     let mut repl = Vec::new();
     let (items, at): (&[Json], Option<usize>) = if lines {
@@ -883,7 +903,7 @@ fn twin_json(
         }
     };
     if items.len() < 2 {
-        json_replacements(root, text, &mut f, &mut repl);
+        json_replacements(root, text, &mut f, &keys, &mut repl);
         let stuck = f.stuck;
         return Twin {
             text: splice(text, 0..text.len(), &repl),
@@ -907,17 +927,17 @@ fn twin_json(
     if let (Some(at), Json::Object { entries, .. }) = (at, root) {
         for (i, (key, v)) in entries.iter().enumerate() {
             if i != at {
-                if !schema_key(&key.name, k) {
+                if keys.faked(key, k) {
                     repl.push((key.span.clone(), json_string(&f.fake(Role::Key, &key.name))));
                 }
-                json_replacements(v, text, &mut f, &mut repl);
-            } else if !schema_key(&key.name, k) {
+                json_replacements(v, text, &mut f, &keys, &mut repl);
+            } else if keys.faked(key, k) {
                 repl.push((key.span.clone(), json_string(&f.fake(Role::Key, &key.name))));
             }
         }
     }
     for &i in &chosen {
-        json_replacements(&items[i], text, &mut f, &mut repl);
+        json_replacements(&items[i], text, &mut f, &keys, &mut repl);
     }
     repl.sort_by_key(|r| r.0.start);
     let first = items[0].span();
@@ -1436,6 +1456,20 @@ mod tests {
             "{}",
             t.text
         );
+        for (doc, path) in [
+            (r#"{"mlopez": "gold", "jsmith": "silver"}"#, "data/b.json"),
+            (
+                "{\"mlopez\": {\"plan\": \"gold\"}}\n{\"jsmith\": {\"plan\": \"silver\"}}\n",
+                "data/b.jsonl",
+            ),
+        ] {
+            let t = twin(doc, Some(Path::new(path)), &Nothing, 3, 5).unwrap();
+            assert!(
+                !t.text.contains("mlopez") && !t.text.contains("jsmith"),
+                "{}",
+                t.text
+            );
+        }
         assert!(
             t.text.contains("\"accounts\"") && t.text.contains("\"retries\""),
             "{}",

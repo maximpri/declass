@@ -912,7 +912,7 @@ impl Engine {
             last = end;
         }
         out.push_str(&text[last..]);
-        let out = st.vault.tokenize(&out).0;
+        let out = st.vault.tokenize_folded(&out).0;
         if sensitive {
             redact_fragments(&st.vault, &out).0
         } else {
@@ -1498,15 +1498,15 @@ ask questions with ask_local(handle=\"{}\", question=...).\n",
         read: &str,
         answer: Option<Answered<'_>>,
     ) -> (String, usize) {
+        st.structure.note_local_values(read, origin);
         // What the model wrote as its reader takes it: a value with a
         // zero-width space inside, in full-width digits or written composed
         // where the content has it decomposed is that value.
-        let text = &reencoded::fold(text);
+        let text = &self.fold_hidden(st, text);
         // Copied runs first, on the text as written: once known values become
         // placeholders, a copied line splits into runs shorter than the window
         // and a field between two values (a date of birth) passes.
         let s = st.overlap.redact_strict(text).0;
-        st.structure.note_local_values(read, origin);
         let s = Self::respell(st, &s);
         let words: std::collections::HashSet<String> =
             words(read).chain(words(&reencoded::fold(read))).collect();
@@ -1517,6 +1517,33 @@ ask questions with ask_local(handle=\"{}\", question=...).\n",
         // 12-29 exactly" once carried a short fragment of hostile data out.
         let s = st.overlap.redact_strict(&s).0;
         self.limit_pieces(st, &s, origin, read, answer)
+    }
+
+    /// `text`, written by the local model, with each line folded
+    /// ([`reencoded::fold`]) whose folded form holds more that is withheld
+    /// than the line as written: a value with a zero-width character inside,
+    /// in full-width or another script's digits, or written composed where
+    /// the content has it decomposed. Other lines keep their characters (a
+    /// zero-width non-joiner in Persian prose, an emoji sequence, `x²`).
+    fn fold_hidden(&self, st: &State, text: &str) -> String {
+        if text.is_ascii() {
+            return text.to_owned();
+        }
+        let withheld = |t: &str| {
+            st.vault.values_in(t).len()
+                + st.structure.data_values_in(t)
+                + scan_each_in(t, self.detectors, None).len()
+                + st.overlap.redact_strict(t).1
+        };
+        text.split_inclusive('\n')
+            .map(|line| {
+                let folded = reencoded::fold(line);
+                match *folded != *line && withheld(&folded) > withheld(line) {
+                    true => folded.into_owned(),
+                    false => line.to_owned(),
+                }
+            })
+            .collect()
     }
 
     /// `text` with values it spells out (characters separated: `V a k`) or
@@ -1655,7 +1682,7 @@ ask questions with ask_local(handle=\"{}\", question=...).\n",
     /// about sensitive content are not applied: here they would vault the
     /// frontier's own identifiers and replace them in every later request.
     fn clean_condensed(&self, st: &mut State, text: &str) -> String {
-        let text = &reencoded::fold(text);
+        let text = &self.fold_hidden(st, text);
         let s = st.overlap.redact_strict(text).0;
         let s = Self::respell(st, &s);
         let s = self.sanitize(st, &s, "compaction", false);
@@ -1673,7 +1700,7 @@ ask questions with ask_local(handle=\"{}\", question=...).\n",
     /// holds it (`http://example.com` after an OAuth page vaulted "example").
     fn clean_public(&self, st: &mut State, text: &str, origin: &str) -> String {
         let s = if is_web_origin(origin) {
-            st.vault.tokenize(text).0
+            st.vault.tokenize_folded(text).0
         } else {
             self.sanitize(st, text, origin, false)
         };
@@ -2851,6 +2878,17 @@ is written or as a test fixture. At most {rows} records."
         self.lock().vault.tokenize(text).0
     }
 
+    fn redact_known_path(&self, path: &str) -> String {
+        let st = self.lock();
+        path.split('/')
+            .map(|component| match st.vault.disclosed_in(component) {
+                Some(_) => st.vault.tokenize(component).0,
+                None => component.to_owned(),
+            })
+            .collect::<Vec<_>>()
+            .join("/")
+    }
+
     fn note_authored(&self, text: &str) {
         let mut st = self.lock();
         for f in scan_with(text, self.detectors, &self.custom) {
@@ -3194,6 +3232,26 @@ mod tests {
         }
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn local_output_keeps_its_characters_where_folding_reveals_nothing() {
+        // Folding drops zero-width joiners and turns `x²` into `x2`: a line
+        // that holds no value is shown as written; one that does is folded.
+        let prose = "\u{645}\u{6cc}\u{200c}\u{62e}\u{648}\u{627}\u{647}\u{645} x\u{b2} fine";
+        let summary = format!("{prose}\nthe password is quartz\u{200b}-otter-5519");
+        let (local, _) = crate::testing::scripted_local(vec![
+            json!({"summary": summary, "facts": []}).to_string(),
+        ]);
+        let d = tempfile::tempdir().unwrap();
+        let e = Engine::open(&d.path().join("run"), policy(), Some(local)).unwrap();
+        let csv = "id,password\n1,quartz-otter-5519\n2,velvet-lantern-2231\n";
+        let shown = e.present(&file("data/users.csv"), csv.as_bytes());
+        assert!(shown.contains(prose), "{shown}");
+        assert!(
+            !reencoded::fold(&shown).contains("quartz-otter-5519"),
+            "{shown}"
+        );
+    }
+
     pub(super) fn policy() -> Policy {
         Policy {
             sensitive_globs: vec![
@@ -3288,6 +3346,30 @@ mod tests {
             .enumerate()
             .map(|(i, l)| format!("{:>width$}  {l}\n", i + 1))
             .collect()
+    }
+
+    #[test]
+    fn a_path_is_logged_with_only_components_that_hold_a_value_replaced() {
+        // A short value that is also a common word must not make a path the
+        // operator is shown (`declass triggers`) one they cannot find.
+        let (_d, e) = engine();
+        e.present(
+            &file(".env"),
+            b"DB_USER=admin\nDB_PASSWORD=quartz-otter-5519\n",
+        );
+        assert_eq!(
+            e.redact_known_path(".github/workflows/admin/release.yml"),
+            ".github/workflows/admin/release.yml"
+        );
+        assert_eq!(
+            e.redact_known_path("out/quartz-otter-5519 admin.txt"),
+            "out/⟨secret:DB_PASSWORD#1⟩ ⟨secret:DB_USER#1⟩.txt"
+        );
+        // Commands keep every known value as a placeholder.
+        assert_eq!(
+            e.redact_known("psql -U admin"),
+            "psql -U ⟨secret:DB_USER#1⟩"
+        );
     }
 
     #[test]

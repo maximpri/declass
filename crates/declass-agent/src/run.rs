@@ -1351,6 +1351,7 @@ pub(crate) async fn work(
                         &call.name,
                         hub.action(cfg.oversight.mode, &call.name, &call.arguments),
                     ),
+                    presenter,
                     Some(frontier.audit()),
                 ),
                 None => crate::oversight::review(

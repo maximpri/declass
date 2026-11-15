@@ -101,7 +101,7 @@ impl Engine {
         // Values of the data first, on the report as written (and folded, as
         // all local output is): once pieces of a value are withheld, the rest
         // no longer matches it.
-        let (text, _) = withhold_data_values(&st, &crate::reencoded::fold(text));
+        let (text, _) = withhold_data_values(&st, &self.fold_hidden(&st, text));
         let (clean, withheld) =
             self.clean_local_counted(&mut st, &text, "explorer report", &all, Some(answered));
         let (clean, _) = Self::ip_redact(&mut st, &clean);

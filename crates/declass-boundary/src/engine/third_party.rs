@@ -112,15 +112,30 @@ impl Engine {
         Guard::new(Arc::new(EnginePolicy(self.me.clone())))
     }
 
-    /// Why `texts` may not be sent to `destination`, or `None`.
+    /// Why `texts` may not be sent to `destination`, or `None`. Each text
+    /// is also read folded ([`crate::reencoded::fold`]): a value hidden by
+    /// a character drawn as nothing, or written in another form, is the
+    /// value.
     pub(super) fn third_party_refusal(&self, destination: &str, texts: &Texts) -> Option<String> {
         let st = self.lock();
         let grams = numbers(&st.vault);
+        let forms = |t: &String| {
+            let folded = crate::reencoded::fold(t);
+            let other = (*folded != **t).then(|| folded.into_owned());
+            std::iter::once(t.clone()).chain(other)
+        };
         let found = texts
             .parts
             .iter()
-            .find_map(|part| found_in(&st, &grams, part))
-            .or_else(|| texts.joined.iter().find_map(|j| found_across(&st, j)))?;
+            .flat_map(forms)
+            .find_map(|part| found_in(&st, &grams, &part))
+            .or_else(|| {
+                texts
+                    .joined
+                    .iter()
+                    .flat_map(forms)
+                    .find_map(|j| found_across(&st, &j))
+            })?;
         Some(found.reason(&st.vault, destination))
     }
 }

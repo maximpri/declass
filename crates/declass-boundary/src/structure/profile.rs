@@ -13,7 +13,7 @@ use super::dates;
 use super::masked::{self, Template};
 use super::parse::{self, Json};
 use super::shape::{self, Detail};
-use super::{Format, Knowledge, SPECIAL_KEYS, keyed_by_records, schema_key, shown_key};
+use super::{Format, Knowledge, SPECIAL_KEYS, record_keys, schema_key};
 use crate::detect::Kind;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
@@ -642,6 +642,15 @@ struct JsonWalk<'a, 'k> {
     withheld_keys: usize,
     schema: BTreeSet<String>,
     depth: usize,
+    /// Keys that name records, not fields ([`record_keys`]).
+    records: HashSet<std::ops::Range<usize>>,
+}
+
+impl JsonWalk<'_, '_> {
+    /// Whether `key` is shown as written: schema, and no record's name.
+    fn shown(&self, key: &parse::Key) -> bool {
+        schema_key(&key.name, self.fields.k) && !self.records.contains(&key.span)
+    }
 }
 
 fn join(path: &str, key: &str) -> String {
@@ -677,10 +686,9 @@ impl JsonWalk<'_, '_> {
         match node {
             Json::Object { entries, .. } => {
                 let mut seen: HashSet<&str> = HashSet::new();
-                let records = keyed_by_records(entries);
                 for (key, value) in entries {
                     let name = key.name.as_str();
-                    let shown = if shown_key(name, records, self.fields.k) {
+                    let shown = if self.shown(key) {
                         self.schema.insert(name.to_owned());
                         name.to_owned()
                     } else {
@@ -760,6 +768,7 @@ fn profile_json(text: &str, root: &Json, k: &dyn Knowledge, lines: bool) -> Prof
         withheld_keys: 0,
         schema: BTreeSet::new(),
         depth: 0,
+        records: record_keys(root, k),
     };
     let mut anomalies = Vec::new();
     let (records, layout, raw_records): (usize, String, Vec<&str>) = if lines {
@@ -791,7 +800,7 @@ fn profile_json(text: &str, root: &Json, k: &dyn Knowledge, lines: bool) -> Prof
                     unreachable!("records under a key are in an object")
                 };
                 let key = &entries[at].0.name;
-                let shown = if schema_key(key, k) {
+                let shown = if w.shown(&entries[at].0) {
                     w.schema.insert(key.clone());
                     key.clone()
                 } else {
@@ -805,7 +814,7 @@ fn profile_json(text: &str, root: &Json, k: &dyn Knowledge, lines: bool) -> Prof
                     .collect();
                 for (i, (key, value)) in entries.iter().enumerate() {
                     if i != at {
-                        let name = if schema_key(&key.name, k) {
+                        let name = if w.shown(key) {
                             w.schema.insert(key.name.clone());
                             key.name.clone()
                         } else {
@@ -1633,6 +1642,66 @@ mod tests {
         // A key of a map that is a word the frontier has is shown.
         let view = profile(json, None, &Toy).unwrap().render();
         assert!(view.contains("accounts.mlopez.plan"), "{view}");
+    }
+
+    #[test]
+    fn keys_naming_records_are_values_in_every_shape_of_map() {
+        // Shapes a map of objects sharing most fields missed: a map of
+        // scalars, a one-member map, records keyed by their own names (in an
+        // array or as JSON lines), members sharing few fields.
+        for (doc, path) in [
+            (r#"{"mlopez": "gold", "jsmith": "silver"}"#, "data/a.json"),
+            (r#"{"mlopez": {"plan": "gold"}}"#, "data/a.json"),
+            (
+                r#"[{"mlopez": {"plan": "gold"}}, {"jsmith": {"plan": "silver"}}]"#,
+                "data/a.json",
+            ),
+            (
+                "{\"mlopez\": {\"plan\": \"gold\"}}\n{\"jsmith\": {\"plan\": \"silver\"}}\n",
+                "data/a.jsonl",
+            ),
+            (
+                r#"{"mlopez": {"plan": "gold", "card": "x", "a": 1}, "jsmith": {"plan": "silver", "note": "y", "b": 2}}"#,
+                "data/a.json",
+            ),
+        ] {
+            let view = profile(doc, Some(Path::new(path)), &Nothing)
+                .unwrap()
+                .render();
+            assert!(
+                !view.contains("mlopez") && !view.contains("jsmith"),
+                "{doc}:\n{view}"
+            );
+        }
+        // Ordinary keys stay: environments, locales, package paths, sections
+        // sharing no field, the fields of records.
+        for (doc, wanted) in [
+            (
+                r#"{"dev": {"url": "a"}, "staging": {"url": "b"}, "prod": {"url": "c"}}"#,
+                &["dev.url", "staging.url", "prod.url"][..],
+            ),
+            (
+                r#"{"en": {"hi": "a"}, "fr": {"hi": "b"}, "de": {"hi": "c"}}"#,
+                &["en.hi", "fr.hi", "de.hi"],
+            ),
+            (
+                r#"{"packages": {"node_modules/lodash": {"version": "4"}, "node_modules/@babel/core": {"version": "7"}}}"#,
+                &["packages.node_modules/lodash.version"],
+            ),
+            (
+                r#"{"database": {"host": "a"}, "limits": {"retries": 3}}"#,
+                &["database.host", "limits.retries"],
+            ),
+            (
+                r#"[{"name": "a", "email": "b"}, {"name": "c", "email": "d"}]"#,
+                &["[].name", "[].email"],
+            ),
+        ] {
+            let view = profile(doc, None, &Nothing).unwrap().render();
+            for w in wanted {
+                assert!(view.contains(w), "{w} in {doc}:\n{view}");
+            }
+        }
     }
 
     #[test]

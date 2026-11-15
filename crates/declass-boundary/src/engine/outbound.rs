@@ -68,14 +68,21 @@ fn texts_in(v: &Value, depth: usize, visit: &mut dyn FnMut(&str) -> bool) -> boo
     }
 }
 
+/// Whether `text`, as its reader takes it, holds a value the check refuses:
+/// a value hidden by a character drawn as nothing, or written in another
+/// form ([`crate::reencoded::fold`]), is the value.
+fn discloses(vault: &Vault, text: &str) -> bool {
+    vault.disclosed_in(&crate::reencoded::fold(text)).is_some()
+}
+
 /// Whether a text of `s` holds a value the check refuses.
 fn holds_value(vault: &Vault, s: &str) -> bool {
-    texts_of(s, 0, &mut |t| vault.disclosed_in(t).is_some())
+    texts_of(s, 0, &mut |t| discloses(vault, t))
 }
 
 /// Whether a text of `v` holds a value the check refuses.
 fn value_holds_value(vault: &Vault, v: &Value) -> bool {
-    texts_in(v, 0, &mut |t| vault.disclosed_in(t).is_some())
+    texts_in(v, 0, &mut |t| discloses(vault, t))
 }
 
 /// Replaces every value the vault holds in each text of `s`, until none holds
@@ -86,7 +93,7 @@ fn scrub(vault: &Vault, s: &mut String, depth: usize) -> usize {
     // Writing JSON back can join text that was apart, so it is read again; a
     // round that replaces nothing ends it.
     for _ in 0..NESTED_DEPTH {
-        let (tokenized, mut n) = vault.tokenize(s);
+        let (tokenized, mut n) = vault.tokenize_folded(s);
         if n > 0 {
             *s = tokenized;
         }
@@ -560,7 +567,7 @@ impl OutboundCheck for NoKnownValues {
         content_texts(body, framing, &mut |t| {
             found = st
                 .vault
-                .disclosed_in(t)
+                .disclosed_in(&crate::reencoded::fold(t))
                 .map(|(_, e)| format!("a {} value from {}", e.kind.tag(), e.origin));
             found.is_some()
         });
@@ -943,6 +950,52 @@ mod tests {
         let v: Value = serde_json::from_str(content).unwrap();
         assert_eq!(v["config"]["key"], "⟨secret:PAYMENTS_API_KEY#1⟩");
         assert_eq!(v["config"]["retries"], 3);
+    }
+
+    #[test]
+    fn a_value_hidden_by_a_character_drawn_as_nothing_is_found_and_replaced() {
+        // A zero-width space or full-width digits inside a value: the check
+        // and the filter read the text as the frontier does, and agree.
+        let (_d, e) = engine();
+        env(
+            &e,
+            "DB_PASSWORD=quartz-otter-5519\nPIN_CARD=4539148803436467\n",
+        );
+        let (filter, check) = e.outbound();
+        let hidden = [
+            "x quartz\u{200b}-otter-5519 y",
+            "card \u{ff14}\u{ff15}\u{ff13}\u{ff19}148803436467",
+        ];
+        let mut req = Request {
+            tools: tools(),
+            items: vec![
+                result("c1", hidden[0]),
+                assistant(hidden[1], None, Vec::new()),
+            ],
+            ..Request::default()
+        };
+        assert!(gate_check(check.as_ref(), &req).is_err());
+        filter.apply(&mut req);
+        gate_check(check.as_ref(), &req).unwrap();
+        let sent = crate::reencoded::fold(&bodies(&req)).into_owned();
+        assert!(
+            !sent.contains("quartz-otter-5519") && !sent.contains("4539148803436467"),
+            "{sent}"
+        );
+        // Public content is cleaned the same way before it is shown, and a
+        // third party is refused it.
+        let shown = e.present(
+            &Source::Command {
+                command: "cat notes.txt".into(),
+                exit_code: Some(0),
+            },
+            hidden[0].as_bytes(),
+        );
+        assert!(
+            !crate::reencoded::fold(&shown).contains("otter-5519"),
+            "{shown}"
+        );
+        assert!(e.check_outbound("example.com", hidden[0]).is_err());
     }
 
     #[test]

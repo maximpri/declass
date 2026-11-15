@@ -63,13 +63,14 @@ pub fn nfc(text: &str) -> std::borrow::Cow<'_, str> {
     }
 }
 
-/// `text` as its reader takes it, for matching values in what the local
-/// model writes: default-ignorable code points removed (a zero-width space
-/// inside a password), compatibility forms folded (NFKC: full-width
-/// `４５３９`, ligatures, mathematical letters and digits; a decomposed `é`
-/// becomes the precomposed one) and other scripts' digits as ASCII digits.
-/// The folded text is what is cleaned and shown. Letters that only look
-/// alike (Cyrillic `а` for Latin `a`) are not folded.
+/// `text` as its reader takes it, for matching values: default-ignorable
+/// code points removed (a zero-width space inside a password),
+/// compatibility forms folded (NFKC: full-width `４５３９`, ligatures,
+/// mathematical letters and digits; a decomposed `é` becomes the
+/// precomposed one) and other scripts' digits as ASCII digits. The final
+/// outbound check reads every text folded; local output and other text are
+/// folded where that reveals a value, and otherwise keep their characters.
+/// Letters that only look alike (Cyrillic `а` for Latin `a`) are not folded.
 pub fn fold(text: &str) -> std::borrow::Cow<'_, str> {
     if text.is_ascii() {
         return std::borrow::Cow::Borrowed(text);

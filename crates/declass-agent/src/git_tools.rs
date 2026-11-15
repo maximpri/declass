@@ -756,7 +756,10 @@ user.email in git configuration",
         })?;
     ctx.record(AuditEvent::GitCommit {
         hash: done.hash.clone(),
-        paths: paths.clone(),
+        paths: paths
+            .iter()
+            .map(|p| ctx.presenter.redact_known_path(p))
+            .collect(),
     });
     let mut out = format!(
         "committed {} on {} ({} file{}): {}\n",

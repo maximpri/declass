@@ -307,8 +307,13 @@ async fn a_secret_restored_into_a_config_file_never_comes_back_through_a_command
     assert_eq!(f.unscripted(), 0);
     let config = std::fs::read_to_string(f.ws.join("config/app.toml")).unwrap();
     assert!(config.contains(DB_PASSWORD), "restored on disk: {config}");
-    // The file holds a secret now: the sandbox refuses it to the command,
-    // and the frontier reads it as sensitive content.
+    // The file holds a secret now, and the frontier is told so; the sandbox
+    // refuses it to the command, and the frontier reads it as sensitive.
+    let edited = &f.results_of("edit_file")[0];
+    assert!(
+        edited.contains("now holds a value restored from a placeholder"),
+        "{edited}"
+    );
     let ran = &f.results_of("run_command")[0];
     assert!(ran.contains("Operation not permitted"), "{ran}");
     let read = &f.results_of("read_file")[1];

@@ -44,7 +44,7 @@ impl Engine {
     pub(super) fn clean_unseen(&self, st: &mut State, text: &str, origin: &str) -> String {
         // As for text output (`clean_local_counted`): folded, copied runs
         // first, on the text as written, then spelled-out and encoded values.
-        let text = &crate::reencoded::fold(text);
+        let text = &self.fold_hidden(st, text);
         let s = st.overlap.redact_strict(text).0;
         let s = Self::respell(st, &s);
         let s = self.sanitize_read(st, &s, origin, true, None);

@@ -124,6 +124,12 @@ impl Vault {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vault::default(),
             Err(e) => return Err(FsError::io("read vault", path, e)),
         };
+        // A vault written before values were also known folded (a resumed
+        // run) gets their folded forms now.
+        let spellings: Vec<String> = v.by_value.keys().cloned().collect();
+        for s in spellings {
+            v.fold_alias(&s);
+        }
         v.path = Some(path.to_path_buf());
         Ok(v)
     }
@@ -314,6 +320,21 @@ impl Vault {
         }
         out.push_str(&text[last..]);
         (out, count)
+    }
+
+    /// [`Self::tokenize`], and when the result still holds a value for its
+    /// reader (one a character drawn as nothing hides, or written in another
+    /// form: see [`crate::reencoded::fold`]), its folded form tokenized
+    /// instead. The final outbound check reads every text folded, so text
+    /// this returns passes it.
+    pub fn tokenize_folded(&self, text: &str) -> (String, usize) {
+        let (out, n) = self.tokenize(text);
+        let folded = crate::reencoded::fold(&out);
+        if *folded != *out && self.disclosed_in(&folded).is_some() {
+            let (again, m) = self.tokenize(&folded);
+            return (again, n + m.max(1));
+        }
+        (out, n)
     }
 
     /// The value behind `token`, if it exists.

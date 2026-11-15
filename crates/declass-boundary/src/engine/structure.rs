@@ -207,6 +207,11 @@ impl StructureState {
         self.data_matcher().is_some_and(|m| m.is_match(text))
     }
 
+    /// How many values of structured sensitive data `text` holds.
+    pub(super) fn data_values_in(&self, text: &str) -> usize {
+        self.data_matcher().map_or(0, |m| m.find_iter(text).count())
+    }
+
     fn data_matcher(&self) -> Option<&AhoCorasick> {
         self.data_matcher
             .get_or_init(|| {

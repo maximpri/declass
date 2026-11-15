@@ -443,7 +443,7 @@ pub fn review(
         .or_else(|| trigger_action(oversight, tool, args))
         .or_else(|| commit_action(oversight, tool, args))
         .or_else(|| escalated.then(|| injected_action(tool, args)).flatten());
-    decide(oversight, action, audit)
+    decide(oversight, action, presenter, audit)
 }
 
 /// Whether the run read prompt injection and `oversight.on_injection` asks
@@ -502,6 +502,7 @@ pub fn escalate_mcp(
 pub fn decide(
     oversight: &Oversight,
     action: Option<Action>,
+    presenter: &dyn Presenter,
     audit: Option<&AuditHandle>,
 ) -> Result<(), String> {
     let Some(action) = action else {
@@ -515,7 +516,12 @@ pub fn decide(
         a.record(AuditEvent::Approval {
             tool: action.tool.clone(),
             risk: action.risk.as_str().to_owned(),
-            path: action.path.clone(),
+            // The operator was shown the path as written; the log, which
+            // is shared, holds known values in it as placeholders.
+            path: action
+                .path
+                .as_deref()
+                .map(|p| presenter.redact_known_path(p)),
             approved,
             decided_by: decided_by.to_owned(),
         });

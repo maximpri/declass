@@ -298,37 +298,142 @@ pub fn schema_key(key: &str, k: &dyn Knowledge) -> bool {
         && k.values(key).is_empty()
 }
 
-/// Whether an object's keys name records rather than fields: two or more
-/// members, each an object, sharing most of their member names
-/// (`{"mlopez": {"plan": …}, "jsmith": {"plan": …}}`, a map keyed by user
-/// names, ids or dates). Such keys are values, whatever their shape.
-pub fn keyed_by_records(entries: &[(parse::Key, parse::Json)]) -> bool {
-    if entries.len() < 2 {
-        return false;
-    }
-    let mut members: Vec<std::collections::HashSet<&str>> = Vec::new();
-    for (_, v) in entries {
+/// The keys of the JSON document `root` that name records rather than
+/// fields, by the byte ranges of their names: values, whatever their shape,
+/// unless the frontier already has the key ([`known_key`]). They are
+/// - the keys of a map: an object of two or more members all of one kind
+///   (all objects, all strings, all numbers…: an export keyed by user names
+///   or ids, `{"mlopez": "gold", "jsmith": "silver"}`), or of one member
+///   holding a record (`{"mlopez": {"plan": "gold"}}`);
+/// - a key that only one of several records has (elements of an array,
+///   JSON lines): records keyed by their own names, `[{"mlopez": {…}},
+///   {"jsmith": {…}}]`. A key several records have is a field, whatever
+///   the kinds of their values.
+pub fn record_keys(
+    root: &parse::Json,
+    k: &dyn Knowledge,
+) -> std::collections::HashSet<std::ops::Range<usize>> {
+    use parse::Json;
+    type Keys = std::collections::HashSet<std::ops::Range<usize>>;
+    fn kind(v: &Json) -> u8 {
         match v {
-            parse::Json::Object { entries, .. } => {
-                members.push(entries.iter().map(|(k, _)| k.name.as_str()).collect());
-            }
-            _ => return false,
+            Json::Object { .. } => 0,
+            Json::Array { .. } => 1,
+            Json::String { .. } => 2,
+            Json::Number { .. } => 3,
+            Json::Bool { .. } => 4,
+            Json::Null { .. } => 5,
         }
     }
-    let all: std::collections::HashSet<&str> = members.iter().flatten().copied().collect();
-    let shared = all
-        .iter()
-        .filter(|name| members.iter().all(|m| m.contains(*name)))
-        .count();
-    shared > 0 && shared * 2 >= all.len()
+    /// Whether two of the objects that are the members of `entries` share a
+    /// field: records of one kind, not sections of a configuration
+    /// (`{"database": {"host": …}, "limits": {"retries": …}}`).
+    fn shares_a_field(entries: &[(parse::Key, Json)]) -> bool {
+        let mut seen = std::collections::HashSet::new();
+        entries.iter().any(|(_, x)| match x {
+            Json::Object { entries: inner, .. } => {
+                let names: std::collections::HashSet<&str> =
+                    inner.iter().map(|(key, _)| key.name.as_str()).collect();
+                names.into_iter().any(|n| !seen.insert(n))
+            }
+            _ => false,
+        })
+    }
+    /// `record`: `v` is one of several records, judged by the array.
+    fn walk(v: &Json, k: &dyn Knowledge, out: &mut Keys, record: bool) {
+        match v {
+            Json::Object { entries, .. } => {
+                let map = !record
+                    && match entries.as_slice() {
+                        [(_, Json::Object { entries: inner, .. })] => inner
+                            .iter()
+                            .any(|(_, x)| !matches!(x, Json::Object { .. } | Json::Array { .. })),
+                        [_] | [] => false,
+                        [(_, first), rest @ ..] => {
+                            rest.iter().all(|(_, x)| kind(x) == kind(first))
+                                && (kind(first) != 0 || shares_a_field(entries))
+                        }
+                    };
+                for (key, x) in entries {
+                    if map && !known_key(&key.name, k) {
+                        out.insert(key.span.clone());
+                    }
+                    walk(x, k, out, false);
+                }
+            }
+            Json::Array { items, .. } => {
+                let records: Vec<&Vec<(parse::Key, Json)>> = items
+                    .iter()
+                    .filter_map(|x| match x {
+                        Json::Object { entries, .. } => Some(entries),
+                        _ => None,
+                    })
+                    .collect();
+                let several = records.len() >= 2;
+                if several {
+                    let mut seen: std::collections::HashMap<&str, usize> = Default::default();
+                    for r in &records {
+                        let names: std::collections::HashSet<&str> =
+                            r.iter().map(|(key, _)| key.name.as_str()).collect();
+                        for n in names {
+                            *seen.entry(n).or_default() += 1;
+                        }
+                    }
+                    for (key, _) in records.iter().flat_map(|r| r.iter()) {
+                        if seen[key.name.as_str()] == 1 && !known_key(&key.name, k) {
+                            out.insert(key.span.clone());
+                        }
+                    }
+                }
+                items.iter().for_each(|x| walk(x, k, out, several));
+            }
+            _ => {}
+        }
+    }
+    let mut out = Keys::new();
+    walk(root, k, &mut out, false);
+    out
 }
 
-/// Whether the key `name` of an object may be shown as written: schema
-/// ([`schema_key`]), and in an object keyed by records
-/// ([`keyed_by_records`]) only a word the frontier already has (of the
-/// public files, the task or the schema shown), every part of it.
-pub fn shown_key(name: &str, keyed_by_records: bool, k: &dyn Knowledge) -> bool {
-    schema_key(name, k) && (!keyed_by_records || known_words(name, k))
+/// Names of deployment environments: keys of configuration, not records.
+const ENVIRONMENTS: &[&str] = &[
+    "alpha",
+    "beta",
+    "ci",
+    "default",
+    "demo",
+    "dev",
+    "develop",
+    "development",
+    "live",
+    "local",
+    "preview",
+    "prod",
+    "production",
+    "qa",
+    "sandbox",
+    "stage",
+    "staging",
+    "test",
+    "testing",
+    "uat",
+];
+
+/// Whether the frontier already has the key `name`, which may then be
+/// shown even where keys name records ([`record_keys`]): words of the
+/// public files, the task or the schema shown ([`known_words`]), an
+/// environment's name (`dev`, `staging`, `prod`), a locale (`en`, `pt-BR`)
+/// or a package's path (`node_modules/x`, `@scope/name`, `/name@1.2.3`).
+pub fn known_key(name: &str, k: &dyn Knowledge) -> bool {
+    static LOCALE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r"^[a-z]{2}(?:[-_](?:[A-Z]{2}|[A-Z][a-z]{3}|\d{3}))?$")
+            .expect("static regex")
+    });
+    known_words(name, k)
+        || ENVIRONMENTS.contains(&name.to_lowercase().as_str())
+        || LOCALE.is_match(name)
+        || name.starts_with("node_modules/")
+        || (name.contains('@') && name.contains('/') && !name.contains(char::is_whitespace))
 }
 
 /// Whether `name` is made of words the frontier already has (of the

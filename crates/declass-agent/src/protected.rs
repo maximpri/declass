@@ -101,7 +101,7 @@ pub async fn edit_protected(
         let shown = ctx.presenter.present(&Source::Checks, &report);
         let verdict = if failed { "FAILED" } else { "passed" };
         ctx.record(AuditEvent::ProtectedEdit {
-            path: rel.display().to_string(),
+            path: ctx.presenter.redact_known_path(&rel.display().to_string()),
             attempt: attempt as u32,
             checks_passed: !failed,
         });
