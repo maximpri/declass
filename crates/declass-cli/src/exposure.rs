@@ -308,9 +308,16 @@ impl Report {
             "Exposure · {} files read on this machine · nothing was sent",
             self.files_scanned
         )];
+        let n = &self.not_scanned;
+        let unread = n.too_large + n.binary + n.unreadable + n.not_followed;
         if self.exposed.is_empty() {
             lines.push(String::new());
-            if self.detectors_off.is_empty() {
+            if self.files_scanned == 0 && unread == 0 {
+                lines.push(
+                    "No files to read here: the directory is empty, or holds only directories that are not searched."
+                        .into(),
+                );
+            } else if self.detectors_off.is_empty() {
                 lines.push(
                     "No secrets or personal data found by Declass's pattern detectors.".into(),
                 );
@@ -364,12 +371,12 @@ impl Report {
             }
             lines.push(String::new());
             for e in self.exposed.iter().take(shown) {
-                lines.push(format!("  {}", e.path.escape_debug()));
+                lines.push(format!("  {}", privacy::shown(&e.path)));
                 lines.push(format!("    found:   {}", describe(&e.found, usize::MAX)));
                 lines.push(format!(
                     "    declass: {} ({})",
                     e.declass,
-                    e.rule.escape_debug()
+                    privacy::shown(&e.rule)
                 ));
             }
             if self.exposed.len() > shown {
@@ -392,8 +399,7 @@ impl Report {
                 if self.kept_by_rule == 1 { "is" } else { "are" }
             ));
         }
-        let n = &self.not_scanned;
-        if n.too_large + n.binary + n.unreadable + n.not_followed > 0 {
+        if unread > 0 {
             lines.push(format!(
                 "Not read: {} over {} MiB, {} binary or UTF-16, {} unreadable, {} symlinks or special files.",
                 n.too_large,
@@ -540,6 +546,21 @@ mod tests {
         let clean = collect(&ws, &config(temp.path(), "")).unwrap();
         assert!(clean.exposed.is_empty());
         assert_eq!(clean.code(), 0);
+        assert!(
+            clean
+                .render(false)
+                .contains("No secrets or personal data found")
+        );
+        // Nothing to read is not the same as nothing found.
+        let empty = temp.path().join("empty");
+        std::fs::create_dir_all(empty.join("node_modules")).unwrap();
+        let none = collect(&empty, &config(temp.path(), "")).unwrap();
+        assert_eq!(none.code(), 0);
+        assert!(
+            none.render(false).contains("No files to read here"),
+            "{}",
+            none.render(false)
+        );
         let custom = collect(
             &ws,
             &config(
@@ -573,8 +594,16 @@ mod tests {
         std::fs::write(ws.join("x\u{1b}[2J.env"), format!("API_TOKEN={KEY}\n")).unwrap();
         let big = format!("TOKEN={KEY}\n").repeat((MAX_BYTES as usize / 20) + 1);
         std::fs::write(ws.join("big.log"), big).unwrap();
+        // Quotes are shown as they are; a line break or tab in a name is escaped.
+        for name in ["it's \"quoted\".txt", "tab\there.txt", "two\nlines.txt"] {
+            std::fs::write(ws.join(name), format!("token: {KEY}\n")).unwrap();
+        }
         let r = collect(&ws, &config(temp.path(), "")).unwrap();
         assert_eq!(r.not_scanned.too_large, 1);
-        assert!(!r.render(true).contains('\u{1b}'));
+        let text = r.render(true);
+        assert!(!text.contains('\u{1b}'));
+        assert!(text.contains("\n  it's \"quoted\".txt\n"), "{text}");
+        assert!(text.contains("\n  tab\\there.txt\n"), "{text}");
+        assert!(text.contains("\n  two\\nlines.txt\n"), "{text}");
     }
 }

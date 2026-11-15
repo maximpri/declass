@@ -85,6 +85,21 @@ pub(crate) struct FileRule {
     pub(crate) rule: String,
 }
 
+/// `text` (a path or a rule) for one line of a report: control and invisible
+/// characters escaped as `escape_debug` writes them, so a name can neither
+/// start a line of its own nor hide, and quotes left as they are.
+pub(crate) fn shown(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(i) = rest.find(['\'', '"']) {
+        out.extend(rest[..i].escape_debug());
+        out.push_str(&rest[i..=i]);
+        rest = &rest[i + 1..];
+    }
+    out.extend(rest.escape_debug());
+    out
+}
+
 fn origin(raw: &str) -> Option<String> {
     url::Url::parse(raw)
         .ok()
@@ -588,9 +603,9 @@ impl Report {
             for f in &self.files {
                 lines.push(format!(
                     "{} · {} · {}",
-                    f.path.escape_debug(),
+                    shown(&f.path),
                     f.disposition,
-                    f.rule.escape_debug()
+                    shown(&f.rule)
                 ));
             }
         } else {
