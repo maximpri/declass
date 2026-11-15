@@ -345,10 +345,14 @@ on it, so they arrive while the session works or waits in an approval (`acp::Edi
 blocks on `wire::Pending`, as the terminal's approver blocks on the inbox); requests go to the
 dispatcher, which runs on the runtime's main task with the session. Prompts are numbered as they
 are read, and a cancellation covers every prompt read before it. `acp::prompt` makes a prompt's
-content blocks the operator's message: a file is named by its workspace path, never inlined.
-`acp::updates` makes the transcript's entries and the stream `session/update` notifications by the
-rules `workspace::cells` follows on the screen. A thread's session starts with its first prompt
-and its id is the run id; one session runs at a time.
+content blocks the operator's message: a file is named by its workspace path, never inlined;
+text attached from elsewhere is kept apart, and when the turn runs it is presented as
+`Source::Web` and framed with a random tag (`prompt::framed`). `acp::updates` makes the
+transcript's entries and the stream `session/update` notifications by the rules
+`workspace::cells` follows on the screen. A thread's session starts with its first prompt and its
+id is the run id. One session runs at a time (the workspace lock): a prompt to another thread
+leaves the running session open and starts or resumes that thread's, as `declass --resume` would
+(`chat::resumed`, `chat::recover_plans`), so every thread stays usable.
 
 ## 5. Boundary internals
 

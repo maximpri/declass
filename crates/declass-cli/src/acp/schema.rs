@@ -87,7 +87,8 @@ pub(crate) struct PromptParams {
 }
 
 /// One block of a prompt. Images, audio and kinds this version does not know
-/// are never decoded: their data is skipped as it is read.
+/// are not used: their data is read with the message, then dropped (never
+/// base64-decoded or kept).
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum ContentBlock {
@@ -108,7 +109,7 @@ pub(crate) enum ContentBlock {
     Unknown,
 }
 
-/// An embedded resource: a text or a blob (never decoded) under a URI.
+/// An embedded resource: a text, or a blob (dropped as it is read), under a URI.
 #[derive(Debug, Deserialize)]
 pub(crate) struct EmbeddedResource {
     pub uri: String,
@@ -314,7 +315,7 @@ mod tests {
         let ContentBlock::Resource { resource } = &params.prompt[3] else {
             unreachable!()
         };
-        assert!(resource.text.is_none(), "a blob is never decoded");
+        assert!(resource.text.is_none(), "a blob is dropped, not kept");
     }
 
     #[test]

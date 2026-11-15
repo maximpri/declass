@@ -18,10 +18,12 @@
 //! A thread's session starts with its first prompt (as a `declass` session
 //! starts with the first message); its id is the session's run id, so it can
 //! be continued in a terminal with `declass --resume <id>` and audited with
-//! `declass audit show <id>`. One session runs at a time: the first prompt of
-//! another thread leaves the running one open. When the editor goes away
-//! (the end of input, SIGTERM or SIGINT) a running turn is stopped and the
-//! session is left open.
+//! `declass audit show <id>`. One session runs at a time, as the workspace
+//! lock requires: a prompt to another thread leaves the running session open
+//! and starts or resumes that thread's (as `declass --resume` resumes it), so
+//! every thread stays usable. While a turn runs, another thread's prompt is
+//! refused with its own error. When the editor goes away (the end of input,
+//! SIGTERM or SIGINT) a running turn is stopped and the session is left open.
 
 mod prompt;
 mod schema;
@@ -263,36 +265,37 @@ struct Prompt {
     id: Value,
     /// Its number among the session's prompts (see [`Flags::cancelled`]).
     number: u64,
+    /// The operator's own words (and the workspace paths they name).
     message: String,
+    /// Third-party text the editor attached, presented when the turn runs.
+    attached: Vec<prompt::Attached>,
 }
 
-/// What a session needs to start, checked when the editor created it.
-struct Setup {
-    cfg: declass_config::Config,
-    mode: Mode,
-    oversight: Oversight,
-    flags: Arc<Flags>,
-}
-
+/// Where a thread's session is.
+#[derive(Debug)]
 enum Phase {
     /// Created: the session starts with its first prompt.
-    New(Box<Setup>),
+    New,
     /// It runs ([`Server::running`]).
     Running,
+    /// Left open (another thread's session runs): its next prompt resumes it.
+    Open,
     /// It ended: why prompts are refused now.
     Ended(String),
 }
 
 struct Thread {
     ws: PathBuf,
+    flags: Arc<Flags>,
     phase: Phase,
 }
 
-/// The running session: where its prompts go, and the work that answers them.
+/// The running session: where its prompts go, and the work that answers
+/// them, which ends saying where the session is then.
 struct Running<'e> {
     id: String,
     prompts: UnboundedSender<Prompt>,
-    work: Pin<Box<dyn Future<Output = String> + 'e>>,
+    work: Pin<Box<dyn Future<Output = Phase> + 'e>>,
 }
 
 struct Server<'e> {
@@ -306,8 +309,8 @@ struct Server<'e> {
 
 enum Event {
     Request(Incoming),
-    /// The running session's work ended, saying why.
-    Ended(String),
+    /// The running session's work ended, saying where the session is.
+    Ended(Phase),
     /// The editor went away, or a signal asks to stop.
     Gone,
 }
@@ -321,12 +324,12 @@ impl<'e> Server<'e> {
                 let work = self.running.as_mut().map(|r| &mut r.work);
                 tokio::select! {
                     incoming = from.recv() => incoming.map_or(Event::Gone, Event::Request),
-                    why = async {
+                    phase = async {
                         match work {
                             Some(work) => work.await,
                             None => std::future::pending().await,
                         }
-                    } => Event::Ended(why),
+                    } => Event::Ended(phase),
                     _ = tokio::signal::ctrl_c() => Event::Gone,
                     () = async {
                         match terminate.as_mut() {
@@ -340,9 +343,9 @@ impl<'e> Server<'e> {
             };
             match event {
                 Event::Request(incoming) => self.request(incoming).await,
-                Event::Ended(why) => {
+                Event::Ended(phase) => {
                     if let Some(r) = self.running.take() {
-                        self.ended(&r.id, why);
+                        self.settle(&r.id, phase);
                     }
                 }
                 Event::Gone => break,
@@ -355,16 +358,24 @@ impl<'e> Server<'e> {
             if let Some(flags) = self.shared.session(&r.id) {
                 flags.stop();
             }
-            drop(r.prompts);
-            let why = r.work.await;
-            self.ended(&r.id, why);
+            self.leave(r).await;
         }
     }
 
-    fn ended(&mut self, id: &str, why: String) {
+    /// Where a thread's session is once its work ended.
+    fn settle(&mut self, id: &str, phase: Phase) {
         if let Some(thread) = self.sessions.get_mut(id) {
-            thread.phase = Phase::Ended(why);
+            thread.phase = phase;
         }
+    }
+
+    /// Ends the running session's work (its queue is empty): the session is
+    /// left open, as `/quit` leaves it.
+    async fn leave(&mut self, running: Running<'e>) {
+        let Running { id, prompts, work } = running;
+        drop(prompts);
+        let phase = work.await;
+        self.settle(&id, phase);
     }
 
     async fn request(&mut self, incoming: Incoming) {
@@ -458,21 +469,15 @@ impl<'e> Server<'e> {
             .ok()
             .filter(|p| p.is_dir())
             .ok_or_else(|| invalid(format!("cwd {} is not a directory", params.cwd)))?;
-        // The workspace's own configuration, as a `declass` session there reads it.
+        // The workspace's own configuration, as a `declass` session there reads
+        // it (read again whenever the session starts or resumes).
         let cfg = load_config(&ws, self.emb).map_err(refused)?;
         let mode = crate::overrides::resolve_mode(&cfg, self.mode, false).map_err(refused)?;
         set_up(&cfg, mode)?;
+        approve::editor_oversight(&cfg, |_| -> Arc<dyn Approver> { Arc::new(Deny) })
+            .map_err(refused)?;
         let id = new_run_id();
         let flags = Arc::new(Flags::default());
-        let oversight = approve::editor_oversight(&cfg, |mode| -> Arc<dyn Approver> {
-            Arc::new(EditorApprover {
-                mode,
-                session: id.clone(),
-                shared: self.shared.clone(),
-                flags: flags.clone(),
-            })
-        })
-        .map_err(refused)?;
         let servers = params.mcp_servers.unwrap_or_default();
         if !servers.is_empty() {
             let names: Vec<String> = servers
@@ -505,12 +510,8 @@ starts only the servers in its own configuration, where they are pinned, checked
             id.clone(),
             Thread {
                 ws,
-                phase: Phase::New(Box::new(Setup {
-                    cfg,
-                    mode,
-                    oversight,
-                    flags,
-                })),
+                flags,
+                phase: Phase::New,
             },
         );
         Ok(json!(NewSessionResult { session_id: id }))
@@ -529,16 +530,13 @@ starts only the servers in its own configuration, where they are pinned, checked
         let unknown = |why: &str| {
             RpcError::new(wire::RESOURCE_NOT_FOUND, why).with_data(json!({"sessionId": session}))
         };
-        let (Some(thread), Some(flags), Some(number)) = (
-            self.sessions.get(&session),
-            self.shared.session(&session),
-            number,
-        ) else {
+        let (Some(thread), Some(number)) = (self.sessions.get(&session), number) else {
             return Err(unknown("no such session on this connection"));
         };
         if let Phase::Ended(why) = &thread.phase {
             return Err(unknown(why));
         }
+        let flags = thread.flags.clone();
         let composed = prompt::compose(&params.prompt, &thread.ws);
         if !composed.declined.is_empty() {
             updates::say(
@@ -558,13 +556,14 @@ starts only the servers in its own configuration, where they are pinned, checked
         if flags.cancelled(number) {
             return done(StopReason::Cancelled);
         }
-        if composed.message.is_empty() {
+        if composed.is_empty() {
             return done(StopReason::EndTurn);
         }
         let prompt = Prompt {
             id: id.clone(),
             number,
             message: composed.message,
+            attached: composed.attached,
         };
         if matches!(thread.phase, Phase::Running) {
             flags.outstanding.fetch_add(1, Ordering::SeqCst);
@@ -576,34 +575,44 @@ starts only the servers in its own configuration, where they are pinned, checked
             flags.answered();
             return Err(unknown("the session ended"));
         }
-        // One session runs at a time: another one is left open first.
+        // One session runs at a time (the workspace lock): another thread's is
+        // left open first, unless it is working.
         if let Some(other) = &self.running
-            && self.shared.session(&other.id).is_some_and(|f| f.busy())
+            && self.sessions.get(&other.id).is_some_and(|t| t.flags.busy())
         {
             return Err(RpcError::new(
                 wire::BUSY,
-                "Declass is working in another thread; wait for it, or stop it, first",
-            ));
+                "Declass is working in another thread; send this again when that turn ends, or \
+stop it first",
+            )
+            .with_data(json!({"sessionId": session, "busy": other.id})));
         }
         if let Some(other) = self.running.take() {
-            drop(other.prompts);
-            let why = other.work.await;
-            self.ended(&other.id, why);
+            self.leave(other).await;
         }
         let Some(thread) = self.sessions.get_mut(&session) else {
             return Err(unknown("no such session on this connection"));
         };
-        let Phase::New(setup) = std::mem::replace(&mut thread.phase, Phase::Running) else {
-            return Err(unknown("the session ended"));
+        let resume = match std::mem::replace(&mut thread.phase, Phase::Running) {
+            Phase::New => false,
+            Phase::Open => true,
+            other => {
+                thread.phase = other;
+                return Err(unknown("the session is not available"));
+            }
         };
         flags.outstanding.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = unbounded_channel();
         let work = hold(
-            self.shared.clone(),
-            self.emb,
-            session.clone(),
-            thread.ws.clone(),
-            *setup,
+            Start {
+                shared: self.shared.clone(),
+                emb: self.emb,
+                id: session.clone(),
+                ws: thread.ws.clone(),
+                flags,
+                mode: self.mode,
+                resume,
+            },
             prompt,
             rx,
         );
@@ -613,6 +622,15 @@ starts only the servers in its own configuration, where they are pinned, checked
             work: Box::pin(work),
         });
         Ok(None)
+    }
+}
+
+/// An approver for a configuration check: it is never asked.
+struct Deny;
+
+impl Approver for Deny {
+    fn approve(&self, _: &Action) -> bool {
+        false
     }
 }
 
@@ -637,7 +655,8 @@ fn set_up(cfg: &declass_config::Config, mode: Mode) -> Result<(), RpcError> {
         "Declass is not set up: {}. Run `declass setup` in a terminal, then start the agent again.",
         missing.join("; ")
     );
-    if missing.iter().any(|m| m.contains("variable")) {
+    let key_env = cfg.str("frontier.api_key_env").unwrap_or_default();
+    if frontier && !key_env.is_empty() && missing.iter().any(|m| m.starts_with(&key_env)) {
         message.push_str(
             " An editor may not start agents with your shell's environment: pass the variable in \
 the editor's settings for this agent (env), or save the key with `declass setup`.",
@@ -646,25 +665,34 @@ the editor's settings for this agent (env), or save the key with `declass setup`
     Err(RpcError::new(wire::NOT_SET_UP, message).with_data(json!({"missing": missing})))
 }
 
-/// One session from its first prompt to its end, as a `declass` session
-/// runs (`chat::chat`): its manifest, the workspace lock and run directory,
-/// the conversation (`chat::converse` with [`Editor`]), and its conclusion.
-/// Returns why later prompts to it are refused.
-async fn hold(
+/// What starting (or resuming) a thread's session takes.
+struct Start<'e> {
     shared: Arc<Shared>,
-    emb: &Embedding,
+    emb: &'e Embedding,
     id: String,
     ws: PathBuf,
-    setup: Setup,
-    first: Prompt,
-    mut prompts: UnboundedReceiver<Prompt>,
-) -> String {
-    let Setup {
-        cfg,
-        mode,
-        oversight,
+    flags: Arc<Flags>,
+    /// `declass acp --mode`.
+    mode: Option<Mode>,
+    /// The session was left open and continues (as `declass --resume`).
+    resume: bool,
+}
+
+/// One session invocation, from the prompt that starts or resumes it to its
+/// end, as `chat::chat` runs one: its manifest, the workspace lock and run
+/// directory, the conversation (`chat::converse` with [`Editor`]), and its
+/// conclusion. Returns where the session is then: left open (its thread's
+/// next prompt resumes it), ended, or, when it could not start, as it was.
+async fn hold(start: Start<'_>, first: Prompt, mut prompts: UnboundedReceiver<Prompt>) -> Phase {
+    let Start {
+        shared,
+        emb,
+        id,
+        ws,
         flags,
-    } = setup;
+        mode,
+        resume,
+    } = start;
     // Every prompt not answered yet (queued ones too) is answered with `why`.
     let refuse = |prompts: &mut UnboundedReceiver<Prompt>, first: Option<Value>, why: &str| {
         prompts.close();
@@ -679,24 +707,40 @@ async fn hold(
                 .fail(&prompt, &RpcError::new(wire::TURN_FAILED, why));
         }
     };
-    let manifest = match manifest(&cfg, mode, &id, &first.message).await {
-        Ok(m) => m,
-        Err(why) => {
-            let why = format!("the session could not start: {why}");
-            refuse(&mut prompts, Some(first.id), &why);
-            return format!("session {id}: {why}");
-        }
-    };
-    let (workspace_lock, run_dir) = match chat::session_dir(&ws, &manifest)
-        .and_then(|(held, dir)| chat::save_manifest(&dir, &manifest).map(|()| (held, dir)))
-    {
+    // A session that could not start (or resume) can be tried again.
+    let before = || if resume { Phase::Open } else { Phase::New };
+    let verb = if resume { "resume" } else { "start" };
+    let found = setup(&shared, emb, &id, &ws, &flags, mode, resume, &first).await;
+    let (cfg, manifest, oversight) = match found {
         Ok(found) => found,
-        Err(e) => {
-            let why = format!("the session could not start: {e:#}");
-            refuse(&mut prompts, Some(first.id), &why);
-            return format!("session {id}: {why}");
+        Err(why) => {
+            refuse(
+                &mut prompts,
+                Some(first.id),
+                &format!("the session could not {verb}: {why}"),
+            );
+            return before();
         }
     };
+    let (workspace_lock, run_dir) =
+        match chat::session_dir(&ws, &manifest).and_then(|(held, dir)| {
+            if resume {
+                chat::recover_plans(&dir)
+            } else {
+                chat::save_manifest(&dir, &manifest)
+            }
+            .map(|()| (held, dir))
+        }) {
+            Ok(found) => found,
+            Err(e) => {
+                refuse(
+                    &mut prompts,
+                    Some(first.id),
+                    &format!("the session could not {verb}: {e:#}"),
+                );
+                return before();
+            }
+        };
     let limits = chat::session_limits(&flags.interrupted);
     let mut audit = None;
     let mut editor = Editor {
@@ -713,7 +757,7 @@ async fn hold(
         &cfg,
         oversight,
         &run_dir,
-        false,
+        resume,
         &limits,
         &mut audit,
         emb.hooks(),
@@ -735,7 +779,7 @@ async fn hold(
     refuse(&mut editor.prompts, first, &why);
     *lock(&flags.steering) = None;
     if let Err(e) =
-        chat::conclude_session(&ws, &manifest, &cfg, emb, audit, &terminal, &stats, false)
+        chat::conclude_session(&ws, &manifest, &cfg, emb, audit, &terminal, &stats, resume)
     {
         eprintln!("declass acp: session {id} not concluded: {e:#}");
     }
@@ -746,27 +790,51 @@ async fn hold(
     // Printed as a terminal session prints it: on the log, never the protocol.
     chat::farewell(&manifest.run_id, &terminal, &stats);
     match terminal {
-        Terminal::Open { .. } => format!(
-            "session {id} was left open; continue it in a terminal with `declass --resume {id}`"
-        ),
-        Terminal::Completed { .. } => format!("session {id} was closed"),
-        Terminal::Failed { reason } => format!("session {id} stopped: {reason}"),
-        Terminal::BudgetStopped { which } => format!(
-            "session {id}: {which} is spent; raise it, then continue with `declass --resume {id}`"
-        ),
+        Terminal::Completed { .. } => Phase::Ended(format!("session {id} was closed")),
+        // Left open, stopped by a limit, or failed after a turn: it resumes.
+        _ if declass_agent::resumable(&run_dir).is_ok() => Phase::Open,
+        Terminal::Failed { reason } => Phase::Ended(format!("session {id} stopped: {reason}")),
+        _ => Phase::Ended(format!("session {id} cannot be continued")),
     }
 }
 
-/// The manifest of the editor's session: the first prompt is its objective,
-/// the configuration gives everything else (an editor passes no overrides).
-async fn manifest(
-    cfg: &declass_config::Config,
-    mode: Mode,
+/// The session's configuration (read now, as a `declass` session reads it
+/// when it starts), its manifest and its oversight. A new session's first
+/// prompt is its objective, and the configuration gives everything else (an
+/// editor passes no overrides); a resumed one keeps its own record.
+#[allow(clippy::too_many_arguments)]
+async fn setup(
+    shared: &Arc<Shared>,
+    emb: &Embedding,
     id: &str,
-    first: &str,
-) -> Result<RunManifest, String> {
+    ws: &std::path::Path,
+    flags: &Arc<Flags>,
+    mode: Option<Mode>,
+    resume: bool,
+    first: &Prompt,
+) -> Result<(declass_config::Config, RunManifest, Oversight), String> {
     let error = |e: anyhow::Error| format!("{e:#}");
-    let local = match chat::local_endpoint(cfg, mode).await.map_err(error)? {
+    let cfg = load_config(ws, emb).map_err(error)?;
+    let oversight = approve::editor_oversight(&cfg, |mode| -> Arc<dyn Approver> {
+        Arc::new(EditorApprover {
+            mode,
+            session: id.to_owned(),
+            shared: shared.clone(),
+            flags: flags.clone(),
+        })
+    })
+    .map_err(error)?;
+    if resume {
+        let manifest = chat::resumed(ws, Some(id.to_owned())).map_err(error)?;
+        crate::overrides::check(&cfg, &manifest).map_err(error)?;
+        return Ok((cfg, manifest, oversight));
+    }
+    let mode = crate::overrides::resolve_mode(&cfg, mode, false).map_err(error)?;
+    set_up(&cfg, mode).map_err(|e| e.message)?;
+    if mode != Mode::TopClearance {
+        crate::setup::require_frontier(&cfg, None, None).map_err(error)?;
+    }
+    let local = match chat::local_endpoint(&cfg, mode).await.map_err(error)? {
         Ok(local) => local,
         Err(_) => {
             return Err(
@@ -776,12 +844,17 @@ async fn manifest(
             );
         }
     };
+    let objective = if first.message.is_empty() {
+        "(content the operator attached in the editor)".to_owned()
+    } else {
+        first.message.clone()
+    };
     let manifest = chat::new_manifest(
-        cfg,
+        &cfg,
         NewSession {
             run_id: id.to_owned(),
             mode,
-            first: first.to_owned(),
+            first: objective,
             frontier_url: None,
             frontier_model: None,
             checks: &[],
@@ -791,8 +864,8 @@ async fn manifest(
         },
     )
     .map_err(error)?;
-    crate::overrides::check(cfg, &manifest).map_err(error)?;
-    Ok(manifest)
+    crate::overrides::check(&cfg, &manifest).map_err(error)?;
+    Ok((cfg, manifest, oversight))
 }
 
 /// The editor's side of an open session: one turn per prompt.
@@ -866,11 +939,11 @@ impl Editor {
             return Ok(StopReason::Cancelled);
         }
         // The answer to declass's question, as a terminal session sends it.
-        let message = match session.history().last().and_then(|x| x.end.as_ref()) {
+        let mut message = match session.history().last().and_then(|x| x.end.as_ref()) {
             Some(TurnEnd::Asked {
                 options: Some(options),
                 ..
-            }) => match answer(options, &prompt.message) {
+            }) if !prompt.message.is_empty() => match answer(options, &prompt.message) {
                 Ok(message) => message,
                 Err(why) => {
                     lock(updates).paragraph(&why);
@@ -879,6 +952,14 @@ impl Editor {
             },
             _ => prompt.message.clone(),
         };
+        // What the editor attached from elsewhere: data the boundary presents
+        // (as a fetched page), framed so it cannot pass for these words.
+        for attached in &prompt.attached {
+            if !message.is_empty() {
+                message.push_str("\n\n");
+            }
+            message.push_str(&prompt::framed(open.presenter, attached));
+        }
         let end = self
             .turn(session, open, updates, &message, prompt.number)
             .await;

@@ -163,6 +163,17 @@ pub(crate) fn parse(line: &[u8]) -> Result<Message, Box<Refusal>> {
         ));
     };
     let id = map.remove("id");
+    // JSON-RPC ids are strings, numbers or null; any other is not echoed.
+    if id
+        .as_ref()
+        .is_some_and(|id| !(id.is_string() || id.is_number() || id.is_null()))
+    {
+        return Err(refusal(
+            None,
+            INVALID_REQUEST,
+            "an id is a string, a number or null",
+        ));
+    }
     let invalid = |id: Option<Value>, why: &str| Err(refusal(id, INVALID_REQUEST, why));
     if map.get("jsonrpc").and_then(Value::as_str) != Some("2.0") {
         return invalid(id, "not JSON-RPC 2.0");
@@ -365,6 +376,16 @@ mod tests {
             code(br#"{"jsonrpc":"2.0","id":7}"#).error.code,
             INVALID_REQUEST
         );
+        // Ids other than strings, numbers and null are refused, never echoed.
+        for id in [r#"{"a":1}"#, "[1]", "true"] {
+            let line = format!(r#"{{"jsonrpc":"2.0","id":{id},"method":"initialize"}}"#);
+            let refused = code(line.as_bytes());
+            assert_eq!(
+                (refused.id, refused.error.code),
+                (Value::Null, INVALID_REQUEST)
+            );
+        }
+        assert!(parse(br#"{"jsonrpc":"2.0","id":null,"method":"x"}"#).is_ok());
     }
 
     #[test]

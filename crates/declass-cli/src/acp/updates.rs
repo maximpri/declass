@@ -79,11 +79,15 @@ struct Card {
     /// The approval question, and the answer once given.
     approval: Option<(String, Option<bool>)>,
     result: Option<String>,
+    /// A command call's command as the frontier wrote it (what an approval
+    /// of it names).
+    command: Option<String>,
 }
 
 impl Card {
     fn new(id: String, name: &str, tool: bool, title: String, status: ToolStatus) -> Self {
         Card {
+            command: None,
             id,
             name: name.to_owned(),
             tool,
@@ -510,9 +514,11 @@ impl Updates {
         // as the frontier wrote it (as the workspace shows it).
         if c.name == "run_command"
             && let Some(command) = c.arguments.get("command").and_then(Value::as_str)
-            && (command.lines().count() > 1 || command.chars().count() > 100)
         {
-            card.lines.push(fenced(&bounded(command)));
+            if command.lines().count() > 1 || command.chars().count() > 100 {
+                card.lines.push(fenced(&bounded(command)));
+            }
+            card.command = Some(command.to_owned());
         }
         // Questions to the local model, as the frontier wrote them.
         if let Some(questions) = c.arguments.get("questions").and_then(Value::as_array) {
@@ -760,14 +766,21 @@ impl Updates {
     }
 
     /// An approval question for `action`, on the card of the call it is about
-    /// (the first of that tool not yet run), or on a card of its own (a
-    /// sub-agent's action). Returns the tool call the editor asks about.
+    /// (the one running now), or on a card of its own (a sub-agent's action).
+    /// Returns the tool call the editor asks about.
     pub(crate) fn permission(&mut self, action: &Action, question: &str) -> ToolCallUpdate {
-        let id = match self
-            .cards
-            .iter()
-            .find(|c| c.tool && c.unfinished() && c.name == action.tool)
-        {
+        // The loop runs one call at a time and asks before running it, so an
+        // approval is about the call running now: the same tool, and for a
+        // command the same command. Anything else (a sub-agent's action, asked
+        // while its `delegate` call runs) is not any card's.
+        let id = match self.cards.iter().find(|c| {
+            c.tool
+                && c.status == ToolStatus::InProgress
+                && c.name == action.tool
+                && c.command
+                    .as_ref()
+                    .is_none_or(|command| action.command.as_ref() == Some(command))
+        }) {
             Some(c) => c.id.clone(),
             None => {
                 self.own += 1;
@@ -1316,6 +1329,54 @@ mod tests {
         );
         options.allow_freeform = true;
         assert!(choices(&options).ends_with("or with your own answer."));
+    }
+
+    #[test]
+    fn an_approval_raised_while_a_sub_agent_works_is_not_on_a_queued_call() {
+        let (mut u, out) = updates();
+        // The frontier delegates, then runs a command: the delegate runs
+        // first, the command waits behind it.
+        u.entry(&assistant(
+            "",
+            vec![
+                call("c1", "delegate", json!({"task": "look around"})),
+                call("c2", "run_command", json!({"command": "make deploy"})),
+            ],
+        ));
+        // The sub-agent asks to run the same kind of command.
+        let theirs = Action {
+            tool: "run_command".into(),
+            risk: declass_agent::oversight::Risk::Command,
+            path: None,
+            command: Some("make deploy".into()),
+            bytes: None,
+        };
+        let asked = u.permission(&theirs, "run make deploy?");
+        assert!(
+            asked.tool_call_id.starts_with("declass-approval-"),
+            "{asked:?}"
+        );
+        u.decided(&asked.tool_call_id, true);
+        // The queued call was neither asked about nor started.
+        let c2: Vec<Value> = sent(&out)
+            .into_iter()
+            .filter(|m| m["toolCallId"] == "c2")
+            .collect();
+        assert_eq!(c2.len(), 1, "{c2:?}");
+        assert_eq!(c2[0]["status"], "pending");
+        // Once the delegate is done, the command's own approval is its card's,
+        // but only for the command it runs.
+        u.entry(&result("c1", "the sub-agent finished"));
+        let other = Action {
+            command: Some("make clean".into()),
+            ..theirs.clone()
+        };
+        assert!(
+            u.permission(&other, "?")
+                .tool_call_id
+                .starts_with("declass-approval-")
+        );
+        assert_eq!(u.permission(&theirs, "?").tool_call_id, "c2");
     }
 
     #[test]

@@ -780,7 +780,7 @@ fn read_manifest(run_dir: &Path) -> Result<RunManifest> {
 }
 
 /// The session to continue: its manifest, after checking it is one.
-fn resumed(ws: &Path, id: Option<String>) -> Result<RunManifest> {
+pub(crate) fn resumed(ws: &Path, id: Option<String>) -> Result<RunManifest> {
     let id = match id {
         Some(id) => checked_run_id(&id)?.to_owned(),
         None => last_session(ws)?,
@@ -1147,22 +1147,7 @@ Add --no-privacy to confirm, or use --mode hybrid."
         }
         let (lock, run_dir) = session_dir(&ws, &manifest)?;
         if resuming && !runtime_restart {
-            let mut plans =
-                declass_agent::plans::Store::load(&run_dir).map_err(anyhow::Error::msg)?;
-            let unfinished = plans.snapshot().execution.as_ref().is_some_and(|e| {
-                matches!(
-                    e.status,
-                    declass_agent::plans::ExecutionStatus::Active
-                        | declass_agent::plans::ExecutionStatus::Waiting
-                        | declass_agent::plans::ExecutionStatus::Paused
-                )
-            });
-            plans.recover().map_err(anyhow::Error::msg)?;
-            if unfinished {
-                // Restore the restriction before recovery or optional services can run.
-                declass_agent::transcript::Transcript::open(&run_dir)?
-                    .append(&Entry::PlanMode { enabled: true })?;
-            }
+            recover_plans(&run_dir)?;
         }
         if !resuming {
             if start_planning {
@@ -1330,6 +1315,27 @@ pub(crate) fn session_dir(
     declass_fs::private::ensure_private_dir(&run_dir)?;
     declass_fs::private::ensure_private_dir(&ws.join(".declass/tmp"))?;
     Ok((lock, run_dir))
+}
+
+/// Before a resumed session opens: a plan that was carried out when the
+/// session was left is recovered, and its execution restriction is restored
+/// before recovery or optional services can run.
+pub(crate) fn recover_plans(run_dir: &Path) -> Result<()> {
+    let mut plans = declass_agent::plans::Store::load(run_dir).map_err(anyhow::Error::msg)?;
+    let unfinished = plans.snapshot().execution.as_ref().is_some_and(|e| {
+        matches!(
+            e.status,
+            declass_agent::plans::ExecutionStatus::Active
+                | declass_agent::plans::ExecutionStatus::Waiting
+                | declass_agent::plans::ExecutionStatus::Paused
+        )
+    });
+    plans.recover().map_err(anyhow::Error::msg)?;
+    if unfinished {
+        declass_agent::transcript::Transcript::open(run_dir)?
+            .append(&Entry::PlanMode { enabled: true })?;
+    }
+    Ok(())
 }
 
 /// Writes a new session's manifest: from then on it can be resumed.

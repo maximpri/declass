@@ -615,9 +615,11 @@ standard error, which editors show among their logs.
   @-mention becomes its path in the message, never its content, even when the editor sends the
   content along: the frontier reads the file with Declass's tools, through the boundary, so a
   `.env` or a customer CSV is read only by the local model. Declass reads the file as saved, not
-  unsaved changes in the editor. Text the editor attaches that is not a file (a selection in an
-  unsaved buffer, a rule) counts as text you pasted. Files outside the thread's directory, images
-  and audio are not used: the agent says so, and nothing of them is sent.
+  unsaved changes in the editor. Text the editor attaches from elsewhere (a page it fetched, a
+  rule, a selection in an unsaved buffer) is not your words: Declass checks it as it checks a web
+  page its own tools fetch (scanned, screened for prompt injection, held locally when large) and
+  gives it to the frontier marked as data, not instructions. Files outside the thread's
+  directory, links, images and audio are not used: the agent says so, and nothing of them is sent.
 - **What you see.** Replies stream in with placeholders restored, as in the workspace. Each tool
   call shows its arguments and its result as the frontier saw it; an edit shows its diff (a file
   that is sensitive by policy is named, never shown). What the boundary withheld from a request
@@ -628,17 +630,20 @@ standard error, which editors show among their logs.
   turn. Declass remembers no answer.
 - **Stopping.** The editor's stop button stops the turn at once, as Ctrl-C does at a terminal;
   the session stays open and Declass is told with your next message.
+- **Threads.** Each thread keeps its session. One session runs at a time, as in a terminal: a
+  message in another thread leaves the running session open and starts or resumes that thread's
+  (resuming takes a moment). While a turn works, a message in another thread is refused with a
+  note to send it again when the turn ends, or to stop the turn first.
 - **Continuing.** A thread's session id is its run id: `declass --resume <id>` continues it in a
   terminal, and `declass audit show <id>` shows what it sent. Closing the editor leaves the
-  session open. So does starting work in another thread, after which the first thread's session
-  continues only in a terminal.
+  sessions open.
 
-Not yet: reopening an earlier session from the editor; two threads working at once (a thread's
-first message is refused while another thread works); slash commands such as `/plan`, `/goal` and
-`/undo` (typed in the editor they are a message; use them at a terminal); session modes; images.
-Declass does not use the editor's own file and terminal methods: it works with its own sandboxed
-tools, write journal and undo. MCP servers the editor offers are not started: Declass starts only
-the servers in its own configuration, where they are pinned, checked and approved.
+Not yet: reopening a session from an earlier editor run; two threads working at once; slash
+commands such as `/plan`, `/goal` and `/undo` (typed in the editor they are a message; use them at
+a terminal); session modes; images. Declass does not use the editor's own file and terminal
+methods: it works with its own sandboxed tools, write journal and undo. MCP servers the editor
+offers are not started: Declass starts only the servers in its own configuration, where they are
+pinned, checked and approved.
 
 ## Tools and privacy controls
 
