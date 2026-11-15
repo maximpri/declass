@@ -1022,7 +1022,9 @@ git; reset behaviour defined per entry).
   command `TMPDIR` outside the workspace (a sub-agent's commands can write nothing else: the
   workspace is read-only to them, `Spec.read_only`), a separate one for `sensitive_data` commands that no
   other sandboxed process (command, check, MCP server) can read (`tools::hidden_from_processes`), where
-  their cargo builds go too (`CARGO_TARGET_DIR`); sensitive and protected paths unreadable (deny-read) except for
+  their cargo builds go too (`CARGO_TARGET_DIR`); sensitive and protected paths unreadable (deny-read), and under
+  Seatbelt, whose rules name paths, not movable (a denied path and the folders above it cannot be
+  renamed or removed), except for
   `sensitive_data` commands (whose placeholders are resolved locally), and protected source readable by the host's checks; credential
   stores in the home directory unreadable to every command; network only through the egress proxy
   by default (§5.6b), none for `sensitive_data` commands and checks that read protected source;

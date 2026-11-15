@@ -633,6 +633,8 @@ earlier version with `sandbox.network = true` or `false` still works: it reads a
 **Command troubleshooting.** Temporary files belong in the command's private `$TMPDIR` or the
 workspace. A hard-coded `/tmp/file` or home-directory write can be denied. Use `list_files`,
 `search` and `read_file` for file discovery and reads; commands cannot inspect `.declass` or `.git`.
+On macOS a command cannot rename or remove a file it may not read, or a folder that holds one; it
+can still create and write files there.
 Skills cannot grant access to a browser daemon, its saved profile or host sockets.
 
 Start a preview server and run its client check inside the **same command**. Declass stops all

@@ -432,18 +432,40 @@ pub fn seatbelt_profile(spec: &Spec, host_ports: Option<&[u16]>) -> Result<Strin
     ]);
     // Later rules win: these override the blanket read allowance above.
     rules.push(format!("(deny file-read* (regex #\"{run_state}\"))"));
+    // Directories above a denied path, inside what the command may write.
+    let mut above = std::collections::BTreeSet::new();
     for p in &spec.deny_read {
         // A denied symlink is denied at its target too, so the content is not
         // readable under the target's own path.
         let target = p.canonicalize().ok().filter(|t| t != p);
         for p in std::iter::once(p).chain(target.as_ref()) {
             let q = quote(p)?;
-            rules.push(if p.is_dir() {
-                format!("(deny file-read* (subpath {q}))")
+            let filter = if p.is_dir() {
+                format!("(subpath {q})")
             } else {
-                format!("(deny file-read* (literal {q}))")
-            });
+                format!("(literal {q})")
+            };
+            rules.push(format!("(deny file-read* {filter})"));
+            // The rules name paths and are checked at each access, so a
+            // denied path must keep its name: moving it, or a directory
+            // above it, would make its content readable under a path no
+            // rule names. A rename needs `file-write-unlink` on what it
+            // moves; files may still be created and written there.
+            rules.push(format!("(deny file-write-unlink {filter})"));
+            above.extend(
+                p.ancestors()
+                    .skip(1)
+                    .filter(|a| {
+                        [&spec.workspace, &spec.scratch]
+                            .iter()
+                            .any(|root| a.starts_with(root) && a != root)
+                    })
+                    .map(Path::to_path_buf),
+            );
         }
+    }
+    for a in &above {
+        rules.push(format!("(deny file-write-unlink (literal {}))", quote(a)?));
     }
     let services: Vec<String> = MACH_SERVICES
         .iter()
@@ -1762,6 +1784,63 @@ mod tests {
         let all = text(&o);
         for secret in ["8977066", "PRIVATE-4471", "key.pem\n"] {
             assert!(!all.contains(secret), "{secret} readable: {all}");
+        }
+        assert!(o.shows_denial(), "{all}");
+    }
+
+    #[tokio::test]
+    async fn denied_paths_cannot_be_moved_to_where_no_rule_names_them() {
+        // Seatbelt's rules name paths and are checked at each access: moving
+        // a denied file, or a directory above one, used to give its content
+        // a path no rule named, and the command read it there.
+        let (_d, ws) = setup();
+        for dir in ["data/nested", "config/secrets", "vendor/dep/.git", "src"] {
+            std::fs::create_dir_all(ws.join(dir)).unwrap();
+        }
+        let secrets = [
+            (".env", "TOKEN=Qx7pL2mN9vR4\n"),
+            ("data/nested/c.csv", "id,balance\n1,8977066\n"),
+            ("config/secrets/key.pem", "PRIVATE-4471\n"),
+            ("vendor/dep/.git/HEAD", "ref: 7730\n"),
+        ];
+        for (rel, text) in secrets {
+            std::fs::write(ws.join(rel), text).unwrap();
+        }
+        std::fs::write(ws.join("config/app.toml"), "port = 1\n").unwrap();
+        let mut s = spec(&ws);
+        s.deny_read = vec![
+            ws.join(".env"),
+            ws.join("data"),
+            ws.join("config/secrets/key.pem"),
+            ws.join("vendor/dep/.git"),
+        ];
+        let o = sh_with(
+            &s,
+            "mv .env moved.env; cat moved.env; \
+             mv data/nested n2; cat n2/c.csv; mv data d2; cat d2/nested/c.csv; \
+             mv config/secrets s2; cat s2/key.pem; mv config c2; cat c2/secrets/key.pem; \
+             mv vendor v2; cat v2/dep/.git/HEAD; mv vendor/dep dep2; cat dep2/.git/HEAD; \
+             rm -rf data config/secrets; \
+             echo new > data/new.csv && echo created-in-denied-dir; \
+             mv config/app.toml app.toml && cat app.toml",
+        )
+        .await;
+        let all = text(&o);
+        for secret in ["Qx7p", "8977066", "PRIVATE-4471", "7730"] {
+            assert!(!all.contains(secret), "{secret} readable: {all}");
+        }
+        for (rel, text) in secrets {
+            assert_eq!(
+                std::fs::read_to_string(ws.join(rel)).unwrap(),
+                text,
+                "{rel}"
+            );
+        }
+        // Other files may still be moved and, under Seatbelt, files created in
+        // a denied directory (bubblewrap covers it with an unwritable stand-in).
+        assert!(all.contains("port = 1"), "{all}");
+        if cfg!(target_os = "macos") {
+            assert!(all.contains("created-in-denied-dir"), "{all}");
         }
         assert!(o.shows_denial(), "{all}");
     }

@@ -624,7 +624,8 @@ any encoding, and a `sensitive_data` command's output is held locally.
 
 Both sandboxes are exercised by the same behavioural tests (`crates/declass-sandbox`, and the
 end-to-end command tests in `crates/declass-agent`): denied files and directories unreadable by `cat`,
-`od`, `ls` and `cp`, through symlinks and through hard links made by the command; `.git`
+`od`, `ls` and `cp`, through symlinks, through hard links made by the command and after the command
+moves them or a folder above them; `.git`
 unreadable to ordinary commands, `.declass` unreadable to every command even with no deny list, and
 both never writable, at any depth; writes only in the
 workspace and the scratch `TMPDIR`; no network, including Unix sockets, or with the egress proxy's
@@ -648,7 +649,12 @@ the kernel reports critical memory pressure. It only ever signals members of the
 processes Declass did not start are never touched, whatever they use.
 
 - **macOS (Seatbelt)**: tested in the gate on every commit. A refused read prints "Operation not
-  permitted".
+  permitted". The rules name paths and are checked at each access, so a denied path, and every
+  folder above it in the workspace, cannot be renamed or removed (`file-write-unlink`); files may
+  still be created and written there. Swap renames, `exchangedata` and `clonefile` of a denied
+  file are refused too. On the default case-insensitive volumes the rules match names as the
+  volume compares them (letter case and Unicode case folding: `.DECLASS`, `.declaß`), measured
+  on APFS.
 - **Linux (bubblewrap)**: tested with `tools/linux-check.sh` (Docker; not part of the gate, run it
   before releases) in four setups: privileged, unprivileged user namespaces (no added
   capabilities, the usual desktop case), Declass run as root, and a container that forbids
@@ -1587,6 +1593,7 @@ protection limits remain in this threat model and the
 | DECLASS-2026-038 | Timestamp-preserving sensitive writes escaped derived classification | CWE-200 Exposure of Sensitive Information | Before this fix, ordinary workspace snapshots compared only modification time and size; build output was classified by modification time alone. A sensitive command using timestamp-preserving copies or restoring mtime could leave same-sized rewritten files, or new exports under `target/`, classified as public. Two regressions reproduced the missing classifications | Include inode change time, device and inode in before/after workspace stamps, including build and dependency directories. This also avoids falsely classifying untouched recent build files. Unprivileged commands cannot restore ctime. Failed directory/stat inspection now fails closed and keeps the pending classification marker. Tests: `timestamp_preserving_sensitive_writes_are_detected`, `timestamp_preserving_sensitive_build_exports_are_detected`, and `failed_workspace_inspection_is_not_an_empty_successful_snapshot` |
 | DECLASS-2026-039 | A waiting shell could continue during cancellation | CWE-362 Race Condition | Killing a child before its waiting parent could wake the shell long enough to execute its next command during teardown. The unchanged stop-tree regression reproduced a survivor marker after cancellation on a complete Linux x86-64 kernel under QEMU | Stop the root and discovered ancestors before killing descendants. Bounded rescans include forks racing the initial snapshot; frozen parents cannot continue their command tails when children die. The original 29 sandbox tests and six network tests pass on the same x86-64 kernel with seccomp enabled. Parent-link discovery cannot recover processes already reparented outside the tree before inspection |
 | DECLASS-2026-040 | MCP and language servers could read the operator's credentials | CWE-284 Improper Access Control (consequence CWE-522) | Each sandboxed process's deny list was built by its caller. Commands and external scanners added the credential stores in the home directory (`HOME_SECRETS`) and Declass's sign-ins; stdio MCP servers, language servers and the security review's reference lookup did not, so a server could read `~/.ssh`, cloud and registry tokens or Declass's own sign-ins, and a stdio server with `network = true` could send them. This document said MCP servers had the same deny list as commands. Found in review while planning extension pinning, not observed in a run | The sandbox adds the credential stores and the sign-ins Declass registers at start to every process (`effective_deny_read`), so no caller can leave them out. An owner can let one MCP server read named stores (`read_home_secrets`). Regressions `a_stdio_server_is_denied_what_every_process_is_denied` (MCP), `a_sandboxed_server_is_denied_what_every_process_is_denied` (language servers) and `every_process_is_denied_the_credential_stores_unless_exempted` (sandbox) fail without the fix |
+| DECLASS-2026-NEW-moved-denied-paths | Denied paths moved out of their rules | CWE-284 Improper Access Control (consequence CWE-201) | Seatbelt's rules name paths and are checked at each access, and nothing stopped a command from renaming what they named: `mv .env x && base64 x`, or renaming a folder above a denied path (`mv data d`, `mv config c` for `config/secrets/key.pem`, `mv vendor v` for a nested `.git`), let an ordinary command read sensitive files, protected source and nested git history under the new path, in any encoding. Found in the 2026-11 red-team review of the sandbox, not observed in a run; macOS only (bubblewrap covers a denied path with a mount, which cannot be moved) | Under Seatbelt a denied path, and every folder above it in the workspace, cannot be renamed or removed (`file-write-unlink`); files may still be created and written there. Swap renames, `exchangedata` and `clonefile` are refused too (measured). Regression `denied_paths_cannot_be_moved_to_where_no_rule_names_them` (this change) |
 
 Related hardening: offline `declass doctor` now skips network-enabled stdio MCP servers as well as
 HTTP MCP servers; `--online` is required to start either. This closes an unexpected network path
