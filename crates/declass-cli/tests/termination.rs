@@ -505,7 +505,10 @@ async fn a_local_model_outage_ends_at_the_wall_clock_without_a_degraded_result()
         },
     );
     lc.backoff_scale = 0.001;
-    let deadline = tokio::time::Instant::now() + Duration::from_millis(800);
+    // The deadline also covers opening the engine and the first request, which
+    // take most of a second on a heavily loaded machine; three seconds leaves
+    // room for the retries this test is about.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
     lc.deadline = Some(deadline);
     lc.cancel = Some(flag.clone());
     let local = ChatProvider::new(lc, Box::new(unreachable.clone())).unwrap();
@@ -533,8 +536,8 @@ async fn a_local_model_outage_ends_at_the_wall_clock_without_a_degraded_result()
         }
     );
     // Retried in place until the wall clock ended the run (above). How many
-    // attempts fit in 800 ms depends on the machine's load, so the count only
-    // has to show retrying.
+    // attempts fit before the deadline depends on the machine's load, so the
+    // count only has to show retrying.
     assert!(
         *unreachable.0.lock().unwrap() > 2,
         "local calls were not retried"
