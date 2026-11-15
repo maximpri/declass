@@ -803,7 +803,12 @@ async fn execute(
     let mut oversight = approve::oversight(&cfg)?;
     // Progress on standard error: live on a terminal, else compact lines.
     let live = std::io::stderr().is_terminal() && term::capable();
-    let watch = (!quiet).then(|| term::watch::Watch::start(live));
+    let worker = if manifest.mode == Mode::TopClearance {
+        "local model"
+    } else {
+        "frontier"
+    };
+    let watch = (!quiet).then(|| term::watch::Watch::start(live, worker));
     if let (Some(w), Some(a)) = (&watch, oversight.approver.take()) {
         // A question on the terminal pauses the status line.
         oversight.approver = Some(if live {

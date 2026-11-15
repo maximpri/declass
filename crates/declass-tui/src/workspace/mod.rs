@@ -945,7 +945,15 @@ impl State {
                 self.panel.refresh(true);
             }
             Msg::Mode(mode) => self.mode = mode,
-            Msg::Status(s) => self.status = s,
+            Msg::Status(s) => {
+                // Top clearance has no frontier: the local model does the work.
+                self.feed.set_worker(if s.mode == "top clearance" {
+                    "local model"
+                } else {
+                    "frontier"
+                });
+                self.status = s;
+            }
             Msg::Planning(enabled) => self.status.planning = enabled,
             Msg::Attach {
                 ws,

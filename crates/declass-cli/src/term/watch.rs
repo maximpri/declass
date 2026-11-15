@@ -45,17 +45,21 @@ const HEARTBEAT: Duration = Duration::from_secs(30);
 impl Watch {
     /// Starts the view: live when standard error is a terminal that can
     /// take it, else the compact log. The status line waits for
-    /// [`Watch::release`] (setup prints freely before).
-    pub fn start(live: bool) -> Arc<Watch> {
+    /// [`Watch::release`] (setup prints freely before). `worker` is the model
+    /// the status says the run waits for (`frontier`, or `local model` in top
+    /// clearance).
+    pub fn start(live: bool, worker: &'static str) -> Arc<Watch> {
         let (columns, _) = crossterm::terminal::size().unwrap_or((100, 24));
         let colour = live && colour(true);
         let identity: Restore = Arc::new(|t: &str| t.to_owned());
         let (tx, rx) = mpsc::channel();
+        let mut feed = Feed::new(colour, (columns as usize).max(20), live, identity);
+        feed.set_worker(worker);
         let view = View {
             live,
             colour,
             columns: columns as usize,
-            feed: Feed::new(colour, (columns as usize).max(20), live, identity),
+            feed,
             region: Region::default(),
             held: true,
             printed_at: Instant::now(),

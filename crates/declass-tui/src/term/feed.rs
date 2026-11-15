@@ -106,6 +106,9 @@ pub struct Feed {
     activity: Activity,
     /// Tool calls of the last response still running, in order.
     running: VecDeque<(String, String)>,
+    /// The model the status says is working: the frontier, or in top
+    /// clearance the local model.
+    worker: &'static str,
 }
 
 impl Feed {
@@ -126,7 +129,14 @@ impl Feed {
             out_bytes: 0,
             activity: Activity::Waiting,
             running: VecDeque::new(),
+            worker: "frontier",
         }
+    }
+
+    /// Names the model the work is waiting for (`frontier`, or `local model`
+    /// in top clearance, where there is no frontier).
+    pub fn set_worker(&mut self, worker: &'static str) {
+        self.worker = worker;
     }
 
     pub fn set_restore(&mut self, restore: Restore) {
@@ -343,14 +353,15 @@ impl Feed {
             n if n >= 1000 => format!(" (~{:.1}k tokens)", n as f64 / 1000.0),
             n => format!(" (~{n} tokens)"),
         };
+        let who = self.worker;
         let what = match &self.activity {
-            Activity::Waiting => "waiting for the frontier".to_owned(),
-            Activity::Thinking => format!("frontier thinking{tokens}"),
-            Activity::Writing(None) => format!("frontier writing{tokens}"),
+            Activity::Waiting => format!("waiting for the {who}"),
+            Activity::Thinking => format!("{who} thinking{tokens}"),
+            Activity::Writing(None) => format!("{who} writing{tokens}"),
             Activity::Writing(Some(tool)) => match tool.as_str() {
-                "reply" => format!("frontier writing its reply{tokens}"),
-                "ask_operator" => format!("frontier writing a question{tokens}"),
-                t => format!("frontier writing a {t} call{tokens}"),
+                "reply" => format!("{who} writing its reply{tokens}"),
+                "ask_operator" => format!("{who} writing a question{tokens}"),
+                t => format!("{who} writing a {t} call{tokens}"),
             },
             Activity::Running(what) => format!("running {what}"),
         };
@@ -652,6 +663,23 @@ mod tests {
                 "  ↻ the response was cut off; it starts again",
                 "declass: Whole answer.",
             ]
+        );
+    }
+
+    #[test]
+    fn in_top_clearance_the_status_names_the_local_model() {
+        let mut f = Feed::new(false, 80, false, Arc::new(|t: &str| t.to_owned()));
+        f.set_worker("local model");
+        let t0 = Instant::now();
+        f.begin(t0);
+        assert_eq!(
+            f.status_text(t0).as_deref(),
+            Some("0:00 · 0 requests · waiting for the local model")
+        );
+        f.stream(&Streamed::Text("Hi".into()));
+        assert_eq!(
+            f.status_text(t0).as_deref(),
+            Some("0:00 · 0 requests · local model writing")
         );
     }
 
