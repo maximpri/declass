@@ -1247,6 +1247,7 @@ async fn run_with(
     // Always sweep the tree: backgrounded or detached descendants must not outlive the command.
     if let Some(pid) = pid {
         kill_tree(pid);
+        kill_group(pid);
     }
     let _ = child.kill().await;
     let memory = match watch {
@@ -1466,6 +1467,7 @@ impl Process {
         let _ = tokio::time::timeout(grace, self.child.wait()).await;
         if let Some(pid) = self.pid.take() {
             kill_tree(pid);
+            kill_group(pid);
         }
         let _ = self.child.kill().await;
         if let Some(g) = self.governor.take() {
@@ -1485,6 +1487,7 @@ impl Drop for Process {
     fn drop(&mut self) {
         if let Some(pid) = self.pid.take() {
             kill_tree(pid);
+            kill_group(pid);
         }
         if let Some(g) = self.governor.take() {
             g.abandon();
@@ -1529,6 +1532,19 @@ fn process_table() -> Vec<(u32, u32)> {
             Some((pid, ppid))
         })
         .collect()
+}
+
+/// Kills what is left of the process group `leader` leads. Every sandboxed
+/// process is started as the leader of a group of its own, and a process
+/// orphaned away from the tree (its parent exited first, so the parent-link
+/// walk of [`kill_tree`] cannot find it) keeps that group. Under bubblewrap
+/// the PID namespace ends with the command anyway; under Seatbelt this is
+/// what stops such a process (one that starts a session of its own, with
+/// `setsid`, still survives: SECURITY.md, Known limits).
+fn kill_group(leader: u32) {
+    if let Some(p) = rustix::process::Pid::from_raw(leader as i32) {
+        let _ = rustix::process::kill_process_group(p, rustix::process::Signal::Kill);
+    }
 }
 
 /// Stops the discovered tree from root down, then kills it from leaves up.
@@ -2241,6 +2257,33 @@ mod tests {
         assert!(o.timed_out);
         tokio::time::sleep(Duration::from_secs(4)).await;
         assert!(!marker.exists(), "a descendant survived the timeout");
+    }
+
+    #[tokio::test]
+    async fn a_process_orphaned_by_a_command_does_not_outlive_it() {
+        // `( (...) & )`: the subshell exits at once, so its child is
+        // reparented away from the command's tree before the command ends.
+        // Left running, it would keep the command's sandbox, whose deny list
+        // is fixed at start: files that become sensitive later (written by a
+        // `sensitive_data` command) are readable to it, and it can copy them
+        // into the workspace.
+        let (_d, ws) = setup();
+        let later = ws.join("later.txt");
+        let copy = ws.join("copy.txt");
+        let script = format!(
+            "( ( sleep 2; cat {} > {} ) </dev/null >/dev/null 2>&1 & ); echo started",
+            later.display(),
+            copy.display()
+        );
+        let o = sh(&ws, &script).await;
+        assert!(text(&o).contains("started"), "{}", text(&o));
+        std::fs::write(&later, "derived-6610\n").unwrap();
+        tokio::time::sleep(Duration::from_secs(4)).await;
+        assert!(
+            !copy.exists(),
+            "a process outlived its command: {:?}",
+            std::fs::read_to_string(&copy)
+        );
     }
 
     #[tokio::test]

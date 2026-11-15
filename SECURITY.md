@@ -638,7 +638,8 @@ both never writable, at any depth; writes only in the
 workspace and the scratch `TMPDIR`; no network, including Unix sockets, or with the egress proxy's
 route only the proxy and the command's own loopback servers (`crates/declass-sandbox/tests/network.rs`,
 `crates/declass-agent/tests/egress.rs`); the credential stores of a home directory unreadable; the
-environment cleared to the allowlist; the whole process tree killed on timeout and on interrupt;
+environment cleared to the allowlist; the whole process tree and its process group killed when the
+command ends, on timeout and on interrupt, a process orphaned by the command included;
 a process holding more memory than the per-process limit stopped, with the reason at the end of
 the command's output (`a_runaway_process_is_stopped_and_the_output_says_why`).
 
@@ -1386,6 +1387,18 @@ the next `declass resume` ends the run and calls it then.
   as an SSH agent's or a container daemon's, and use what it offers. Under bubblewrap the
   directories that usually hold them (`/tmp`, `/run`) are not mounted in the sandbox. The
   containment test (`crates/declass-sandbox/tests/containment.rs`) records this as a known gap.
+- macOS has no process namespaces. A process that a command starts and that starts a session of
+  its own (`setsid`) leaves both the command's process tree and its process group, so it can
+  outlive the command (measured). It keeps the command's sandbox: no network once the command's
+  proxy route closes, but the deny list as it was when the command started, so it can read files
+  that become sensitive later (a `sensitive_data` command's output) and copy them into the
+  workspace or its scratch directory. Under bubblewrap the PID namespace ends with the command.
+- Under Seatbelt every sandboxed process can read the command lines of the operator's other
+  processes (`sysctl` `KERN_PROCARGS2`, which Seatbelt does not mediate; measured), though not
+  their environment: a task given on Declass's own command line (`declass "<task>"`), a running
+  `sensitive_data` command's text with its placeholders resolved (to a server or process running
+  meanwhile), a server's arguments. Type sensitive values in a session rather than on the command
+  line. Under bubblewrap a process sees only its own PID namespace.
 - Detectors cannot recognize every possible secret format; canaries and the audit log exist to
   measure what gets through. The detection corpus shows that each imported rule matches its own
   format, not that the formats are complete.
@@ -1603,6 +1616,7 @@ protection limits remain in this threat model and the
 | DECLASS-2026-NEW-moved-denied-paths | Denied paths moved out of their rules | CWE-284 Improper Access Control (consequence CWE-201) | Seatbelt's rules name paths and are checked at each access, and nothing stopped a command from renaming what they named: `mv .env x && base64 x`, or renaming a folder above a denied path (`mv data d`, `mv config c` for `config/secrets/key.pem`, `mv vendor v` for a nested `.git`), let an ordinary command read sensitive files, protected source and nested git history under the new path, in any encoding. Found in the 2026-11 red-team review of the sandbox, not observed in a run; macOS only (bubblewrap covers a denied path with a mount, which cannot be moved) | Under Seatbelt a denied path, and every folder above it in the workspace, cannot be renamed or removed (`file-write-unlink`); files may still be created and written there. Swap renames, `exchangedata` and `clonefile` are refused too (measured). Regression `denied_paths_cannot_be_moved_to_where_no_rule_names_them` (this change) |
 | DECLASS-2026-NEW-path-spellings | Reserved, sensitive and protected paths under another spelling | CWE-41 Improper Resolution of Path Equivalence (consequence CWE-201) | macOS's default volumes open a name regardless of letter case and Unicode case folding, and the file tools, which run outside the sandbox, checked the name as written: `read_file(".DECLASS/runs/<id>/handles/h1")` showed a raw handle (a date of birth no detector knows) as a public file, reopening DECLASS-2026-024; `DATA/orders.csv` was public under a `data/**` rule and `SRC/pricing.rs` showed interface-only bodies; `write_file` and `edit_file` could change `.GIT/config` (a `core.fsmonitor` program runs outside the sandbox at the operator's next `git status`), plant a repository as `.GIT` in a subdirectory or write into `.declaß`; a new `.VSCODE/tasks.json` was not recognised as the editor's tasks. Commands were not affected: Seatbelt matches as the volume does (measured). Found in the 2026-11 red-team review, not observed in a run | `declass-fs` opens an existing path only as its folder lists it (every component, in the one guarded opener all file tools use), names reserved names in every spelling a file system folds to `.git` or `.declass` (`ſ`, `ß`, `ẞ`, ...), and the list of files that run later compares folded names. Regressions `file_tools_open_paths_only_as_their_checks_name_them`, `paths_are_opened_only_as_they_are_spelled_on_disk`, `reserved_directories_in_every_spelling_a_file_system_equates`, `other_spellings_of_a_trigger_are_the_trigger` (this change) |
 | DECLASS-2026-NEW-outside-history | Git history kept outside the workspace | CWE-552 Files or Directories Accessible to External Parties (consequence CWE-201) | The workspace is the folder Declass starts in, and the deny list named the `.git` folders inside it. In a linked worktree (`git worktree add`, where `.git` is a file naming a folder in the main repository) or a subdirectory of a repository, committed copies of the workspace's sensitive files were readable to ordinary commands, checks and servers (`git show HEAD:data/orders.csv \| od -c`). Found in the 2026-11 red-team review, not observed in a run | The git folders a workspace's history is kept in are found as git finds them (`.git` at or above the workspace, `gitdir:` files, `commondir`) and hidden with the workspace's own, also for `.git` files inside it (submodules, nested worktrees). Regression `commands_cannot_read_history_kept_outside_the_workspace` (this change) |
+| DECLASS-2026-NEW-orphaned-processes | Processes outliving their command | CWE-404 Improper Resource Shutdown or Release (consequence CWE-201) | Under Seatbelt the sweep at a command's end followed parent links, so a process whose parent exited first (`( cmd & )`) was no longer found and kept running in the command's sandbox, whose deny list is fixed when it starts: it read a file written after the command ended (as a later `sensitive_data` command's output would be) and copied it into the workspace. Found in the 2026-11 red-team review, not observed in a run; macOS only (bubblewrap's PID namespace ends with the command) | Every sandboxed process is the leader of its own process group, and the whole group is killed when it ends. A process that starts a session of its own still survives (Known limits). Regression `a_process_orphaned_by_a_command_does_not_outlive_it` (this change) |
 
 Related hardening: offline `declass doctor` now skips network-enabled stdio MCP servers as well as
 HTTP MCP servers; `--online` is required to start either. This closes an unexpected network path
