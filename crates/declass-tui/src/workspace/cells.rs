@@ -170,6 +170,10 @@ pub(super) struct Cells {
     response_text: bool,
     /// The last streamed block of the turn (restored), to compare with its end.
     last_streamed: Option<String>,
+    /// A reply streaming after the response's own text, held while it only
+    /// repeats that text (some models write their answer both ways): the
+    /// call's index and what it said so far.
+    echo: Option<(usize, String)>,
 }
 
 impl Cells {
@@ -189,6 +193,7 @@ impl Cells {
             live: None,
             response_text: false,
             last_streamed: None,
+            echo: None,
         }
     }
 
@@ -308,6 +313,7 @@ impl Cells {
         self.live = None;
         self.response_text = false;
         self.last_streamed = None;
+        self.echo = None;
     }
 
     /// A stream event of the response being received.
@@ -326,6 +332,7 @@ impl Cells {
                 self.close_live();
                 self.calls.clear();
                 self.response_text = false;
+                self.echo = None;
             }
             Streamed::Text(t) => self.show(Source::Text, t),
             Streamed::Call { index, name } => {
@@ -348,7 +355,10 @@ impl Cells {
                 }
             }
             Streamed::Reasoning(_) => {}
-            Streamed::End => self.close_live(),
+            Streamed::End => {
+                self.close_live();
+                self.close_echo();
+            }
         }
     }
 
@@ -356,6 +366,46 @@ impl Cells {
         if self.live.as_ref().is_some_and(|l| l.source != source) {
             self.close_live();
         }
+        if let Source::Call(i) = source
+            && self.live.is_none()
+            && self.response_text
+            && self.calls.get(&i).is_some_and(|(name, _)| name == "reply")
+        {
+            // A reply after the response's own text: held while it only
+            // repeats it.
+            let held = match &mut self.echo {
+                Some((j, held)) if *j == i => held,
+                other => &mut other.insert((i, String::new())).1,
+            };
+            held.push_str(text);
+            let said = (self.restore)(held);
+            if starts_alike(self.last_streamed.as_deref().unwrap_or(""), &said) {
+                return;
+            }
+            // It says more: shown, from its start.
+            let (_, held) = self.echo.take().expect("held above");
+            self.show_now(source, &held);
+            return;
+        }
+        self.show_now(source, text);
+    }
+
+    /// A held reply that ended: dropped when it says what the response's
+    /// text said (the same words, as the turn's end compares them), else
+    /// shown whole, a reply that says only the first of those words too.
+    fn close_echo(&mut self) {
+        let Some((i, held)) = self.echo.take() else {
+            return;
+        };
+        let shown = self.last_streamed.as_deref().unwrap_or("");
+        if same(shown, &(self.restore)(&held)) {
+            return;
+        }
+        self.show_now(Source::Call(i), &held);
+        self.close_live();
+    }
+
+    fn show_now(&mut self, source: Source, text: &str) {
         if self.live.is_none() {
             if text.trim().is_empty() {
                 return;
@@ -419,6 +469,7 @@ impl Cells {
                     text, tool_calls, ..
                 },
             } => {
+                self.close_echo();
                 let streamed = std::mem::take(&mut self.response_text);
                 let narrates = tool_calls
                     .iter()
@@ -797,6 +848,7 @@ impl Cells {
     /// repeated.
     pub(super) fn end(&mut self, end: &TurnEnd) {
         self.close_live();
+        self.close_echo();
         let streamed = self.last_streamed.take();
         self.calls.clear();
         self.response_text = false;
@@ -1118,4 +1170,11 @@ fn first_line(text: &str, max: usize) -> String {
 /// Whether two texts say the same (ignoring how whitespace was laid out).
 fn same(a: &str, b: &str) -> bool {
     a.split_whitespace().eq(b.split_whitespace())
+}
+
+/// Whether `said` (still arriving, perhaps mid-word) is so far how `shown`
+/// starts, spacing aside.
+fn starts_alike(shown: &str, said: &str) -> bool {
+    let squash = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+    squash(shown).starts_with(&squash(said))
 }

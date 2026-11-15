@@ -1971,6 +1971,61 @@ mod tests {
         );
     }
 
+    /// One response: `text` as the model's own text, then a reply of `reply`.
+    fn text_then_reply(s: &mut State, text: &str, reply: &str) {
+        s.message(Msg::Mode(Mode::Working));
+        s.message(Msg::Begin);
+        s.message(Msg::Stream(Streamed::Attempt(1)));
+        s.message(Msg::Stream(Streamed::Text(text.into())));
+        s.message(Msg::Stream(Streamed::Call {
+            index: 0,
+            name: "reply".into(),
+        }));
+        let args = serde_json::json!({ "message": reply }).to_string();
+        let (a, b) = args.split_at(args.len() / 2);
+        for delta in [a, b] {
+            s.message(Msg::Stream(Streamed::Arguments {
+                index: 0,
+                delta: delta.into(),
+            }));
+        }
+        s.message(Msg::Stream(Streamed::End));
+        s.message(Msg::End(TurnEnd::Replied {
+            message: reply.into(),
+        }));
+    }
+
+    #[test]
+    fn a_reply_that_repeats_the_responses_text_is_shown_once() {
+        // Some models write the answer as text and again as the reply.
+        let (mut s, _, _) = state();
+        text_then_reply(
+            &mut s,
+            "The parser drops the last row.\n\n",
+            "The parser drops the last row.",
+        );
+        let out = screen(&mut s, 100, 30);
+        assert_eq!(
+            out.matches("The parser drops the last row.").count(),
+            1,
+            "{out}"
+        );
+        assert_eq!(out.matches("◆ declass").count(), 1, "{out}");
+        // A reply that says something else is shown as well.
+        let (mut s, _, _) = state();
+        text_then_reply(&mut s, "Let me check the parser.", "It drops the last row.");
+        let out = screen(&mut s, 100, 30);
+        assert!(out.contains("Let me check the parser."), "{out}");
+        assert!(out.contains("It drops the last row."), "{out}");
+        // So is one that says only how the text began, once: held while it
+        // matched, shown when it ended short, and not repeated by the turn's end.
+        let (mut s, _, _) = state();
+        text_then_reply(&mut s, "Done. Details follow below.", "Done.");
+        let out = screen(&mut s, 100, 30);
+        assert_eq!(out.matches("◆ declass").count(), 2, "{out}");
+        assert_eq!(out.matches("Done.").count(), 2, "{out}");
+    }
+
     #[test]
     fn an_approval_is_a_dialog_that_defaults_to_no() {
         let (mut s, answering, sent) = state();
