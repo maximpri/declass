@@ -603,13 +603,13 @@ In Zed, add Declass to `settings.json`, then choose it for a new agent thread:
 }
 ```
 
-Give the full path (`~/.local/bin/declass` after the installer, written out) if the editor does
-not find `declass`. An editor started from the desktop may not have your shell's environment: if
-your cloud model's key is in an environment variable, add it to `env`, or save the key with
-`declass setup` instead. `"args": ["acp", "--mode", "top-clearance"]` keeps everything on your
-machine. Other ACP clients need the same two things: the command `declass` and the argument `acp`.
-Declass speaks protocol version 1 on standard input and output; its log is standard error, which
-editors show among their logs.
+If the editor does not find `declass`, give its full path with your home directory written out
+(the installer puts it in `~/.local/bin`). An editor started from the desktop may not have your
+shell's environment: if your cloud model's key is in an environment variable, add it to `env`, or
+save the key with `declass setup` instead. `"args": ["acp", "--mode", "top-clearance"]` keeps
+everything on your machine. Other ACP clients need the same two things: the command `declass` and
+the argument `acp`. Declass speaks protocol version 1 on standard input and output; its log is
+standard error, which editors show among their logs.
 
 - **Your messages.** What you type is your message, sanitized as a typed message is. A file you
   @-mention becomes its path in the message, never its content, even when the editor sends the

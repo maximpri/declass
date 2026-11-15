@@ -506,14 +506,13 @@ impl Updates {
             safe(&title),
             ToolStatus::Pending,
         );
-        // The title is a locator; a long or multi-line command is shown whole.
+        // The title is a locator; a long or multi-line command is shown whole,
+        // as the frontier wrote it (as the workspace shows it).
         if c.name == "run_command"
             && let Some(command) = c.arguments.get("command").and_then(Value::as_str)
+            && (command.lines().count() > 1 || command.chars().count() > 100)
         {
-            let command = (self.restore)(command);
-            if command.lines().count() > 1 || command.chars().count() > 100 {
-                card.lines.push(fenced(&bounded(&command)));
-            }
+            card.lines.push(fenced(&bounded(command)));
         }
         // Questions to the local model, as the frontier wrote them.
         if let Some(questions) = c.arguments.get("questions").and_then(Value::as_array) {
@@ -1148,6 +1147,22 @@ mod tests {
         );
         assert_eq!(updates[7]["toolCallId"], "c2");
         assert_eq!(updates[7]["status"], "failed");
+    }
+
+    #[test]
+    fn a_long_command_is_shown_whole_as_the_frontier_wrote_it() {
+        let (mut u, out) = updates();
+        let command = format!("echo {TOKEN} && \\\n  cargo test --workspace");
+        u.entry(&assistant(
+            "",
+            vec![call("c1", "run_command", json!({"command": command}))],
+        ));
+        let card = &sent(&out)[0];
+        // The title's first line restored, as the workspace's title is.
+        assert_eq!(card["title"], format!("run echo {VALUE} && \\"));
+        // The whole command as written: the placeholder kept.
+        let body = card["content"][0]["content"]["text"].as_str().unwrap();
+        assert!(body.contains(TOKEN) && !body.contains(VALUE), "{body}");
     }
 
     #[test]
