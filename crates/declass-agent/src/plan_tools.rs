@@ -240,11 +240,16 @@ async fn verify_step(
         // operator), so a stopped verification always leaves host evidence,
         // however long the plan's own writes took: they wait for the disk,
         // and a slow one can spend a short deadline before any check starts.
-        let due = stopped(ctx) || past(deadline);
+        let mut due = stopped(ctx) || past(deadline);
         if due && !shown.is_empty() {
             return Err(STOPPED.into());
         }
         let ticket = store.begin_verification(revision, step_id, &check.id)?;
+        // Its synced writes can use up the deadline, or an interrupt can
+        // arrive meanwhile: look again before the operator is asked about a
+        // check that then would not run.
+        due = due || stopped(ctx) || past(deadline);
+        let mut prevented = due;
         let result = if due {
             Err(STOPPED.into())
         } else {
@@ -264,7 +269,10 @@ async fn verify_step(
                     });
                     crate::tools::sandboxed(ctx, &ticket.command, timeout, Access::Ordinary).await
                 }
-                Ok(()) => Err(STOPPED.into()),
+                Ok(()) => {
+                    prevented = true;
+                    Err(STOPPED.into())
+                }
                 Err(e) => Err(e),
             }
         };
@@ -288,7 +296,10 @@ async fn verify_step(
         )?;
         if let Some(plan) = store.current() {
             ctx.record(declass_boundary::audit::AuditEvent::Plan {
-                action: if exit == Some(0) && !timed_out && !interrupted {
+                action: if prevented {
+                    // A stop kept it from running: not a check that failed.
+                    "check_not_run"
+                } else if exit == Some(0) && !timed_out && !interrupted {
                     "check_passed"
                 } else {
                     "check_failed"
