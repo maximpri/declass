@@ -996,7 +996,7 @@ pub(crate) fn note_unindexed(engine: &Engine) {
         .collect();
     let more = unread.len().saturating_sub(shown.len());
     eprintln!(
-        "warning: {} sensitive or protected file(s) could not be indexed: {}{}\n  values from them are not replaced elsewhere until one is read; commands still cannot read them",
+        "warning: {} sensitive or protected file(s) could not be indexed: {}{}\n  values from them are not replaced elsewhere until one is read; commands are denied them by name",
         unread.len(),
         term::safe(&shown.join("; ")),
         if more > 0 {

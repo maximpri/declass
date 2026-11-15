@@ -1916,6 +1916,77 @@ mod sensitive_command_tests {
         }
     }
 
+    /// One command in a fresh run (engine primed on `files`), as an ordinary command.
+    async fn in_new_run(ws: &Path, run: &str, files: &[String], command: &str) -> String {
+        let run = ws.join(format!(".declass/runs/{run}"));
+        std::fs::create_dir_all(&run).unwrap();
+        let policy = Policy {
+            sensitive_globs: vec!["*.pem".into()],
+            command_output_sensitive: true,
+            ..Policy::default()
+        };
+        let engine = Engine::open(&run, policy, None).unwrap();
+        engine.prime(ws, files, "");
+        let git = Git::locate().unwrap();
+        let mut journal = WriteJournal::open(&run).unwrap();
+        let mut ctx = Ctx {
+            workspace: ws,
+            run_dir: &run,
+            sandbox: declass_sandbox::detect().unwrap(),
+            git: &git,
+            presenter: engine.as_ref(),
+            journal: &mut journal,
+            command_timeout: Duration::from_secs(30),
+            network: &crate::egress::Network::Off,
+            checks: &[],
+            audit: None,
+            interrupted: None,
+            web: None,
+            git_tools: None,
+            lsp: None,
+        };
+        call(&mut ctx, "run_command", json!({ "command": command })).await
+    }
+
+    #[tokio::test]
+    async fn a_folder_made_unreadable_keeps_what_it_holds_denied() {
+        // A folder above a denied file made unreadable (`chmod 000 config`)
+        // hid the file from the next run's walk, so no rule named it there.
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().unwrap();
+        let ws = d.path().canonicalize().unwrap().join("ws");
+        std::fs::create_dir_all(ws.join("config/secrets")).unwrap();
+        std::fs::write(ws.join("config/secrets/key.pem"), "PRIVATE-4471\n").unwrap();
+        let files = vec!["config/secrets/key.pem".to_owned()];
+        let mode = |p: &Path, m: u32| {
+            std::fs::set_permissions(p, std::fs::Permissions::from_mode(m)).unwrap();
+        };
+        let of = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        // Run 1: the command may not change those folders' modes.
+        in_new_run(
+            &ws,
+            "r1",
+            &files,
+            "chmod 000 config; chmod 000 \"$PWD\"; echo done",
+        )
+        .await;
+        assert!(of(&ws.join("config")) != 0 && of(&ws) != 0);
+        // Run 2, with the folder unreadable all the same (changed outside).
+        mode(&ws.join("config"), 0o000);
+        let out = in_new_run(
+            &ws,
+            "r2",
+            &files,
+            "chmod 755 config; cat config/secrets/key.pem; echo done",
+        )
+        .await;
+        mode(&ws.join("config"), 0o755);
+        assert!(
+            out.contains("done") && !out.contains("PRIVATE-4471"),
+            "{out}"
+        );
+    }
+
     #[tokio::test]
     async fn names_stored_decomposed_are_found_and_protected_whatever_their_spelling() {
         // macOS keeps a name decomposed (NFD) when the program that made it

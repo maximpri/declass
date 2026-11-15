@@ -149,10 +149,14 @@ fn scan_skipped(rel: &Path) -> bool {
 /// Walks `workspace` depth first: `visit(rel, is_dir)` is called for every
 /// directory and regular file under it (symbolic links are not followed),
 /// and for a directory returns whether to look inside.
-fn walk(workspace: &Path, mut visit: impl FnMut(&Path, bool) -> bool) {
+/// Returns the folders it could not list (relative), whose content it did
+/// not see.
+fn walk(workspace: &Path, mut visit: impl FnMut(&Path, bool) -> bool) -> Vec<std::path::PathBuf> {
+    let mut unlisted = Vec::new();
     let mut stack = vec![std::path::PathBuf::new()];
     while let Some(rel) = stack.pop() {
         let Ok(entries) = std::fs::read_dir(workspace.join(&rel)) else {
+            unlisted.push(rel);
             continue;
         };
         for entry in entries.flatten() {
@@ -175,6 +179,7 @@ fn walk(workspace: &Path, mut visit: impl FnMut(&Path, bool) -> bool) {
             }
         }
     }
+    unlisted
 }
 
 /// Values a name/address field holds when it holds no person.
@@ -2433,7 +2438,7 @@ impl Presenter for Engine {
             .map(|dir| workspace.join(dir))
             .filter(|p| p.is_dir())
             .collect();
-        walk(workspace, |rel, is_dir| {
+        let unlisted = walk(workspace, |rel, is_dir| {
             let abs = workspace.join(rel);
             if out.iter().any(|d| abs.starts_with(d)) {
                 return false;
@@ -2466,6 +2471,16 @@ impl Presenter for Engine {
         // it: above it (the workspace is a subdirectory) or in the main
         // repository of a linked worktree.
         out.extend(declass_fs::gitdir::history_dirs(workspace));
+        // Fail closed: a folder the walk could not list (its mode changed)
+        // is denied whole, and every sensitive file found at run start is
+        // denied by name, whatever the walk saw now.
+        out.extend(unlisted.into_iter().map(|rel| workspace.join(rel)));
+        out.extend(
+            self.lock()
+                .sensitive_files
+                .iter()
+                .map(|f| workspace.join(f)),
+        );
         // Derived files the walk does not reach: written into build output or
         // dependencies (`target/`, `node_modules/`) by a sensitive command.
         out.extend(

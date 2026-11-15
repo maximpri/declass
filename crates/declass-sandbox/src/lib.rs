@@ -469,8 +469,13 @@ pub fn seatbelt_profile(spec: &Spec, host_ports: Option<&[u16]>) -> Result<Strin
             );
         }
     }
+    // Nor may their mode change: a folder made unreadable hides what it
+    // holds from the walk that lists the next command's denied paths.
     for a in &fixed {
-        rules.push(format!("(deny file-write-unlink (literal {}))", quote(a)?));
+        rules.push(format!(
+            "(deny file-write-unlink file-write-mode file-write-flags file-write-owner (literal {}))",
+            quote(a)?
+        ));
     }
     let services: Vec<String> = MACH_SERVICES
         .iter()
