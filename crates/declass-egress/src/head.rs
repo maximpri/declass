@@ -72,6 +72,17 @@ pub fn head_end(buf: &[u8]) -> Option<usize> {
 pub fn parse(head: &[u8]) -> Result<Request, Refusal> {
     let text =
         std::str::from_utf8(head).map_err(|_| refuse(400, "a request head that is not text"))?;
+    let body = text.strip_suffix("\r\n\r\n").unwrap_or(text);
+    // Lines end only in CRLF. A bare LF, a lone CR or a NUL inside a line, or
+    // a folded line (one starting with a space or a tab), is a line break to
+    // some servers: forwarded, it would hand the upstream a header or a
+    // request the proxy never read (a second `Host`, a second request).
+    if body
+        .split("\r\n")
+        .any(|l| l.contains(['\r', '\n', '\0']) || l.starts_with([' ', '\t']))
+    {
+        return Err(refuse(400, "a request head with a stray line break"));
+    }
     let mut lines = text.split("\r\n");
     let line = lines.next().unwrap_or_default();
     let mut parts = line.split(' ');
@@ -245,6 +256,34 @@ mod tests {
         // The target is still known for the audit.
         let r = parse(b"POST http://a.test/x HTTP/1.1\r\n\r\n").unwrap_err();
         assert_eq!(r.target, Some(("a.test".into(), 80)));
+    }
+
+    #[test]
+    fn no_header_line_reaches_the_upstream_but_the_proxys_own() {
+        // A bare LF, a lone CR or a NUL in a header, or a folded line, is a
+        // line break to some servers: forwarded, it would give the upstream a
+        // second `Host` (another site behind the registry's CDN) or a second
+        // request.
+        for head in [
+            &b"GET http://a.test/ HTTP/1.1\r\nX-A: b\nHost: other.test\r\n\r\n"[..],
+            b"GET http://a.test/ HTTP/1.1\r\nX-A: b\rHost: other.test\r\n\r\n",
+            b"GET http://a.test/ HTTP/1.1\r\nX-A: b\n\nGET http://other.test/ HTTP/1.1\r\n\r\n",
+            b"GET http://a.test/ HTTP/1.1\r\nX-A: b\0c\r\n\r\n",
+            b"GET http://a.test/ HTTP/1.1\r\nX-A: b\r\n Host: other.test\r\n\r\n",
+            b"GET http://a.test/ HTTP/1.1\r\nX-A: b\r\n\tHost: other.test\r\n\r\n",
+            b"GET http://a.test/\nHost:other.test HTTP/1.1\r\n\r\n",
+            b"CONNECT a.test:443 HTTP/1.1\r\nX-A: b\nHost: other.test\r\n\r\n",
+        ] {
+            let shown = String::from_utf8_lossy(head);
+            match parse(head) {
+                Err(r) => assert_eq!(r.status, 400, "{shown}"),
+                Ok(Request::Forward { head: out, .. }) => {
+                    let out = String::from_utf8_lossy(&out).into_owned();
+                    panic!("forwarded {out:?} for {shown:?}");
+                }
+                Ok(other) => panic!("{other:?} for {shown:?}"),
+            }
+        }
     }
 
     #[test]
