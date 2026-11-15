@@ -154,27 +154,48 @@ re!(
 // Long random-looking tokens, judged afterwards by their parts ([`random`]).
 re!(HIGH_ENTROPY, r"[A-Za-z0-9+/_-]{24,}={0,2}");
 
-/// Declass's own expressions, in [`Own`] order. One pass of a set over all of
-/// them finds which can match at all; only those run on their own.
+/// Declass's own expressions that a set screens: one pass of the set finds
+/// which of them can match at all, and only those run on their own.
+///
+/// The set holds them without their word boundaries. Removing an assertion
+/// only adds matches, so the set never rules out an expression that matches;
+/// and with Unicode `\b` its automaton stops at the first non-ASCII byte and
+/// the set falls back to a far slower engine over the whole text. Long
+/// counted runs of digits and token characters stay out of it: in one
+/// automaton with the rest they multiply its states until it gives up on data
+/// files (a minified bundle, a JSON export), while each alone is cheap, so
+/// they always run.
 static OWN: LazyLock<RegexSet> = LazyLock::new(|| {
-    RegexSet::new([
-        TOKENS.as_str(),
-        PRIVATE_KEY.as_str(),
-        URL_CREDENTIALS.as_str(),
-        ASSIGNMENT.as_str(),
-        QUOTED_ASSIGNMENT.as_str(),
-        HIGH_ENTROPY.as_str(),
-        EMAIL.as_str(),
-        PHONE.as_str(),
-        CARD.as_str(),
-        LABELLED_NUMBER.as_str(),
-        SSN.as_str(),
-        IPV4.as_str(),
-    ])
+    RegexSet::new(
+        Own::SCREENED
+            .iter()
+            .map(|o| without_word_boundaries(o.regex().as_str())),
+    )
     .expect("static regex set")
 });
 
-#[derive(Clone, Copy)]
+/// `pattern` with every `\b` removed (an escaped backslash stays as it is).
+fn without_word_boundaries(pattern: &str) -> String {
+    let mut out = String::with_capacity(pattern.len());
+    let mut chars = pattern.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('b') => {}
+            Some(next) => {
+                out.push('\\');
+                out.push(next);
+            }
+            None => out.push('\\'),
+        }
+    }
+    out
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Own {
     Tokens,
     PrivateKey,
@@ -188,6 +209,38 @@ enum Own {
     LabelledNumber,
     Ssn,
     Ipv4,
+}
+
+impl Own {
+    /// The expressions [`OWN`] screens, in its order; the rest always run.
+    const SCREENED: [Own; 9] = [
+        Own::Tokens,
+        Own::PrivateKey,
+        Own::UrlCredentials,
+        Own::Assignment,
+        Own::QuotedAssignment,
+        Own::Email,
+        Own::Phone,
+        Own::Ssn,
+        Own::Ipv4,
+    ];
+
+    fn regex(self) -> &'static Regex {
+        match self {
+            Own::Tokens => &TOKENS,
+            Own::PrivateKey => &PRIVATE_KEY,
+            Own::UrlCredentials => &URL_CREDENTIALS,
+            Own::Assignment => &ASSIGNMENT,
+            Own::QuotedAssignment => &QUOTED_ASSIGNMENT,
+            Own::HighEntropy => &HIGH_ENTROPY,
+            Own::Email => &EMAIL,
+            Own::Phone => &PHONE,
+            Own::Card => &CARD,
+            Own::LabelledNumber => &LABELLED_NUMBER,
+            Own::Ssn => &SSN,
+            Own::Ipv4 => &IPV4,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -478,9 +531,21 @@ pub fn scan_each(text: &str, d: Detectors) -> Vec<Finding> {
 /// rules with a path condition (`*.tf`, `*.ya?ml`) run on it, and their path
 /// allowlists (lockfiles, vendored dependencies) apply.
 pub fn scan_each_in(text: &str, d: Detectors, path: Option<&str>) -> Vec<Finding> {
+    scan_screened(text, d, path, true)
+}
+
+/// [`scan_each_in`]; with `screen` false every expression runs, whatever
+/// the set says (the result is the same).
+fn scan_screened(text: &str, d: Detectors, path: Option<&str>, screen: bool) -> Vec<Finding> {
     let mut out = Vec::new();
-    let hits = OWN.matches(text);
-    let on = |o: Own| hits.matched(o as usize);
+    let hits = screen.then(|| OWN.matches(text));
+    let on = |o: Own| {
+        let Some(hits) = &hits else { return true };
+        Own::SCREENED
+            .iter()
+            .position(|s| *s == o)
+            .is_none_or(|i| hits.matched(i))
+    };
     let mut push = |kind, span: std::ops::Range<usize>, label: Option<String>| {
         out.push(Finding {
             kind,
@@ -977,5 +1042,122 @@ mod tests {
                 .iter()
                 .any(|(k, _)| *k == Kind::Secret)
         );
+    }
+
+    #[test]
+    fn the_screening_set_drops_only_word_boundaries() {
+        assert_eq!(
+            without_word_boundaries(r"\bab\\b\d\.\b(?:x|\by)"),
+            r"ab\\b\d\.(?:x|y)"
+        );
+        for o in Own::SCREENED {
+            let stripped = without_word_boundaries(o.regex().as_str());
+            assert!(
+                !stripped.contains(r"\b") || stripped.contains(r"\\b"),
+                "{o:?}"
+            );
+            Regex::new(&stripped).unwrap();
+        }
+    }
+
+    /// The set may say an expression can match where it cannot, never the
+    /// reverse: a value next to non-ASCII text, at the start or end of the
+    /// text, or anywhere else is still found.
+    #[test]
+    fn the_screening_set_never_rules_out_an_expression_that_matches() {
+        let corpus = [
+            concat!("PAYMENTS_API_KEY=sk_", "live_A1b2C3d4E5f6G7h8I9j0KlMnOp"),
+            concat!("ключ sk_", "live_A1b2C3d4E5f6G7h8I9j0KlMnOp конец"),
+            concat!("日本ghp_", "Qz8vW3nL5kR2xT7mY4pB9cH6dJ1sF0aGeU2i語"),
+            "-----BEGIN RSA PRIVATE KEY-----\nMIIabc\n-----END RSA PRIVATE KEY-----",
+            "DATABASE_URL=postgres://app:S3cr3tPw@db.internal:5432/prod",
+            "export LEDGER_DB_PASSWORD=\"Xy7!pQr9sT2\" — пароль",
+            "{\"api_key\": \"Zq9xW2vL7mK4\"}",
+            "contact: amelia.velanwick42@mailbox-311.net, ü",
+            "é.amelia@mailbox-311.net",
+            "Tél. +1 (415) 555-0199",
+            "card 4111 1111 1111 1111 — Zahlung",
+            "SSN № 123-45-6789",
+            "сервер 203.0.113.41:8080",
+            "١٢٣-٤٥-٦٧٨٩",
+            "account number 12345678901234",
+        ];
+        let set = &*OWN;
+        for text in corpus {
+            let hits = set.matches(text);
+            for (i, o) in Own::SCREENED.iter().enumerate() {
+                if o.regex().is_match(text) {
+                    assert!(hits.matched(i), "{o:?} matches {text:?}");
+                }
+            }
+            // Screening changes nothing: every expression run finds the same.
+            let screened = scan_screened(text, Detectors::default(), None, true);
+            assert!(!screened.is_empty(), "{text}: nothing found");
+            assert_eq!(
+                screened,
+                scan_screened(text, Detectors::default(), None, false),
+                "{text}"
+            );
+        }
+    }
+
+    /// Pieces of values and of their surroundings, ASCII and not.
+    const FRAGMENTS: &[&str] = &[
+        "sk_live_",
+        "A1b2C3d4E5f6G7h8I9j0KlMn",
+        "ghp_",
+        "Qz8vW3nL5kR2xT7mY4pB9cH6dJ1sF0aGeU2i",
+        "PASSWORD=",
+        "token: '",
+        "Zq9xW2vL7mK4",
+        "'",
+        "\"",
+        "postgres://",
+        "app:",
+        "S3cr3tPw@",
+        "db.internal",
+        "amelia",
+        "@mailbox-311.net",
+        "+1 (415) ",
+        "555-0199",
+        "4111 1111 ",
+        "1111 1111",
+        "123-45-6789",
+        "203.0.113.",
+        "41",
+        "card ",
+        "account ",
+        "-----BEGIN PRIVATE KEY-----\nMIIabc\n",
+        "-----END PRIVATE KEY-----",
+        "é",
+        "日本",
+        "ключ",
+        "١٢٣",
+        "№",
+        " ",
+        "-",
+        ".",
+        "\n",
+        "_",
+        "0",
+        "9",
+    ];
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig {
+            cases: std::env::var("PROPTEST_CASES").ok().and_then(|v| v.parse().ok()).unwrap_or(256),
+            failure_persistence: None,
+            ..proptest::prelude::ProptestConfig::default()
+        })]
+        #[test]
+        fn screening_never_changes_what_is_found(
+            parts in proptest::collection::vec(proptest::sample::select(FRAGMENTS), 1..16)
+        ) {
+            let text = parts.concat();
+            proptest::prop_assert_eq!(
+                scan_screened(&text, Detectors::default(), None, true),
+                scan_screened(&text, Detectors::default(), None, false)
+            );
+        }
     }
 }
