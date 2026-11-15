@@ -959,7 +959,7 @@ Add --no-privacy to confirm, or use --mode hybrid."
         let frontier = mode != Mode::TopClearance;
         let local = mode != Mode::Passthrough && local_enabled(&cfg, mode)?;
         if crate::setup::needs_first_run(&cfg, frontier, local)? {
-            match crate::setup_screen::run(cfg).await? {
+            match crate::setup_screen::run(cfg, true).await? {
                 declass_tui::setup::Outcome::Saved { .. } => {}
                 declass_tui::setup::Outcome::Cancelled => {
                     eprintln!(

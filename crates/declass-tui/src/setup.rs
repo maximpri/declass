@@ -23,7 +23,7 @@ use ratatui::crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Clear, Paragraph, Wrap};
+use ratatui::widgets::{Block, BorderType, Clear, Paragraph};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -77,6 +77,10 @@ pub struct Found {
     pub config_path: String,
     /// Problems worth knowing first (the command sandbox is unavailable, ...).
     pub warnings: Vec<String>,
+    /// The owner config requires top clearance (`clearance.required = "top"`,
+    /// as an earlier setup without a cloud model saves it): saving a cloud
+    /// model lifts it, which the review says and which takes `y`.
+    pub owner_requires_top: bool,
 }
 
 /// A server address the operator typed, as the backend reads it.
@@ -192,6 +196,10 @@ pub struct LocalChoice {
 pub struct Plan {
     pub cloud: Option<CloudChoice>,
     pub local: Option<LocalChoice>,
+    /// The operator saved with `y` on a review that said the cloud model
+    /// lifts the owner's `clearance.required = "top"` ([`Found::owner_requires_top`]).
+    /// Only then is it lifted: never as a side effect of Enter.
+    pub lift_top: bool,
 }
 
 /// What setup asks of the rest of Declass. Every method may block (network,
@@ -223,8 +231,9 @@ pub enum Outcome {
 }
 
 /// Takes the terminal, runs setup, and gives the terminal back (also on a
-/// panic).
-pub fn run(backend: Arc<dyn SetupBackend>) -> std::io::Result<Outcome> {
+/// panic). `session_follows`: a session starts once setup is saved (the
+/// first `declass`), rather than setup ending there (`declass setup`).
+pub fn run(backend: Arc<dyn SetupBackend>, session_follows: bool) -> std::io::Result<Outcome> {
     let mut out = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -234,6 +243,7 @@ pub fn run(backend: Arc<dyn SetupBackend>) -> std::io::Result<Outcome> {
     execute!(out, EnterAlternateScreen, EnableBracketedPaste)?;
     let mut terminal = Terminal::new(CrosstermBackend::new(out))?;
     let mut wizard = Wizard::new(backend);
+    wizard.session_follows = session_follows;
     loop {
         terminal.draw(|f| wizard.draw(f))?;
         if let Some(outcome) = wizard.outcome.take() {
@@ -337,6 +347,15 @@ pub struct Wizard {
     saved: Vec<String>,
     ticks: usize,
     outcome: Option<Outcome>,
+    /// A session starts after saving (the first `declass`), so the last
+    /// screen says how to begin it; else setup simply ends.
+    session_follows: bool,
+    /// The first line of the review on screen (↑↓ scroll it).
+    review_scroll: usize,
+    /// From the review's last drawing: whether any of it was off screen, and
+    /// the largest scroll. Saving waits until all of it is on screen; a review
+    /// not drawn yet counts as hidden.
+    review_view: std::cell::Cell<(bool, usize)>,
 }
 
 impl Wizard {
@@ -365,6 +384,9 @@ impl Wizard {
             saved: Vec::new(),
             ticks: 0,
             outcome: None,
+            session_follows: true,
+            review_scroll: 0,
+            review_view: std::cell::Cell::new((true, 0)),
         }
     }
 
@@ -489,6 +511,51 @@ impl Wizard {
     fn go(&mut self, step: Step) {
         self.step = step;
         self.cursor = 0;
+        if step == Step::Review {
+            self.review_scroll = 0;
+            self.review_view.set((true, 0));
+        }
+    }
+
+    /// Saving lifts the owner's `clearance.required = "top"`: a cloud model is
+    /// chosen and an earlier setup without one saved it.
+    fn lifts_top(&self) -> bool {
+        self.plan.cloud.is_some() && self.found.as_ref().is_some_and(|f| f.owner_requires_top)
+    }
+
+    /// Saves the plan from the review: only once all of the review is on
+    /// screen, and, when it lifts local-only, only with `y` (`lift`), never
+    /// with Enter alone.
+    fn save(&mut self, lift: bool) {
+        self.message = None;
+        let lifts = self.lifts_top();
+        if lift && !lifts {
+            return;
+        }
+        if self.plan.cloud.is_none() && self.plan.local.is_none() {
+            self.message = Some((Tone::Problem, "Choose at least one model.".into()));
+            return;
+        }
+        if self.review_view.get().0 {
+            self.message = Some((
+                Tone::Problem,
+                "Part of the review is off screen. Enlarge the terminal so all of it shows, then save (↑↓ scroll it)."
+                    .into(),
+            ));
+            return;
+        }
+        if lifts && !lift {
+            self.message = Some((
+                Tone::Problem,
+                "Saving lifts local-only: the cloud model gets your code and the task. Press y to save, or Esc to go back."
+                    .into(),
+            ));
+            return;
+        }
+        self.plan.lift_top = lifts;
+        let (backend, plan) = (self.backend.clone(), self.plan.clone());
+        self.saving = Some(Job::spawn(move || backend.save(&plan)));
+        self.go(Step::Saving);
     }
 
     fn chosen_provider(&self) -> Option<&CloudProvider> {
@@ -583,6 +650,13 @@ impl Wizard {
             KeyCode::Char('q') if self.step != Step::Saving => {
                 self.outcome = Some(Outcome::Cancelled);
             }
+            KeyCode::Up | KeyCode::Char('k') if self.step == Step::Review => {
+                self.review_scroll = self.review_scroll.saturating_sub(1);
+            }
+            KeyCode::Down | KeyCode::Char('j') if self.step == Step::Review => {
+                self.review_scroll = (self.review_scroll + 1).min(self.review_view.get().1);
+            }
+            KeyCode::Char('y') if self.step == Step::Review => self.save(true),
             KeyCode::Up | KeyCode::Char('k') => self.cursor = self.cursor.saturating_sub(1),
             KeyCode::Down | KeyCode::Char('j') => {
                 self.cursor = (self.cursor + 1).min(self.rows().saturating_sub(1));
@@ -646,7 +720,36 @@ impl Wizard {
             Step::Review => Step::Local,
             Step::Saving | Step::Saved => return,
         };
+        let from = self.step;
         self.go(to);
+        // Back on the row that was chosen, not at the top of the list.
+        self.cursor = match (to, from) {
+            (Step::Cloud, _) => self.cloud_rows().iter().position(|r| match r {
+                CloudRow::Provider(i) => Some(*i) == self.provider,
+                CloudRow::Skip => self.cloud_decided && self.plan.cloud.is_none(),
+            }),
+            (Step::Local, Step::Review) => {
+                let rows = self.local_rows();
+                let at = |want: LocalRow| rows.iter().position(|r| *r == want);
+                match &self.plan.local {
+                    None => at(LocalRow::Skip),
+                    Some(c) => self
+                        .found
+                        .as_ref()
+                        .and_then(|f| f.servers.iter().position(|s| s.base_url == c.base_url))
+                        .and_then(|server| {
+                            at(LocalRow::Model {
+                                server,
+                                model: c.model.clone(),
+                            })
+                        })
+                        .or_else(|| at(LocalRow::Other)),
+                }
+            }
+            (Step::Local, _) => self.local_rows().iter().position(|r| *r == LocalRow::Other),
+            _ => None,
+        }
+        .unwrap_or(0);
     }
 
     fn enter(&mut self) {
@@ -819,15 +922,7 @@ impl Wizard {
                 self.local_decided = true;
                 self.go(Step::Review);
             }
-            Step::Review => {
-                if self.plan.cloud.is_none() && self.plan.local.is_none() {
-                    self.message = Some((Tone::Problem, "Choose at least one model.".into()));
-                    return;
-                }
-                let (backend, plan) = (self.backend.clone(), self.plan.clone());
-                self.saving = Some(Job::spawn(move || backend.save(&plan)));
-                self.go(Step::Saving);
-            }
+            Step::Review => self.save(false),
             Step::Saving => {}
             Step::Saved => {
                 self.outcome = Some(Outcome::Saved {
@@ -863,31 +958,41 @@ impl Wizard {
             ]));
         let inner = block.inner(outer);
         f.render_widget(block, outer);
+        let content = inner.inner(ratatui::layout::Margin::new(2, 1));
+        let width = usize::from(content.width);
+        // The message takes the rows it wraps to (at most four), only when there is one.
+        let message_lines: Vec<Line<'static>> = match &self.message {
+            Some((tone, text)) => {
+                let colour = match tone {
+                    Tone::Info => Color::Cyan,
+                    Tone::Good => Color::Green,
+                    Tone::Problem => Color::Yellow,
+                };
+                let mut lines = fold(
+                    &Line::styled(text.clone(), Style::new().fg(colour)),
+                    width,
+                    0,
+                );
+                lines.truncate(4);
+                lines
+            }
+            None => Vec::new(),
+        };
         let [steps, _, body, message, footer] = Layout::vertical([
             Constraint::Length(1),
             Constraint::Length(1),
             Constraint::Min(4),
-            Constraint::Length(2),
+            Constraint::Length(message_lines.len() as u16),
             Constraint::Length(1),
         ])
-        .areas(inner.inner(ratatui::layout::Margin::new(2, 1)));
+        .areas(content);
         f.render_widget(Paragraph::new(self.steps_line()), steps);
+        // Folded to the width here, so that lists know the rows they take.
         f.render_widget(
-            Paragraph::new(self.body(body.height as usize)).wrap(Wrap { trim: false }),
+            Paragraph::new(self.body(usize::from(body.width), usize::from(body.height))),
             body,
         );
-        if let Some((tone, text)) = &self.message {
-            let colour = match tone {
-                Tone::Info => Color::Cyan,
-                Tone::Good => Color::Green,
-                Tone::Problem => Color::Yellow,
-            };
-            f.render_widget(
-                Paragraph::new(Line::styled(text.clone(), Style::new().fg(colour)))
-                    .wrap(Wrap { trim: true }),
-                message,
-            );
-        }
+        f.render_widget(Paragraph::new(message_lines), message);
         f.render_widget(
             Paragraph::new(Line::styled(self.hints(), Style::new().fg(Color::DarkGray))),
             footer,
@@ -940,41 +1045,86 @@ impl Wizard {
                 "paste the key, or $VARIABLE · Enter continue · Esc back"
             }
             Step::AllowHost | Step::Plaintext => "y allow · n don't · Esc back",
+            // Drawn after the review, so it knows whether any of it is hidden.
+            Step::Review if self.review_view.get().0 => {
+                "↑↓ scroll · enlarge the terminal to save · Esc back · q quit"
+            }
+            Step::Review if self.lifts_top() => {
+                "y save and allow cloud requests (lifts local-only) · Esc back · q quit without saving"
+            }
             Step::Review => "Enter save · Esc back · q quit without saving",
             Step::Saving => "saving…",
-            Step::Saved => "Enter start Declass",
+            Step::Saved if self.session_follows => "Enter start Declass",
+            Step::Saved => "Enter finish",
         }
         .into()
     }
 
-    /// The rows of a list of `total` that fit in `room` lines, keeping the
-    /// cursor in view.
-    fn window(&self, total: usize, room: usize) -> std::ops::Range<usize> {
-        let room = room.max(3).min(total);
-        let start = self.cursor.saturating_sub(room - 1).min(total - room);
-        start..start + room
-    }
-
-    /// `rows` (already drawn) cut to the room left under `l`, with a line
-    /// saying how many more there are.
-    fn list(&self, l: &mut Vec<Line<'static>>, rows: Vec<Line<'static>>, height: usize) {
+    /// `rows` (already drawn) as many as fit in the screen rows left under
+    /// `l` once folded to `width`, the cursor's always among them, with a line
+    /// saying how many more there are above and below. When the text above
+    /// leaves the list less than three rows, it is cut from its end (the
+    /// title stays): the choices matter more than their explanation.
+    fn list(
+        &self,
+        l: &mut Vec<Line<'static>>,
+        rows: Vec<Line<'static>>,
+        width: usize,
+        height: usize,
+    ) {
         if rows.is_empty() {
             return;
         }
-        let room = height.saturating_sub(l.len() + 1);
-        let shown = self.window(rows.len(), room);
+        let rows: Vec<Vec<Line<'static>>> =
+            rows.iter().map(|r| fold(r, width, ROW_INDENT)).collect();
+        let heights: Vec<usize> = rows.iter().map(Vec::len).collect();
+        let used =
+            |l: &[Line<'static>]| -> usize { l.iter().map(|x| fold(x, width, 0).len()).sum() };
+        let want = heights.iter().sum::<usize>().min(3);
+        while l.len() > 1 && height.saturating_sub(used(l)) < want {
+            l.pop();
+        }
+        let shown = window(&heights, self.cursor, height.saturating_sub(used(l)));
         let (above, below) = (shown.start, rows.len() - shown.end);
         let more = Style::new().fg(Color::DarkGray);
         if above > 0 {
             l.push(Line::styled(format!("    ↑ {above} more"), more));
         }
-        l.extend(rows[shown.clone()].iter().cloned());
+        l.extend(rows[shown].iter().flatten().cloned());
         if below > 0 {
             l.push(Line::styled(format!("    ↓ {below} more"), more));
         }
     }
 
-    fn body(&self, height: usize) -> Vec<Line<'static>> {
+    /// The step's text, folded to `width` columns: each line a screen row.
+    /// The review scrolls, says how much of it is above and below, and
+    /// records whether any of it is off screen: it is saved only once all of
+    /// it has been on screen at once.
+    fn body(&self, width: usize, height: usize) -> Vec<Line<'static>> {
+        let lines: Vec<Line<'static>> = self
+            .text(width, height)
+            .iter()
+            .flat_map(|line| fold(line, width, 0))
+            .collect();
+        if !matches!(self.step, Step::Review | Step::Saving) {
+            return lines;
+        }
+        let (shown, max) = scrolled(lines.len(), self.review_scroll, height);
+        let (above, below) = (shown.start, lines.len() - shown.end);
+        self.review_view.set((above > 0 || below > 0, max));
+        let more = Style::new().fg(Color::DarkGray);
+        let mut out = Vec::new();
+        if above > 0 {
+            out.push(Line::styled(format!("    ↑ {above} more"), more));
+        }
+        out.extend(lines[shown].iter().cloned());
+        if below > 0 {
+            out.push(Line::styled(format!("    ↓ {below} more"), more));
+        }
+        out
+    }
+
+    fn text(&self, width: usize, height: usize) -> Vec<Line<'static>> {
         let dim = Style::new().fg(Color::DarkGray);
         let bold = Style::new().add_modifier(Modifier::BOLD);
         let mut l: Vec<Line<'static>> = Vec::new();
@@ -993,7 +1143,7 @@ impl Wizard {
                 ]));
                 l.push(Line::default());
                 l.push(Line::from(
-                    "Nothing is configured and nothing is sent anywhere until you choose both here.",
+                    "Nothing is saved or sent anywhere until you choose here.",
                 ));
                 l.push(Line::default());
                 match &self.found {
@@ -1083,7 +1233,7 @@ impl Wizard {
                             };
                             rows.push(self.row(i, mark, &label, &note));
                         }
-                        self.list(&mut l, rows, height);
+                        self.list(&mut l, rows, width, height);
                     }
                 }
             }
@@ -1142,7 +1292,7 @@ impl Wizard {
                                 "a model the server serves but does not list",
                             ));
                         }
-                        self.list(&mut l, rows, height);
+                        self.list(&mut l, rows, width, height);
                     }
                 }
             }
@@ -1192,7 +1342,7 @@ impl Wizard {
                                 )),
                             }
                         }
-                        self.list(&mut l, rows, height);
+                        self.list(&mut l, rows, width, height);
                     }
                 }
             }
@@ -1299,6 +1449,12 @@ impl Wizard {
                             ),
                             dim,
                         ));
+                        if found.is_some_and(|f| f.owner_requires_top) {
+                            l.push(Line::styled(
+                                "              sessions are no longer local-only (lifts clearance.required = top)",
+                                Style::new().fg(Color::Yellow),
+                            ));
+                        }
                     }
                     None => {
                         l.push(Line::from(vec![
@@ -1306,7 +1462,7 @@ impl Wizard {
                             Span::raw("none: every session is local-only"),
                         ]));
                         l.push(Line::styled(
-                            "              (clearance.required = top; lift it later in F2 settings)",
+                            "              (clearance.required = top; `declass setup` can choose a cloud model later)",
                             dim,
                         ));
                     }
@@ -1376,9 +1532,11 @@ impl Wizard {
                     l.push(Line::styled(format!("  {line}"), dim));
                 }
                 l.push(Line::default());
-                l.push(Line::from(
-                    "Press Enter, then describe what you want to build or fix.",
-                ));
+                l.push(Line::from(if self.session_follows {
+                    "Press Enter, then describe what you want to build or fix."
+                } else {
+                    "Press Enter to finish, then run `declass` in a project to start."
+                }));
             }
         }
         l
@@ -1429,6 +1587,65 @@ impl Wizard {
     }
 }
 
+/// Where a list row's label starts: its folded rows continue under it.
+const ROW_INDENT: usize = 5;
+
+/// `line` as the screen rows it takes `width` columns wide, cut at spaces as
+/// words wrap; rows after the first are indented by `indent`.
+fn fold(line: &Line<'static>, width: usize, indent: usize) -> Vec<Line<'static>> {
+    let indent = indent.min(width / 2);
+    let mut rows = crate::workspace::ansi::wrap_widths(line, width, width - indent);
+    for row in rows.iter_mut().skip(1) {
+        row.spans.insert(0, Span::raw(" ".repeat(indent)));
+    }
+    rows
+}
+
+/// The lines of `n` shown in `room` rows from line `scroll`, a row kept for
+/// "↑ N more" and "↓ N more" when lines are left out above or below, and the
+/// largest scroll (at which the last line is shown).
+fn scrolled(n: usize, scroll: usize, room: usize) -> (std::ops::Range<usize>, usize) {
+    if n <= room {
+        return (0..n, 0);
+    }
+    let room = room.max(3);
+    let max = n - (room - 1);
+    let start = scroll.min(max);
+    let above = usize::from(start > 0);
+    let end = if n - start + above <= room {
+        n
+    } else {
+        start + room - above - 1
+    };
+    (start..end, max)
+}
+
+/// Which rows of a list, `heights[i]` screen rows each, fit in `room` rows
+/// with the cursor's in view, a row kept for "↑ N more" and "↓ N more" when
+/// rows are left out above or below: from the top while the cursor's row
+/// fits, else ending at it. The cursor's row is shown even when nothing else
+/// fits.
+fn window(heights: &[usize], cursor: usize, room: usize) -> std::ops::Range<usize> {
+    let n = heights.len();
+    let cursor = cursor.min(n.saturating_sub(1));
+    let fits = |r: std::ops::Range<usize>| {
+        let more = usize::from(r.start > 0) + usize::from(r.end < n);
+        heights[r].iter().sum::<usize>() + more <= room
+    };
+    let mut end = 0;
+    while end < n && fits(0..end + 1) {
+        end += 1;
+    }
+    if cursor < end {
+        return 0..end;
+    }
+    let mut start = cursor;
+    while start > 0 && fits(start - 1..cursor + 1) {
+        start -= 1;
+    }
+    start..cursor + 1
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1438,7 +1655,15 @@ mod tests {
     struct Fake {
         saved: Mutex<Option<Plan>>,
         signed: Mutex<bool>,
+        /// The owner config requires top clearance.
+        top: Mutex<bool>,
+        /// Long provider and model names (a review that needs room).
+        long: Mutex<bool>,
     }
+
+    const LONG_LABEL: &str = "Anthropic (Messages API through a provider with a long name)";
+    const LONG_MODEL: &str = "claude-ultra-long-model-name-2026-11-preview-edition";
+    const LONG_LOCAL: &str = "remote-27b-instruct-q4-k-m-with-an-even-longer-name";
 
     impl SetupBackend for Fake {
         fn scan(&self) -> Found {
@@ -1452,10 +1677,16 @@ mod tests {
                 default_model: format!("{name}-default"),
                 host: format!("api.{name}.example"),
             };
+            let long = *self.long.lock().unwrap();
             Found {
                 providers: vec![
                     provider("zai", "z.ai GLM", "ZAI_API_KEY", false),
-                    provider("anthropic", "Anthropic", "ANTHROPIC_API_KEY", true),
+                    provider(
+                        "anthropic",
+                        if long { LONG_LABEL } else { "Anthropic" },
+                        "ANTHROPIC_API_KEY",
+                        true,
+                    ),
                     CloudProvider {
                         plan: true,
                         signed_in: *self.signed.lock().unwrap(),
@@ -1471,6 +1702,7 @@ mod tests {
                 }],
                 config_path: "/home/owner/.config/declass/config.toml".into(),
                 warnings: Vec::new(),
+                owner_requires_top: *self.top.lock().unwrap(),
             }
         }
         fn cloud_models(
@@ -1483,6 +1715,7 @@ mod tests {
                     Err("HTTP 401".into())
                 }
                 ("zai", None) => Err("HTTP 401".into()),
+                _ if *self.long.lock().unwrap() => Ok(vec![LONG_MODEL.into()]),
                 _ => Ok(vec![format!("{provider}-big"), format!("{provider}-small")]),
             }
         }
@@ -1506,6 +1739,9 @@ mod tests {
             if choice.base_url.contains("needs-key") && choice.key.is_none() {
                 return Err("HTTP 401".into());
             }
+            if *self.long.lock().unwrap() {
+                return Ok(vec![LONG_LOCAL.into()]);
+            }
             Ok(vec!["remote-27b".into()])
         }
         fn save(&self, plan: &Plan) -> Result<Vec<String>, String> {
@@ -1514,7 +1750,14 @@ mod tests {
         }
     }
 
+    /// A key, then a drawing at 100x30, as [`run`] draws after every event.
     fn press(w: &mut Wizard, code: KeyCode) {
+        key_only(w, code);
+        screen(w);
+    }
+
+    /// A key, without drawing the screen afterwards.
+    fn key_only(w: &mut Wizard, code: KeyCode) {
         w.key(KeyEvent::new(code, KeyModifiers::NONE));
         settle(w);
     }
@@ -1770,6 +2013,211 @@ mod tests {
         let s = small(&w);
         assert!(s.contains("No cloud model"), "{s}");
         assert!(s.contains("↑"), "{s}");
+    }
+
+    fn sized(w: &Wizard, columns: u16, rows: u16) -> String {
+        let mut t = Terminal::new(TestBackend::new(columns, rows)).unwrap();
+        t.draw(|f| w.draw(f)).unwrap();
+        let buf = t.backend().buffer().clone();
+        (0..buf.area.height)
+            .map(|y| {
+                (0..buf.area.width)
+                    .map(|x| buf[(x, y)].symbol().to_owned())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn a_narrow_terminal_keeps_the_cursor_and_the_choices_in_view() {
+        let (mut w, _) = wizard();
+        press(&mut w, KeyCode::Enter);
+        // At this width every row folds onto a second line: the last one,
+        // where the cursor is, must still be drawn.
+        for _ in 0..3 {
+            press(&mut w, KeyCode::Down);
+        }
+        let s = sized(&w, 44, 14);
+        assert!(s.contains("No cloud model"), "{s}");
+        assert!(s.contains("↑ 3 more"), "{s}");
+        // The local list's explanation is longer than the room: the choices
+        // are shown, not the explanation.
+        press(&mut w, KeyCode::Enter);
+        let s = sized(&w, 44, 14);
+        assert!(s.contains("Which local model"), "{s}");
+        assert!(s.contains("qwen3:8b"), "{s}");
+        for _ in 0..2 {
+            press(&mut w, KeyCode::Down);
+        }
+        let s = sized(&w, 44, 14);
+        assert!(s.contains("No local model"), "{s}");
+    }
+
+    #[test]
+    fn a_list_window_keeps_the_cursor_and_a_row_for_each_count() {
+        let one = [1; 10];
+        // Four rows and "↓ 6 more"; "↑ 6 more" and four rows; both counts.
+        assert_eq!(window(&one, 0, 5), 0..4);
+        assert_eq!(window(&one, 9, 5), 6..10);
+        assert_eq!(window(&one, 5, 5), 3..6);
+        assert_eq!(window(&one, 3, 20), 0..10);
+        // Folded rows count every line; the cursor's row is shown even alone.
+        assert_eq!(window(&[3, 3, 3], 2, 2), 2..3);
+        // The review scrolls the same way: 20 lines in 9 rows.
+        assert_eq!(scrolled(5, 3, 9), (0..5, 0));
+        assert_eq!(scrolled(20, 0, 9), (0..8, 12));
+        assert_eq!(scrolled(20, 5, 9), (5..12, 12));
+        assert_eq!(scrolled(20, 99, 9), (12..20, 12));
+    }
+
+    #[test]
+    fn going_back_returns_to_the_row_that_was_chosen() {
+        let (mut w, _) = wizard();
+        press(&mut w, KeyCode::Enter);
+        // z.ai (third: no key) asks for one; Esc returns to it, not to the top.
+        press(&mut w, KeyCode::Down);
+        press(&mut w, KeyCode::Down);
+        press(&mut w, KeyCode::Enter);
+        assert!(screen(&w).contains("z.ai GLM API key"), "{}", screen(&w));
+        press(&mut w, KeyCode::Esc);
+        assert_eq!(w.cursor, 2);
+        // From the review, back to the local model chosen.
+        press(&mut w, KeyCode::Up);
+        press(&mut w, KeyCode::Up);
+        press(&mut w, KeyCode::Enter);
+        press(&mut w, KeyCode::Enter);
+        press(&mut w, KeyCode::Enter);
+        assert!(screen(&w).contains("Ready to save"), "{}", screen(&w));
+        press(&mut w, KeyCode::Esc);
+        assert_eq!(w.step, Step::Local);
+        assert_eq!(w.cursor, 0, "qwen3:8b");
+        // An address typed by hand: back on "A server at another address…".
+        press(&mut w, KeyCode::Down);
+        press(&mut w, KeyCode::Enter);
+        press(&mut w, KeyCode::Esc);
+        assert_eq!(w.cursor, 1);
+    }
+
+    fn save_anthropic_and_ollama(w: &mut Wizard) {
+        for _ in 0..4 {
+            press(w, KeyCode::Enter);
+        }
+        assert!(screen(w).contains("Ready to save"), "{}", screen(w));
+    }
+
+    #[test]
+    fn the_last_screen_says_what_enter_does_next() {
+        let (mut w, _) = wizard();
+        save_anthropic_and_ollama(&mut w);
+        press(&mut w, KeyCode::Enter);
+        let s = screen(&w);
+        assert!(s.contains("Enter start Declass"), "{s}");
+        // `declass setup`: no session follows.
+        let (mut w, _) = wizard();
+        w.session_follows = false;
+        save_anthropic_and_ollama(&mut w);
+        press(&mut w, KeyCode::Enter);
+        let s = screen(&w);
+        assert!(s.contains("Enter finish"), "{s}");
+        assert!(s.contains("run `declass` in a project"), "{s}");
+        assert!(!s.contains("start Declass"), "{s}");
+    }
+
+    #[test]
+    fn lifting_a_local_only_setup_takes_y_and_is_never_a_side_effect() {
+        let fake = Arc::new(Fake::default());
+        *fake.top.lock().unwrap() = true;
+        let mut w = Wizard::new(fake.clone());
+        settle(&mut w);
+        save_anthropic_and_ollama(&mut w);
+        let review = screen(&w);
+        assert!(
+            review.contains("lifts clearance.required = top"),
+            "{review}"
+        );
+        assert!(
+            review.contains("y save and allow cloud requests (lifts local-only)"),
+            "{review}"
+        );
+        // Enter alone saves nothing and says what y does.
+        press(&mut w, KeyCode::Enter);
+        assert!(fake.saved.lock().unwrap().is_none());
+        assert!(screen(&w).contains("Press y to save"), "{}", screen(&w));
+        press(&mut w, KeyCode::Char('y'));
+        let plan = fake.saved.lock().unwrap().clone().expect("saved with y");
+        assert!(plan.lift_top);
+        // With nothing to lift, Enter saves and y does nothing.
+        let (mut w, fake) = wizard();
+        save_anthropic_and_ollama(&mut w);
+        assert!(!screen(&w).contains("clearance.required"));
+        press(&mut w, KeyCode::Char('y'));
+        assert!(fake.saved.lock().unwrap().is_none());
+        press(&mut w, KeyCode::Enter);
+        assert!(!fake.saved.lock().unwrap().clone().expect("saved").lift_top);
+    }
+
+    #[test]
+    fn a_review_that_does_not_fit_scrolls_and_cannot_be_saved_until_it_all_shows() {
+        let fake = Arc::new(Fake::default());
+        *fake.top.lock().unwrap() = true;
+        *fake.long.lock().unwrap() = true;
+        let mut w = Wizard::new(fake.clone());
+        settle(&mut w);
+        // The long-named provider and model, then a remote server over plain
+        // HTTP with a pasted key: the longest review there is.
+        press(&mut w, KeyCode::Enter);
+        press(&mut w, KeyCode::Enter);
+        press(&mut w, KeyCode::Enter);
+        press(&mut w, KeyCode::Down);
+        press(&mut w, KeyCode::Enter);
+        typed(&mut w, "http://gpu-box.internal.example:8080/v1");
+        press(&mut w, KeyCode::Enter);
+        press(&mut w, KeyCode::Char('y'));
+        press(&mut w, KeyCode::Char('y'));
+        typed(&mut w, "a-pasted-key-0123456789abcdef");
+        press(&mut w, KeyCode::Enter);
+        press(&mut w, KeyCode::Enter);
+        assert!(screen(&w).contains("Ready to save"), "{}", screen(&w));
+        // At 50x16 the review does not fit: the rest is announced, and
+        // neither Enter nor y saves while any of it is off screen.
+        let s = sized(&w, 50, 16);
+        assert!(s.contains("↓"), "{s}");
+        assert!(s.contains("enlarge the terminal to save"), "{s}");
+        for code in [KeyCode::Enter, KeyCode::Char('y')] {
+            key_only(&mut w, code);
+            assert!(fake.saved.lock().unwrap().is_none());
+            let s = sized(&w, 50, 16);
+            assert!(s.contains("Part of the review is off screen"), "{s}");
+        }
+        // ↓ reaches every line, the notice that local-only is lifted and the
+        // plain-HTTP warning among them; scrolled down, the top is hidden, so
+        // it still cannot be saved here.
+        let mut seen = String::new();
+        for _ in 0..40 {
+            key_only(&mut w, KeyCode::Down);
+            seen.push_str(&sized(&w, 50, 16));
+        }
+        for needle in [
+            "lifts clearance.required",
+            "over plain HTTP, unencrypted",
+            "192.0.2.7:8080 is allowed",
+            "Change these any time",
+        ] {
+            assert!(seen.contains(needle), "{needle}: {seen}");
+        }
+        let s = sized(&w, 50, 16);
+        assert!(s.contains("↑"), "{s}");
+        key_only(&mut w, KeyCode::Char('y'));
+        assert!(fake.saved.lock().unwrap().is_none());
+        // A terminal where all of it shows: saved, with y.
+        let s = screen(&w);
+        assert!(!s.contains(" more"), "nothing above or below: {s}");
+        key_only(&mut w, KeyCode::Char('y'));
+        let plan = fake.saved.lock().unwrap().clone().expect("saved");
+        assert!(plan.lift_top);
+        assert_eq!(plan.cloud.unwrap().model, LONG_MODEL);
+        assert_eq!(plan.local.unwrap().model, LONG_LOCAL);
     }
 
     #[test]

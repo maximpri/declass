@@ -1551,7 +1551,7 @@ command are for a session (`declass` alone); give a command its own options afte
                 && local_url.is_none()
                 && !yes;
             if bare && std::io::stdin().is_terminal() && std::io::stderr().is_terminal() {
-                return Ok(match setup_screen::run(cfg).await? {
+                return Ok(match setup_screen::run(cfg, false).await? {
                     declass_tui::setup::Outcome::Saved { .. } => {
                         eprintln!("setup saved; `declass doctor --online` checks the models");
                         0

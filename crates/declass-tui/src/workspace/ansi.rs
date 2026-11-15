@@ -102,7 +102,7 @@ pub(super) fn wrap(line: &Line<'static>, width: usize) -> Vec<Line<'static>> {
 }
 
 /// [`wrap`] with the first row `first` columns wide and the others `rest`.
-pub(super) fn wrap_widths(line: &Line<'static>, first: usize, rest: usize) -> Vec<Line<'static>> {
+pub(crate) fn wrap_widths(line: &Line<'static>, first: usize, rest: usize) -> Vec<Line<'static>> {
     let (first, rest) = (first.max(1), rest.max(1));
     let chars: Vec<(char, Style)> = line
         .spans

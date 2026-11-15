@@ -19,7 +19,7 @@
 //! screen only through `term::safe` (the feed applies it), and the lines are
 //! drawn through [`ansi`], which draws no escape sequence of its own.
 
-mod ansi;
+pub(crate) mod ansi;
 mod cells;
 mod interaction;
 mod panel;

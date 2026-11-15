@@ -995,8 +995,11 @@ config (owner-only, unreadable to sandboxed commands; `frontier.api_key_saved` a
 `local.api_key_saved` say it is used), never in `config.toml`. A server that answers 401 asks for
 its key again, and a model the server serves but does not list can be typed. A review shows who
 receives what; nothing is saved before it. Choosing no cloud model makes every session local-only
-(`clearance.required = "top"`); choosing no local model sets `local.enabled = false`. You can't skip
-both. `declass setup --provider … --yes` remains for scripts.
+(`clearance.required = "top"`). Choosing one later on the setup screen lifts that again: its review
+says so, and saving then takes `y` instead of Enter. Choosing no local model sets `local.enabled =
+false`. You can't skip both. A review too long for the terminal scrolls, and is saved only once all
+of it is on screen at once. `declass setup --provider … --yes` remains for scripts; it leaves
+`clearance.required` as it is.
 
 ### Local model checks
 

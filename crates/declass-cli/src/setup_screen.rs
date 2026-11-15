@@ -27,14 +27,26 @@ struct Backend {
 }
 
 /// Runs the setup screen on this terminal. The configuration is saved (by the
-/// screen, after its review) or left untouched.
-pub async fn run(cfg: Config) -> Result<Outcome> {
+/// screen, after its review) or left untouched. `session_follows`: the first
+/// `declass` starts a session once setup is saved; `declass setup` ends there.
+pub async fn run(cfg: Config, session_follows: bool) -> Result<Outcome> {
     let backend = Arc::new(Backend {
         cfg: Mutex::new(cfg),
         runtime: tokio::runtime::Handle::current(),
         listings: Mutex::default(),
     });
-    Ok(tokio::task::spawn_blocking(move || declass_tui::setup::run(backend)).await??)
+    Ok(
+        tokio::task::spawn_blocking(move || declass_tui::setup::run(backend, session_follows))
+            .await??,
+    )
+}
+
+/// The owner's own config requires top clearance, as setup saves it when no
+/// cloud model is chosen. A project's or a policy's requirement is theirs:
+/// setup never lifts it.
+fn owner_requires_top(cfg: &Config) -> bool {
+    cfg.str("clearance.required").is_ok_and(|v| v == "top")
+        && cfg.origin("clearance.required") == Some(declass_config::Origin::Owner)
 }
 
 /// `~/…` for a path under the home directory.
@@ -106,11 +118,13 @@ impl SetupBackend for Backend {
                 "The command sandbox is unavailable ({e}); on Linux, install bubblewrap."
             ));
         }
+        let cfg = self.cfg.lock().unwrap();
         Found {
             providers,
             servers,
-            config_path: shown(&self.cfg.lock().unwrap().owner_path),
+            config_path: shown(&cfg.owner_path),
             warnings,
+            owner_requires_top: owner_requires_top(&cfg),
         }
     }
 
@@ -282,6 +296,12 @@ fn changes(
                 ("frontier.vision", Value::Boolean(vision)),
                 ("frontier.auth", text(p.auth)),
             ]);
+            // An earlier setup without a cloud model made every session
+            // local-only. Lifted only when the operator saved with `y` on a
+            // review that said so, and only the owner's own requirement.
+            if plan.lift_top && owner_requires_top(cfg) {
+                out.push(("clearance.required", text("standard")));
+            }
         }
         // No cloud model: every session and run is top clearance.
         None => out.push(("clearance.required", text("top"))),
@@ -359,6 +379,7 @@ mod tests {
                 key: None,
             }),
             local: None,
+            lift_top: false,
         };
         let c = changes(&cfg, &plan, &HashMap::new()).unwrap();
         let get = |k: &str| c.iter().find(|(key, _)| *key == k).map(|(_, v)| v.clone());
@@ -380,6 +401,7 @@ mod tests {
                 allow_host: Some("192.0.2.7:8080".into()),
                 plaintext: true,
             }),
+            lift_top: false,
         };
         let c = changes(&cfg, &plan, &HashMap::new()).unwrap();
         let get = |k: &str| c.iter().find(|(key, _)| *key == k).map(|(_, v)| v.clone());
@@ -389,6 +411,57 @@ mod tests {
             Some(Value::Array(vec![Value::String("192.0.2.7:8080".into())]))
         );
         assert_eq!(get("local.allow_plaintext"), Some(Value::Boolean(true)));
+    }
+
+    #[test]
+    fn a_confirmed_lift_ends_the_owners_own_top_clearance_but_not_a_projects() {
+        let d = tempfile::tempdir().unwrap();
+        let (owner, project) = (d.path().join("config.toml"), d.path().join("project.toml"));
+        std::fs::write(&owner, "[clearance]\nrequired = \"top\"\n").unwrap();
+        let plan = Plan {
+            cloud: Some(declass_tui::setup::CloudChoice {
+                provider: "anthropic".into(),
+                label: "Anthropic".into(),
+                model: "claude-x".into(),
+                key: None,
+            }),
+            local: None,
+            lift_top: true,
+        };
+        let get = |c: &[(&str, Value)], k: &str| {
+            c.iter().find(|(key, _)| *key == k).map(|(_, v)| v.clone())
+        };
+        let cfg = Config::load(&owner, None).unwrap();
+        assert!(owner_requires_top(&cfg));
+        let c = changes(&cfg, &plan, &HashMap::new()).unwrap();
+        assert_eq!(
+            get(&c, "clearance.required"),
+            Some(Value::String("standard".into()))
+        );
+        // Not confirmed on the review (saved with Enter): never lifted.
+        let unconfirmed = Plan {
+            lift_top: false,
+            ..plan.clone()
+        };
+        let c = changes(&cfg, &unconfirmed, &HashMap::new()).unwrap();
+        assert_eq!(get(&c, "clearance.required"), None);
+        // Without a cloud model it stays.
+        let local_only = Plan {
+            cloud: None,
+            ..plan.clone()
+        };
+        let c = changes(&cfg, &local_only, &HashMap::new()).unwrap();
+        assert_eq!(
+            get(&c, "clearance.required"),
+            Some(Value::String("top".into()))
+        );
+        // A repository's requirement is not the owner's to lift here.
+        std::fs::write(&owner, "").unwrap();
+        std::fs::write(&project, "[clearance]\nrequired = \"top\"\n").unwrap();
+        let cfg = Config::load(&owner, Some(&project)).unwrap();
+        assert!(!owner_requires_top(&cfg));
+        let c = changes(&cfg, &plan, &HashMap::new()).unwrap();
+        assert_eq!(get(&c, "clearance.required"), None);
     }
 
     #[test]
