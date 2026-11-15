@@ -1038,11 +1038,20 @@ fn profile_env(text: &str, k: &dyn Knowledge) -> Profile {
         anomalies.push(format!("{repeated} key(s) assigned more than once"));
     }
     // Lines that are neither assignments, comments nor blank: shown by the
-    // runs of their shape (a malformed line, a line in another syntax).
+    // runs of their shape (a malformed line, a line in another syntax). The
+    // lines of a multi-line value are the value's, described with it.
+    let inside = parse::continuation_lines(text, &all);
     let mut other: BTreeMap<String, usize> = BTreeMap::new();
-    for line in text.lines() {
+    let mut offset = 0;
+    for line in text.split_inclusive('\n') {
+        let start = offset;
+        offset += line.len();
         let t = line.trim();
-        if t.is_empty() || t.starts_with('#') || !parse::assignments(line).is_empty() {
+        if t.is_empty()
+            || t.starts_with('#')
+            || inside.iter().any(|r| r.start == start)
+            || !parse::assignments(line).is_empty()
+        {
             continue;
         }
         let masked = if k.values(t).is_empty() {

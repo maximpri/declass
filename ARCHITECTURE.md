@@ -391,7 +391,7 @@ itself (test data) are shown as written unless the same value is in the vault.
 | Class | View body |
 |---|---|
 | Raw (public) | the content, with detected and known values replaced and copied sensitive spans removed |
-| Tokenized (secret-bearing files) | structure intact, every value → placeholder |
+| Tokenized (secret-bearing files) | structure intact, every value → placeholder. Assignments are read as the structure view reads them (`structure::parse::assignments`): a key is a name, and a value whose quote its line does not close runs to the line that closes it (a private key, a JSON document) and is one placeholder between its quotes; any other line is sanitized as sensitive text |
 | HandleSummary (sensitive files, large command output, `sensitive_data` output) | handle + size + up to 12 error lines (sanitized) + repeated line shapes for texts over 40 lines (digits as `#`, values as `⟨…⟩`) + local summary and facts. With `sensitivity.structure_views` (§5.12): the structure view (or a log's line templates) in place of the line shapes and, for a data file, the first record of its synthetic sample; for `sensitive_data` output up to 80 lines, the masked output in place of the error lines; short `sensitive_data` output past its budget: a fixed text, no handle |
 | Tokenized: synthetic sample (`synthetic_sample`) | the file's records with every value a rule-generated fake, checked before it is shown |
 | Command output ≤ 6,000 chars (not allowlisted) | shown sanitized, no local call |

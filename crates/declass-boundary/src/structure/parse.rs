@@ -407,7 +407,8 @@ pub fn sniff_delimiter(text: &str, hint: Option<char>) -> Option<char> {
 #[derive(Debug, Clone)]
 pub struct Assignment {
     pub key: String,
-    /// The value as written (quotes included).
+    /// The value as written (quotes included). A multi-line value's span
+    /// runs over the lines it holds, to its closing quote.
     pub span: Range<usize>,
     /// The value without surrounding quotes.
     pub value: String,
@@ -417,48 +418,116 @@ pub struct Assignment {
     pub export: bool,
 }
 
+impl Assignment {
+    /// Whether the value runs over more than one line.
+    pub fn multiline(&self, text: &str) -> bool {
+        text.get(self.span.clone())
+            .is_some_and(|v| v.contains('\n'))
+    }
+}
+
+/// Whether `line` (without its line break) ends with `quote` closing a
+/// value: for a double quote, one no backslash escapes.
+fn closes(line: &str, quote: char) -> bool {
+    let Some(before) = line.trim_end().strip_suffix(quote) else {
+        return false;
+    };
+    quote != '"' || (before.len() - before.trim_end_matches('\\').len()) % 2 == 0
+}
+
 /// The assignments of a `KEY=value` file (`export` allowed, `#` comments
-/// skipped).
+/// skipped, a byte order mark ignored). A key is a name ([`is_env_key`]). A
+/// value that opens a quote its line does not close goes on to the first
+/// later line that ends with that quote, as dotenv reads it: the lines
+/// between (a private key, a JSON document) are part of the value, never
+/// assignments or other lines of their own. Without such a line the value
+/// ends with its own line.
 pub fn assignments(text: &str) -> Vec<Assignment> {
-    let mut out = Vec::new();
+    let mut lines: Vec<(usize, &str)> = Vec::new();
     let mut offset = 0;
     for line in text.split_inclusive('\n') {
-        let body = line.trim_end_matches(['\n', '\r']);
+        lines.push((offset, line.trim_end_matches(['\n', '\r'])));
+        offset += line.len();
+    }
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < lines.len() {
+        let (offset, raw) = lines[i];
+        i += 1;
+        let body = raw.trim_start_matches('\u{feff}');
+        let offset = offset + (raw.len() - body.len());
         let trimmed = body.trim_start();
         let lead = body.len() - trimmed.len();
         let rest = trimmed.strip_prefix("export ").unwrap_or(trimmed);
         let skip = lead + (trimmed.len() - rest.len());
-        if !rest.starts_with('#')
-            && let Some((key, value)) = rest.split_once('=')
-            && is_env_key(key.trim())
+        let Some((key, value)) = rest.split_once('=') else {
+            continue;
+        };
+        if rest.starts_with('#') || !is_env_key(key.trim()) {
+            continue;
+        }
+        let vstart = offset + skip + key.len() + 1;
+        let v = value.trim_end();
+        let lead_ws = v.len() - v.trim_start().len();
+        let v = v.trim_start();
+        let start = vstart + lead_ws;
+        let opened = v.chars().next().filter(|q| *q == '"' || *q == '\'');
+        // A quote this line opens and does not close: the value goes on.
+        if let Some(q) = opened
+            && !(v.len() >= 2 && closes(v, q))
+            && let Some(last) = (i..lines.len()).find(|&j| closes(lines[j].1, q))
         {
-            let vstart = offset + skip + key.len() + 1;
-            let v = value.trim_end();
-            let lead_ws = v.len() - v.trim_start().len();
-            let v = v.trim_start();
-            let start = vstart + lead_ws;
-            let quote = v
-                .chars()
-                .next()
-                .filter(|q| (*q == '"' || *q == '\'') && v.len() >= 2 && v.ends_with(*q));
-            let inner = match quote {
-                Some(_) => &v[1..v.len() - 1],
-                None => v,
-            };
+            let (last_offset, last_line) = lines[last];
+            let end = last_offset + last_line.trim_end().len();
             out.push(Assignment {
                 key: key.trim().to_owned(),
-                span: start..start + v.len(),
-                value: inner.to_owned(),
-                quote,
+                span: start..end,
+                value: text[start + q.len_utf8()..end - q.len_utf8()].to_owned(),
+                quote: Some(q),
                 export: rest.len() < trimmed.len(),
             });
+            i = last + 1;
+            continue;
         }
-        offset += line.len();
+        let quote = opened.filter(|q| v.len() >= 2 && v.ends_with(*q));
+        let inner = match quote {
+            Some(_) => &v[1..v.len() - 1],
+            None => v,
+        };
+        out.push(Assignment {
+            key: key.trim().to_owned(),
+            span: start..start + v.len(),
+            value: inner.to_owned(),
+            quote,
+            export: rest.len() < trimmed.len(),
+        });
     }
     out
 }
 
-fn is_env_key(k: &str) -> bool {
+/// The byte ranges of `text`'s lines that are inside a multi-line value of
+/// `assignments` (every line of it but the first, where its key is).
+pub fn continuation_lines(text: &str, assignments: &[Assignment]) -> Vec<Range<usize>> {
+    let spans: Vec<&Range<usize>> = assignments
+        .iter()
+        .filter(|a| a.multiline(text))
+        .map(|a| &a.span)
+        .collect();
+    let mut out = Vec::new();
+    let mut offset = 0;
+    for line in text.split_inclusive('\n') {
+        let start = offset;
+        offset += line.len();
+        if spans.iter().any(|s| s.start < start && start < s.end) {
+            out.push(start..start + line.trim_end_matches(['\n', '\r']).len());
+        }
+    }
+    out
+}
+
+/// Whether `k` is a key of a `KEY=value` file: a letter or `_`, then
+/// letters, digits, `_`, `.` or `-`.
+pub fn is_env_key(k: &str) -> bool {
     let mut chars = k.chars();
     chars
         .next()
@@ -469,13 +538,15 @@ fn is_env_key(k: &str) -> bool {
 /// Whether `text` reads as a `KEY=value` file: most of its lines that are
 /// neither empty nor comments are assignments, and there are some.
 pub fn looks_like_env(text: &str) -> bool {
-    let lines: Vec<&str> = text
+    let all = assignments(text);
+    let inside = continuation_lines(text, &all).len();
+    let lines = text
         .lines()
         .map(str::trim)
         .filter(|l| !l.is_empty() && !l.starts_with('#'))
-        .collect();
-    let n = assignments(text).len();
-    n >= 1 && n * 10 >= lines.len() * 8
+        .count();
+    let n = all.len();
+    n >= 1 && n * 10 >= lines.saturating_sub(inside) * 8
 }
 
 // ---- Fixed-width columns ---------------------------------------------------
@@ -749,6 +820,49 @@ mod tests {
         assert_eq!(&text[a[1].span.clone()], "2");
         assert!(!looks_like_env(text));
         assert!(looks_like_env("A=1\nB=2\n# x\n"));
+    }
+
+    #[test]
+    fn env_values_run_over_lines_to_their_closing_quote() {
+        // A private key or a JSON document over several lines: its lines are
+        // the value's, even one that looks like an assignment (`Zq==` is
+        // `Zq` = `=` on its own) or holds an `=`.
+        let text = "\u{feff}KEY=\"-----BEGIN RSA PRIVATE KEY-----\nMIIEow\nkY8cq5Ytb==\n\
+-----END RSA PRIVATE KEY-----\"\nexport DOC='{\n  \"password\": \"Kq7v=x\"\n}'\nESC=\"a\\\"\nb\"\nB=2\nOPEN=\"never closed\n";
+        let a = assignments(text);
+        let keys: Vec<&str> = a.iter().map(|a| a.key.as_str()).collect();
+        assert_eq!(keys, ["KEY", "DOC", "ESC", "B", "OPEN"]);
+        assert_eq!(
+            a[0].value,
+            "-----BEGIN RSA PRIVATE KEY-----\nMIIEow\nkY8cq5Ytb==\n-----END RSA PRIVATE KEY-----"
+        );
+        assert!(a[0].multiline(text) && a[0].quote == Some('"'));
+        assert_eq!(
+            &text[a[1].span.clone()],
+            "'{\n  \"password\": \"Kq7v=x\"\n}'"
+        );
+        assert!(a[1].export);
+        // An escaped quote does not close a double-quoted value.
+        assert_eq!(a[2].value, "a\\\"\nb");
+        assert_eq!(&text[a[3].span.clone()], "2");
+        // A quote nothing closes ends with its line, as before.
+        assert_eq!(a[4].value, "\"never closed");
+        let inside: Vec<&str> = continuation_lines(text, &a)
+            .into_iter()
+            .map(|r| &text[r])
+            .collect();
+        assert_eq!(
+            inside,
+            [
+                "MIIEow",
+                "kY8cq5Ytb==",
+                "-----END RSA PRIVATE KEY-----\"",
+                "  \"password\": \"Kq7v=x\"",
+                "}'",
+                "b\""
+            ]
+        );
+        assert!(looks_like_env(text));
     }
 
     #[test]

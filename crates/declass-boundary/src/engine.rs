@@ -931,36 +931,86 @@ impl Engine {
         token
     }
 
-    /// `KEY=value` files: structure kept, every value replaced.
+    /// `KEY=value` files: structure kept, every value replaced. Assignments
+    /// are read as the structure view reads them
+    /// ([`crate::structure::parse::assignments`]): a key is a name, and a
+    /// value that opens a quote its line does not close runs to the line
+    /// that closes it (a private key, a JSON document), so its lines are
+    /// withheld with it, shown as one placeholder between its quotes. Any
+    /// other line (a comment, a line in another syntax) is sanitized as
+    /// sensitive text. Reading every line holding a `=` as an assignment put
+    /// the text before its `=` (a line of a private key, the start of a
+    /// password inside a JSON value) on show and into the placeholder's
+    /// name. `read_file`'s line numbers are kept.
     fn tokenized_view(&self, st: &mut State, path: &str, text: &str) -> String {
+        // The text without `read_file`'s numbers, and each line's number.
+        let (numbers, plain): (Vec<&str>, std::borrow::Cow<'_, str>) =
+            match bulky::strip_line_numbers(text) {
+                Some((_, body)) => (
+                    text.lines()
+                        .zip(body.lines())
+                        .map(|(l, c)| &l[..l.len() - c.len()])
+                        .collect(),
+                    body.into(),
+                ),
+                None => (Vec::new(), text.into()),
+            };
+        let assignments = crate::structure::parse::assignments(&plain);
+        let mut next = assignments.iter().peekable();
         let mut out = String::new();
-        for line in text.lines() {
-            let trimmed = line.trim_start();
-            let body = trimmed.strip_prefix("export ").unwrap_or(trimmed);
-            match body.split_once('=') {
-                Some((key, value)) if !trimmed.starts_with('#') && !value.trim().is_empty() => {
-                    let v = value.trim().trim_matches(|c| c == '"' || c == '\'');
-                    // A plainly public setting is shown as it is: in the vault
-                    // it would be replaced wherever it appears, public code
-                    // included, and refuse every request holding it (X1's
-                    // `GATEWAY_DIALECT=postgresql` refused postgresql.org).
-                    if self.public_setting(st, key.trim(), v) {
-                        out.push_str(line);
-                        out.push('\n');
-                        continue;
-                    }
-                    let token = st
-                        .vault
-                        .token_for(v, Kind::Secret, Some(key.trim()), path)
-                        .unwrap_or_default();
-                    let prefix = &line[..line.len() - value.len()];
-                    out.push_str(&format!("{prefix}{token}\n"));
-                }
-                _ => {
-                    out.push_str(&self.sanitize(st, line, path, true));
-                    out.push('\n');
-                }
+        let mut offset = 0;
+        // The end of a multi-line value shown above: its lines are in it.
+        let mut shown_to = 0;
+        for (i, line) in plain.split_inclusive('\n').enumerate() {
+            let start = offset;
+            offset += line.len();
+            if start < shown_to {
+                continue;
             }
+            let body = line.trim_end_matches(['\n', '\r']);
+            let number = numbers.get(i).copied().unwrap_or_default();
+            let assigned =
+                next.next_if(|a| a.span.start >= start && a.span.start <= start + body.len());
+            let Some(a) = assigned.filter(|a| !a.value.trim().is_empty()) else {
+                out.push_str(number);
+                out.push_str(&self.sanitize(st, body, path, true));
+                out.push('\n');
+                continue;
+            };
+            let key_part = &plain[start..a.span.start];
+            if a.multiline(&plain) {
+                shown_to = a.span.end;
+                let token = st
+                    .vault
+                    .token_for(&a.value, Kind::Secret, Some(&a.key), path)
+                    .unwrap_or_default();
+                let quote = a.quote.map(String::from).unwrap_or_default();
+                // What follows the closing quote on its line (a comment).
+                let tail_end = a.span.end
+                    + plain[a.span.end..]
+                        .find('\n')
+                        .unwrap_or(plain.len() - a.span.end);
+                let tail = plain[a.span.end..tail_end].trim_end_matches('\r');
+                let tail = self.sanitize(st, tail, path, true);
+                out.push_str(&format!("{number}{key_part}{quote}{token}{quote}{tail}\n"));
+                continue;
+            }
+            let v = a.value.trim().trim_matches(|c| c == '"' || c == '\'');
+            // A plainly public setting is shown as it is: in the vault
+            // it would be replaced wherever it appears, public code
+            // included, and refuse every request holding it (X1's
+            // `GATEWAY_DIALECT=postgresql` refused postgresql.org).
+            if self.public_setting(st, &a.key, v) {
+                out.push_str(number);
+                out.push_str(body);
+                out.push('\n');
+                continue;
+            }
+            let token = st
+                .vault
+                .token_for(v, Kind::Secret, Some(&a.key), path)
+                .unwrap_or_default();
+            out.push_str(&format!("{number}{key_part}{token}\n"));
         }
         format!(
             "[values in this file are shown as placeholders, except plainly public settings (booleans, levels, small numbers and limits, words public code uses); write placeholders back verbatim and they are restored locally]\n{out}"
@@ -3048,6 +3098,88 @@ mod tests {
             "{shown}"
         );
         assert!(shown.contains("# creds"));
+    }
+
+    /// `text` numbered as `read_file` numbers it.
+    fn numbered(text: &str) -> String {
+        let width = text.lines().count().to_string().len();
+        text.lines()
+            .enumerate()
+            .map(|(i, l)| format!("{:>width$}  {l}\n", i + 1))
+            .collect()
+    }
+
+    #[test]
+    fn lines_of_a_multi_line_env_value_are_withheld_with_it() {
+        // Read as `KEY=value` line by line, a private key's last line (`…==`)
+        // was shown and named its placeholder, the start of a password in a
+        // JSON value (`Kq7vXw=…`) too, and a line with no `=` went out as
+        // written.
+        let d = tempfile::tempdir().unwrap();
+        let mut p = policy();
+        p.structure.views = true;
+        let e = Engine::open(&d.path().join("run"), p, None).unwrap();
+        let tail = "kY8cq5Ytb2nRLMOHvXn9v4Ln8zAvb8hq1Kc3g7Fz6eMw==";
+        let env = format!(
+            "APP_PRIVATE_KEY=\"-----BEGIN RSA PRIVATE KEY-----\n\
+             MIIEowIBAAKCAQEAu1SU1LfVLPHCozMxH2Mo4lgOEePzNm0tRgeLezV6ffAt0gun\n\
+             {tail}\n-----END RSA PRIVATE KEY-----\"\n\
+             DB_JSON='{{\n  \"user\": \"app\",\n  \"password\": \"Kq7vXw=Zq-31x\"\n}}'\n\
+             RECOVERY_PHRASE=\"orchid tundra velvet harbor\nlantern quiver mosaic ember\"\n\
+             OTHER=plainvalue123x\n"
+        );
+        let ws = d.path().join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        std::fs::write(ws.join(".env"), &env).unwrap();
+        e.prime(&ws, &[], "Rotate the keys.");
+        let shown = e.present(&file(".env"), numbered(&env).as_bytes());
+        let (filter, check) = e.outbound();
+        let mut req = Request {
+            items: vec![Item::ToolResult {
+                call_id: "c".into(),
+                content: shown.clone(),
+            }],
+            ..Request::default()
+        };
+        filter.apply(&mut req);
+        let body = serde_json::to_value(&req.items).unwrap();
+        assert!(check.check(&body).is_ok());
+        let body = body.to_string();
+        for leaked in [
+            &tail[..16],
+            &tail[20..36],
+            "Kq7vXw",
+            "lantern quiver",
+            "mosaic ember",
+            "MIIEowIBAAKCAQEAu1SU",
+        ] {
+            assert!(
+                !shown.contains(leaked) && !body.contains(leaked),
+                "{leaked}:\n{shown}"
+            );
+        }
+        // Each value is one placeholder after its key, quoted as written, and
+        // the structure view describes it with its key.
+        for line in [
+            " 1  APP_PRIVATE_KEY=\"⟨secret:APP_PRIVATE_KEY#1⟩\"",
+            " 5  DB_JSON='⟨secret:DB_JSON#1⟩'",
+            " 9  RECOVERY_PHRASE=\"⟨secret:RECOVERY_PHRASE#1⟩\"",
+            "11  OTHER=⟨secret:OTHER#1⟩",
+        ] {
+            assert!(shown.contains(line), "missing {line:?}:\n{shown}");
+        }
+        assert!(
+            !shown.contains("neither assignments nor comments"),
+            "{shown}"
+        );
+        // Written back, the placeholder restores the whole value.
+        let back = e
+            .resolve_for_write(
+                Path::new(".env"),
+                "APP_PRIVATE_KEY=\"⟨secret:APP_PRIVATE_KEY#1⟩\"\n",
+            )
+            .unwrap();
+        assert!(back.contains(tail) && back.ends_with("-----END RSA PRIVATE KEY-----\"\n"));
     }
 
     #[test]

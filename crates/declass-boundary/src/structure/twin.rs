@@ -1056,13 +1056,19 @@ fn twin_env(text: &str, seed: u64, k: &dyn Knowledge) -> Twin {
     let mut out = String::new();
     let mut offset = 0;
     let mut next = assignments.iter().peekable();
+    // The end of a multi-line value written above: its other lines are in it.
+    let mut written_to = 0;
     for line in text.split_inclusive('\n') {
         let end = offset + line.len();
         let body = line.trim_end_matches(['\n', '\r']);
         let eol = &line[body.len()..];
+        if offset < written_to {
+            offset = end;
+            continue;
+        }
         if let Some(a) = next.peek()
             && a.span.start >= offset
-            && a.span.end <= end
+            && a.span.start <= offset + body.len()
         {
             let a = next.next().expect("peeked");
             let fake = f.fake(Role::Text, &a.value);
@@ -1070,9 +1076,16 @@ fn twin_env(text: &str, seed: u64, k: &dyn Knowledge) -> Twin {
                 Some(q) => format!("{q}{fake}{q}"),
                 None => fake,
             };
+            // The line the value ends on (its own, or the one closing a
+            // multi-line value).
+            let last_end = a.span.end
+                + text[a.span.end..]
+                    .find('\n')
+                    .map_or(text.len() - a.span.end, |n| n + 1);
             out.push_str(&text[offset..a.span.start]);
             out.push_str(&written);
-            out.push_str(&text[a.span.end..end]);
+            out.push_str(&text[a.span.end..last_end]);
+            written_to = last_end;
         } else if body.trim().is_empty() {
             out.push_str(eol);
         }
