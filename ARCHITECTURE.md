@@ -422,8 +422,9 @@ pipes into a content filter, and the view (with its handle line and note) is at 
 output; otherwise the output takes the path above as before (unknown bulky output: the outline, and
 a local summary when a local model is configured).
 
-Metadata: sensitive paths are listed by name (and named in the task note); a search reports the
-location of a match in a sensitive file but not the line; `diff` is the working-tree diff, sanitized,
+Metadata: sensitive paths are listed by name (and named in the task note); a search does not look
+into sensitive files (which of their lines a pattern matches would read them one guess at a time;
+the presenter still masks such a line should one reach it); `diff` is the working-tree diff, sanitized,
 with protected files' sections replaced by a note. Git commands are ordinary commands: their
 output follows the command-output rules above.
 

@@ -112,7 +112,8 @@ this machine, as a description by the local model.",
         ),
         t(
             "search",
-            "Search file contents with a regular expression. Returns path:line: text for each match.",
+            "Search file contents with a regular expression. Returns path:line: text for each match. \
+Sensitive files (data, logs, secrets) are not searched: read_file gives their structure and a handle for ask_local.",
             json!({"type": "object", "properties": {
                 "pattern": {"type": "string"},
                 "dir": {"type": "string", "description": "Limit the search to this directory."}
@@ -307,6 +308,12 @@ fn search(ctx: &Ctx<'_>, args: &Map<String, Value>) -> Result<String, String> {
     let mut out = String::new();
     let mut count = 0;
     for f in visible_files(ctx, args.get("dir").and_then(Value::as_str))? {
+        // Sensitive files are not searched: which of their lines a pattern
+        // the frontier chose matches (or how many do) reads them one guess
+        // at a time, with no budget and no audit.
+        if ctx.presenter.path_sensitive(Path::new(&f)) {
+            continue;
+        }
         let Ok(bytes) = declass_fs::read_file(ctx.workspace, Path::new(&f), MAX_READ_BYTES) else {
             continue;
         };
