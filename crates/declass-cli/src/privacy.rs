@@ -30,6 +30,7 @@ const DIR_FLAGS: OFlags = OFlags::RDONLY
 
 #[derive(clap::Args)]
 pub(crate) struct Args {
+    /// Print the report as JSON.
     #[arg(long)]
     json: bool,
     /// Preview this mode; clearance.required still applies.

@@ -98,7 +98,7 @@ struct SessionArgs {
     /// Keep working on this goal until verified completion, a question, or a limit.
     #[arg(long, conflicts_with_all = ["message", "resume"])]
     goal: Option<String>,
-    /// Maximum turns for a new goal [default: 20]; session dollar and time budgets also apply.
+    /// Maximum turns for a new goal [default: 20]; session request and time limits also apply.
     #[arg(long, value_parser = clap::value_parser!(u64).range(1..=1000))]
     goal_turns: Option<u64>,
     /// Maximum turns for a plan execution [default: 20]; session limits also apply.
@@ -225,7 +225,7 @@ enum Cmd {
     /// Show what a coding agent could send to the cloud from this repository,
     /// and what Declass keeps local instead. Offline; no models needed.
     Exposure(exposure::Args),
-    /// Run a task.
+    /// Run one task to its end without a conversation (for scripts); `declass` alone opens a session.
     Run {
         /// The task, as text.
         objective: Option<String>,
@@ -267,6 +267,7 @@ enum Cmd {
     },
     /// Continue an interrupted run.
     Resume {
+        /// The run's ID (`declass history` lists them).
         run_id: String,
         /// No progress on standard error (as for `declass run`).
         #[arg(long)]
@@ -284,7 +285,9 @@ enum Cmd {
     },
     /// Delete raw run data (handles, transcripts, vault) older than the retention period, or one run.
     Purge {
+        /// Delete this run's raw data, whatever its age.
         run_id: Option<String>,
+        /// Delete the raw data of every run, whatever its age.
         #[arg(long, conflicts_with = "run_id")]
         all: bool,
         /// List selected runs without deleting data.
@@ -296,6 +299,7 @@ enum Cmd {
         /// Fixture sizes in log lines (800 lines is about 16K tokens).
         #[arg(long, value_delimiter = ',', default_value = "40,300,800")]
         sizes: Vec<usize>,
+        /// Seed of the generated fixtures.
         #[arg(long, default_value_t = 1)]
         seed: u64,
         /// Write the full report (per-fixture outcomes) here as JSON.
@@ -364,9 +368,8 @@ enum AuditCmd {
 enum ConfigCmd {
     /// Show every setting with its value and origin.
     List,
-    Get {
-        key: String,
-    },
+    /// Show one setting's value.
+    Get { key: String },
     /// Set a value (TOML literal, e.g. 5.0, true, "text", ["a", "b"]).
     Set {
         key: String,
@@ -1773,7 +1776,7 @@ Add --no-privacy to confirm, or use --mode hybrid."
                     confirm,
                 } => {
                     let v = declass_config::parse_value(&value)
-                        .with_context(|| format!("{value} is not a TOML value"))?;
+                        .map_err(|_| anyhow::anyhow!(not_a_value(&key, &value, project)))?;
                     let (v, note) = declass_config::migrate(&key, v);
                     if let Some(note) = note {
                         eprintln!("note: {note}");
@@ -1943,6 +1946,25 @@ Add --no-privacy to confirm, or use --mode hybrid."
     }
 }
 
+/// Why `declass config set` refused `value`, with the command that sets it as
+/// text when it reads like text typed without its TOML quotes (`gpt-6` for
+/// `"gpt-6"`), the usual slip.
+fn not_a_value(key: &str, value: &str, project: bool) -> String {
+    let mut why =
+        format!("{value} is not a TOML value (for example 5.0, true, \"text\" or [\"a\", \"b\"])");
+    let plain = !value.trim().is_empty()
+        && !value
+            .chars()
+            .any(|c| c.is_control() || matches!(c, '"' | '\'' | '\\' | '[' | ']' | '{' | '}'));
+    if plain {
+        why.push_str(&format!(
+            "; text needs its quotes: declass config set {}{key} '\"{value}\"'",
+            if project { "--project " } else { "" }
+        ));
+    }
+    why
+}
+
 #[cfg(test)]
 mod acceptance_cli_tests {
     use super::*;
@@ -1975,6 +1997,23 @@ mod acceptance_cli_tests {
                 .command,
             Some(Cmd::History(_))
         ));
+    }
+
+    #[test]
+    fn a_config_value_typed_without_its_quotes_says_how_to_quote_it() {
+        let why = not_a_value("frontier.model", "gpt-6", false);
+        assert!(
+            why.contains("text needs its quotes: declass config set frontier.model '\"gpt-6\"'"),
+            "{why}"
+        );
+        let why = not_a_value("git.author", "Ada Lovelace <ada@example.com>", true);
+        assert!(
+            why.contains("--project git.author '\"Ada Lovelace <ada@example.com>\"'"),
+            "{why}"
+        );
+        // Not text: no guess.
+        assert!(!not_a_value("sensitivity.globs", "[a, b]", false).contains("needs its quotes"));
+        assert!(!not_a_value("frontier.model", "it's", false).contains("needs its quotes"));
     }
 
     #[test]
