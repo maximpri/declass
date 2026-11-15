@@ -30,25 +30,53 @@ fn ignorable(c: char) -> bool {
         | 0xE0000..=0xE0FFF)
 }
 
-/// Whether `c` is a decimal digit of any script (`\p{Nd}`).
-fn decimal(c: char) -> bool {
-    static ND: std::sync::LazyLock<regex::Regex> =
-        std::sync::LazyLock::new(|| regex::Regex::new(r"^\p{Nd}$").expect("static regex"));
-    ND.is_match(c.encode_utf8(&mut [0; 4]))
+/// The code point ranges of the Unicode class `class` (`\p{Nd}`), in order.
+fn ranges(class: &str) -> Vec<(u32, u32)> {
+    use regex_syntax::hir::{Class, HirKind};
+    match regex_syntax::Parser::new()
+        .parse(class)
+        .map(|h| h.into_kind())
+    {
+        Ok(HirKind::Class(Class::Unicode(c))) => c
+            .ranges()
+            .iter()
+            .map(|r| (u32::from(r.start()), u32::from(r.end())))
+            .collect(),
+        _ => Vec::new(),
+    }
 }
 
-/// The ASCII digit of a decimal digit of another script (`٤`, `४`), else
-/// `c`. Unicode encodes each script's digits zero to nine in a row, and
-/// runs of digits are whole such rows.
+/// Whether `c` is in `ranges` (in order, not overlapping).
+fn in_ranges(ranges: &[(u32, u32)], c: char) -> bool {
+    let n = u32::from(c);
+    let i = ranges.partition_point(|&(start, _)| start <= n);
+    i > 0 && n <= ranges[i - 1].1
+}
+
+/// Decimal digits (`\p{Nd}`). Unicode encodes each script's digits zero to
+/// nine in a row; adjacent rows are one range here.
+static DIGITS: std::sync::LazyLock<Vec<(u32, u32)>> =
+    std::sync::LazyLock::new(|| ranges(r"\p{Nd}"));
+/// Combining marks (`\p{M}`).
+static MARKS: std::sync::LazyLock<Vec<(u32, u32)>> = std::sync::LazyLock::new(|| ranges(r"\p{M}"));
+
+/// The value of `c` when it is a decimal digit of a script other than ASCII
+/// (`٤`, `४`).
+fn other_digit(c: char) -> Option<u8> {
+    if c.is_ascii() || !c.is_numeric() {
+        return None;
+    }
+    let n = u32::from(c);
+    let i = DIGITS
+        .partition_point(|&(start, _)| start <= n)
+        .checked_sub(1)?;
+    let (start, end) = DIGITS[i];
+    (n <= end).then(|| ((n - start) % 10) as u8)
+}
+
+/// The ASCII digit of a decimal digit of another script, else `c`.
 fn ascii_digit(c: char) -> char {
-    if c.is_ascii() || !c.is_numeric() || !decimal(c) {
-        return c;
-    }
-    let mut first = c;
-    while let Some(p) = char::from_u32(first as u32 - 1).filter(|p| decimal(*p)) {
-        first = p;
-    }
-    char::from(b'0' + ((c as u32 - first as u32) % 10) as u8)
+    other_digit(c).map_or(c, |d| char::from(b'0' + d))
 }
 
 /// `text` in Unicode normalization form C: a letter and the combining
@@ -72,12 +100,58 @@ pub fn nfc(text: &str) -> std::borrow::Cow<'_, str> {
 /// folded where that reveals a value, and otherwise keep their characters.
 /// Letters that only look alike (Cyrillic `а` for Latin `a`) are not folded.
 pub fn fold(text: &str) -> std::borrow::Cow<'_, str> {
+    use std::borrow::Cow;
     if text.is_ascii() {
-        return std::borrow::Cow::Borrowed(text);
+        return Cow::Borrowed(text);
     }
-    let visible: String = text.chars().filter(|c| !ignorable(*c)).collect();
-    let folded = icu_normalizer::ComposingNormalizerBorrowed::new_nfkc().normalize(&visible);
-    std::borrow::Cow::Owned(folded.chars().map(ascii_digit).collect())
+    let (mut hidden, mut digits) = (false, false);
+    for c in text.chars().filter(|c| !c.is_ascii()) {
+        hidden |= ignorable(c);
+        digits |= other_digit(c).is_some();
+    }
+    let nfkc = icu_normalizer::ComposingNormalizerBorrowed::new_nfkc();
+    // Most text is in form KC, with nothing drawn as nothing and no other
+    // script's digit in it: it is read as it is, nothing allocated.
+    if !hidden && !digits && nfkc.is_normalized(text) {
+        return Cow::Borrowed(text);
+    }
+    let visible: Cow<'_, str> = match hidden {
+        true => Cow::Owned(text.chars().filter(|c| !ignorable(*c)).collect()),
+        false => Cow::Borrowed(text),
+    };
+    let folded = nfkc.normalize(&visible);
+    Cow::Owned(folded.chars().map(ascii_digit).collect())
+}
+
+/// [`fold`] of `text`, with where each piece of the folded text came from:
+/// the folded text, and for each piece of `text` (a character with the
+/// marks, Hangul vowels and finals and characters drawn as nothing after
+/// it), the offsets where it starts in the folded text and in `text`, in
+/// order, closed by both texts' ends. `None` when folding piece by piece
+/// reads `text` otherwise than folding it whole.
+pub fn fold_mapped(text: &str) -> Option<(String, Vec<(usize, usize)>)> {
+    let joins = |c: char| {
+        ignorable(c)
+            || in_ranges(&MARKS, c)
+            || matches!(u32::from(c), 0x1160..=0x11FF | 0xD7B0..=0xD7FF)
+    };
+    let mut out = String::with_capacity(text.len());
+    let mut map = Vec::new();
+    let mut chars = text.char_indices().peekable();
+    while let Some((at, _)) = chars.next() {
+        let mut end = text.len();
+        while let Some(&(next, c)) = chars.peek() {
+            if !joins(c) {
+                end = next;
+                break;
+            }
+            chars.next();
+        }
+        map.push((out.len(), at));
+        out.push_str(&fold(&text[at..end]));
+    }
+    map.push((out.len(), text.len()));
+    (out == *fold(text)).then_some((out, map))
 }
 
 /// Characters that end a spaced-out run (punctuation between list items).
@@ -541,13 +615,16 @@ mod tests {
 
     #[test]
     fn every_decimal_digit_folds_to_its_ascii_digit() {
-        // Unicode's decimal digits come in rows of zero to nine.
+        // Unicode's decimal digits come in rows of zero to nine; the table
+        // read from `\p{Nd}` holds every one of them and nothing else.
+        let nd = regex::Regex::new(r"^\p{Nd}$").unwrap();
         for c in (0..=0x10FFFFu32).filter_map(char::from_u32) {
-            if !c.is_ascii() && decimal(c) {
-                let d = ascii_digit(c);
-                assert!(d.is_ascii_digit(), "{c:?}");
-                let zero = char::from_u32(c as u32 - d.to_digit(10).unwrap()).unwrap();
-                assert!(decimal(zero) && ascii_digit(zero) == '0', "{c:?}");
+            let decimal = nd.is_match(c.encode_utf8(&mut [0; 4]));
+            assert_eq!(other_digit(c).is_some(), decimal && !c.is_ascii(), "{c:?}");
+            if let Some(d) = other_digit(c) {
+                assert_eq!(ascii_digit(c), char::from(b'0' + d), "{c:?}");
+                let zero = char::from_u32(c as u32 - u32::from(d)).unwrap();
+                assert_eq!(other_digit(zero), Some(0), "{c:?}");
             }
         }
     }

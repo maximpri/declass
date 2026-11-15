@@ -324,17 +324,65 @@ impl Vault {
 
     /// [`Self::tokenize`], and when the result still holds a value for its
     /// reader (one a character drawn as nothing hides, or written in another
-    /// form: see [`crate::reencoded::fold`]), its folded form tokenized
-    /// instead. The final outbound check reads every text folded, so text
-    /// this returns passes it.
+    /// form: see [`crate::reencoded::fold`]), each such value replaced where
+    /// the characters it is read from stand, the rest of the text keeping
+    /// its characters (`…` stays `…`, so the frontier's later anchors still
+    /// match it). The final outbound check reads every text folded, so text
+    /// this returns passes it: if replacing in place would not do, the text
+    /// is returned folded, with its values replaced.
     pub fn tokenize_folded(&self, text: &str) -> (String, usize) {
         let (out, n) = self.tokenize(text);
         let folded = crate::reencoded::fold(&out);
-        if *folded != *out && self.disclosed_in(&folded).is_some() {
-            let (again, m) = self.tokenize(&folded);
+        if *folded == *out || self.disclosed_in(&folded).is_none() {
+            return (out, n);
+        }
+        if let Some((again, m)) = self.tokenize_in_place(&out)
+            && self.disclosed_in(&crate::reencoded::fold(&again)).is_none()
+        {
             return (again, n + m.max(1));
         }
-        (out, n)
+        let (again, m) = self.tokenize(&folded);
+        (again, n + m.max(1))
+    }
+
+    /// `text` with each value its folded form holds replaced by its token
+    /// where the characters it is folded from stand, and how many were.
+    /// `None` when the folded text cannot be traced back to `text`
+    /// ([`crate::reencoded::fold_mapped`]).
+    fn tokenize_in_place(&self, text: &str) -> Option<(String, usize)> {
+        let (folded, map) = crate::reencoded::fold_mapped(text)?;
+        let m = self.matcher();
+        let ac = m.automaton.as_ref()?;
+        // Byte ranges of `text`, each with the tokens of the values found
+        // in what it folds to (a piece may hold the end of one and the start
+        // of the next).
+        let mut spans: Vec<(usize, usize, Vec<&str>)> = Vec::new();
+        let mut count = 0;
+        for hit in ac.find_iter(folded.as_str()) {
+            let Some(token) = &m.replacement[hit.pattern().as_usize()] else {
+                continue;
+            };
+            count += 1;
+            let piece = |at: usize| map.partition_point(|&(f, _)| f <= at) - 1;
+            let (first, last) = (piece(hit.start()), piece(hit.end() - 1));
+            let (start, end) = (map[first].1, map[last + 1].1);
+            match spans.last_mut() {
+                Some(prev) if start < prev.1 => {
+                    prev.1 = prev.1.max(end);
+                    prev.2.push(token);
+                }
+                _ => spans.push((start, end, vec![token])),
+            }
+        }
+        let mut out = String::with_capacity(text.len());
+        let mut last = 0;
+        for (start, end, tokens) in spans {
+            out.push_str(&text[last..start]);
+            out.extend(tokens);
+            last = end;
+        }
+        out.push_str(&text[last..]);
+        Some((out, count))
     }
 
     /// The value behind `token`, if it exists.
@@ -728,6 +776,32 @@ mod tests {
         assert!(v.disclosed_in("dear José García").is_some());
         // Restoring a token gives the value as written, never a folded form.
         assert_eq!(v.detokenize(&name).0, "Jose\u{301} Garci\u{301}a");
+        // A value hidden in other text is replaced where its characters
+        // stand; the rest keeps its own (`…`, `²`, full-width letters), so
+        // an anchor the frontier takes from it still matches the file.
+        let text = "x² … quar\u{200c}tz-otter ｆｕｌｌ, Ｊｏｓé Ｇａｒｃíａ ٤٥٣٩٨٨.";
+        let (out, n) = v.tokenize_folded(text);
+        assert_eq!(out, format!("x² … {pw} ｆｕｌｌ, {name} {digits}."));
+        assert_eq!(n, 3);
+        assert!(v.disclosed_in(&crate::reencoded::fold(&out)).is_none());
+        // Text that folds to itself is returned as it is.
+        assert_eq!(v.tokenize_folded("x² …").0, "x² …");
+    }
+
+    #[test]
+    fn folding_reads_every_script_s_digits_and_maps_back_to_the_text() {
+        assert_eq!(crate::reencoded::fold("٤٥ ४५ １２ ①"), "45 45 12 1");
+        assert!(matches!(
+            crate::reencoded::fold("ünïcode, 中文。"),
+            std::borrow::Cow::Borrowed(_)
+        ));
+        let (folded, map) = crate::reencoded::fold_mapped("ａ\u{200b}b\u{301}ﬁ").unwrap();
+        assert_eq!(folded, "ab\u{301}fi");
+        assert_eq!(map.first(), Some(&(0, 0)));
+        assert_eq!(
+            map.last(),
+            Some(&(folded.len(), "ａ\u{200b}b\u{301}ﬁ".len()))
+        );
     }
 
     #[test]

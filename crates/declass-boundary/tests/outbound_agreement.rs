@@ -10,17 +10,23 @@
 //! as a JSON document inside a string), the name of a call to an undeclared
 //! tool, replayed reasoning blocks, and masking stubs that quote a call's
 //! command. The values are known to the vault from a `.env` (any characters,
-//! and words of the wire format itself: roles, block types, schema keywords,
-//! the model's name), or found by the detectors only in the filter's own pass
-//! (provider-shaped keys, emails, test-suite paths the entropy detector takes
-//! for secrets), anywhere before or after the item they are found in.
+//! characters of other forms the check reads folded (a zero-width joiner,
+//! full-width letters, a ligature, Persian digits), and words of the wire
+//! format itself: roles, block types, schema keywords, the model's name),
+//! or found by the detectors only in the filter's own pass (provider-shaped
+//! keys, emails, test-suite paths the entropy detector takes for secrets),
+//! anywhere before or after the item they are found in. Every other value
+//! placed has a zero-width space inside it, which its reader does not see.
 //!
 //! Also asserted: the check still refuses a value the vault knows in content
 //! (it stays fail-closed), and the stricter pass the gate falls back on
 //! (`withhold`) alone clears any request of the values the vault knows.
 //!
-//! Found DECLASS-2026-019 (a value found in a later item stayed in earlier ones)
-//! and DECLASS-2026-020 (a value spelling the wire format blocked every request).
+//! Found DECLASS-2026-019 (a value found in a later item stayed in earlier ones),
+//! DECLASS-2026-020 (a value spelling the wire format blocked every request)
+//! and DECLASS-2026-NEW-unicode-forms (a value hidden by a zero-width space
+//! in an argument's key passed the filter, which read keys as written, and
+//! the check, which reads them folded, withheld the call's arguments).
 
 use declass_boundary::engine::Engine;
 use declass_boundary::gate::{Framing, OutboundCheck, framing_request};
@@ -52,11 +58,15 @@ fn config() -> ProptestConfig {
     }
 }
 
-/// `.env` values: any characters a value may hold, or a word the wire format
-/// itself uses.
+/// `.env` values: any characters a value may hold, characters the check reads
+/// folded, or a word the wire format itself uses.
 fn env_value() -> impl Strategy<Value = String> {
     prop_oneof![
         3 => "[A-Za-z0-9][A-Za-z0-9!@%+/.^*\\\\\"-]{6,14}[A-Za-z0-9]",
+        2 => "[A-Za-z0-9]{3}\u{200c}[A-Za-z0-9]{6,8}",
+        2 => "\u{ff50}\u{ff41}ss[0-9]{6}",
+        2 => "\u{fb01}ne[0-9]{6}[a-z]{2}",
+        1 => "[\u{0627}-\u{064a}]{7,9}[\u{06f0}-\u{06f9}]{4}",
         1 => proptest::sample::select(vec![
             "required", "assistant", "function", "properties", "description",
             "parameters", "content", "tool_calls", "arguments", "function_call",
@@ -113,6 +123,14 @@ const SLOTS: [Slot; 13] = [
     Slot::Replay,
     Slot::Stub,
 ];
+
+/// `v` with a zero-width space after its third character: the same value to
+/// its reader.
+fn hidden(v: &str) -> String {
+    let mut c: Vec<char> = v.chars().collect();
+    c.insert(3.min(c.len()), '\u{200b}');
+    c.into_iter().collect()
+}
 
 /// Every character as a `\u` escape (JSON text that decodes to `s`).
 fn escaped(s: &str) -> String {
@@ -304,7 +322,10 @@ proptest! {
         let mut placed: Vec<(Slot, usize, String)> = env_places
             .iter()
             .enumerate()
-            .map(|(i, &(s, at))| (SLOTS[s], at, env[i % env.len()].clone()))
+            .map(|(i, &(s, at))| {
+                let v = &env[i % env.len()];
+                (SLOTS[s], at, if i % 2 == 1 { hidden(v) } else { v.clone() })
+            })
             .collect();
         if !found.is_empty() {
             for (i, &((seen, seen_at), (s, at))) in found_places.iter().enumerate() {

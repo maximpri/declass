@@ -119,25 +119,28 @@ impl Engine {
     pub(super) fn third_party_refusal(&self, destination: &str, texts: &Texts) -> Option<String> {
         let st = self.lock();
         let grams = numbers(&st.vault);
-        let forms = |t: &String| {
-            let folded = crate::reencoded::fold(t);
-            let other = (*folded != **t).then(|| folded.into_owned());
-            std::iter::once(t.clone()).chain(other)
-        };
         let found = texts
             .parts
             .iter()
-            .flat_map(forms)
+            .flat_map(|t| forms(t))
             .find_map(|part| found_in(&st, &grams, &part))
             .or_else(|| {
                 texts
                     .joined
                     .iter()
-                    .flat_map(forms)
+                    .flat_map(|t| forms(t))
                     .find_map(|j| found_across(&st, &j))
             })?;
         Some(found.reason(&st.vault, destination))
     }
+}
+
+/// `text` as written and, when it differs, as its reader takes it
+/// ([`crate::reencoded::fold`]).
+fn forms(text: &str) -> impl Iterator<Item = std::borrow::Cow<'_, str>> {
+    let folded = crate::reencoded::fold(text);
+    let other = (*folded != *text).then(|| folded.into_owned());
+    std::iter::once(std::borrow::Cow::Borrowed(text)).chain(other.map(std::borrow::Cow::Owned))
 }
 
 /// Consecutive digits of a withheld number that identify it inside a longer

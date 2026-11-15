@@ -504,8 +504,10 @@ The gate applies filters to the request, then checks, then appends to the audit 
 - **Copied-span index:** hashes of 8-token windows of every sensitive text; ≥3 consecutive
   matching windows (~24 tokens) not also present in public files are replaced.
 - **Final check:** no vault value (≥6 characters, raw or JSON-escaped) may appear anywhere in the
-  serialized body, every text read folded (`reencoded::fold`); the filter folds a text where that
-  reveals a value (`Vault::tokenize_folded`), so the two agree. A hit blocks the send (`BlockedSend` event) and the run fails; nothing is sent.
+  serialized body, every text read folded (`reencoded::fold`); the filter (argument keys too)
+  replaces a value folding reveals where the characters it is read from stand
+  (`Vault::tokenize_folded`, `reencoded::fold_mapped`), so the two agree and the rest of the text
+  keeps its characters. A hit blocks the send (`BlockedSend` event) and the run fails; nothing is sent.
 - **Audit record:** `{seq, prev, unix_ms, endpoint, model, request_sha256, request (after
   substitution), interventions[]}`; `declass audit verify` recomputes the chain.
 - **Audit events** share the chain: run start (boundary on/off) and end, local-endpoint trust,

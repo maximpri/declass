@@ -122,7 +122,8 @@ fn scrub_value(vault: &Vault, v: &mut Value, depth: usize) -> usize {
         Value::Object(m) => {
             let mut n = 0;
             for (k, mut x) in std::mem::take(m) {
-                let (k, replaced) = vault.tokenize(&k);
+                // Read as the check reads it: folded.
+                let (k, replaced) = vault.tokenize_folded(&k);
                 n += replaced + scrub_value(vault, &mut x, depth);
                 m.insert(k, x);
             }
