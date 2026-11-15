@@ -476,12 +476,13 @@ pub trait Presenter: Send + Sync {
     fn redact_known(&self, text: &str) -> String {
         text.to_owned()
     }
-    /// The workspace path `path` as a security event records it: each
-    /// component holding a known value long enough for the outbound check
-    /// to refuse (a file a command named after the data) with its values as
-    /// placeholders, every other component as written, so the operator can
-    /// still find the file (`declass triggers` lists these paths). The
-    /// default (pass-through) changes nothing.
+    /// The workspace path `path` as a security event records it: every
+    /// known value in it (a file a command named after the data) as its
+    /// placeholder, as the frontier is shown it (4 bytes or more), in any
+    /// letter case, inside a component or across components; the rest of
+    /// the path as written, so the operator can still find the file
+    /// (`declass triggers` lists these paths). The default (pass-through)
+    /// changes nothing.
     fn redact_known_path(&self, path: &str) -> String {
         path.to_owned()
     }

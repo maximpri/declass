@@ -517,7 +517,9 @@ The gate applies filters to the request, then checks, then appends to the audit 
   only, never content; a command is recorded through `Presenter::redact_known` (every known value
   as its placeholder), and a path the frontier wrote or a command created (file writes, trigger
   files, a sensitive command's derived files, commits, protected edits, approvals) through
-  `Presenter::redact_known_path`, which replaces values only in components holding one of 6+ bytes.
+  `Presenter::redact_known_path`, which replaces every known value of 4+ bytes, in any letter case,
+  inside a component or across components, and keeps the rest of the path (also language-server
+  calls, content classified as data, local review findings and suspected injections).
 - **Images in the body:** checks and the audit record see each image's data replaced by a digest
   marker (`[image sha256:…, N bytes]`; `declass_provider::image::redact`), and `request_sha256` is of
   that form; the provider sends the real body. Every check also gets the digests

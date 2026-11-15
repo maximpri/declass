@@ -385,6 +385,26 @@ impl Vault {
         Some((out, count))
     }
 
+    /// [`Self::tokenize`] with ASCII letter case ignored (`JDOE-9912X` is
+    /// `jdoe-9912x`): for a name, such as a file's path, which a value may
+    /// be written into in any case.
+    pub fn tokenize_any_case(&self, text: &str) -> (String, usize) {
+        let s = self.spelled();
+        let Some(ac) = &s.folded else {
+            return (text.to_owned(), 0);
+        };
+        let mut out = String::with_capacity(text.len());
+        let (mut last, mut count) = (0, 0);
+        for hit in ac.find_iter(text) {
+            out.push_str(&text[last..hit.start()]);
+            out.push_str(&s.folded_tokens[hit.pattern().as_usize()]);
+            last = hit.end();
+            count += 1;
+        }
+        out.push_str(&text[last..]);
+        (out, count)
+    }
+
     /// The value behind `token`, if it exists.
     pub fn value_of(&self, token: &str) -> Option<(&str, &Entry)> {
         self.by_value

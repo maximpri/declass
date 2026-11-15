@@ -492,7 +492,7 @@ fn audit(
     ctx.record(AuditEvent::LanguageServer {
         language: language.to_owned(),
         op: op.to_owned(),
-        path: path.map(str::to_owned),
+        path: path.map(|p| ctx.presenter.redact_known_path(p)),
         outcome: outcome.to_owned(),
         shown: a.map_or(0, |a| a.shown),
         withheld: a.map_or(0, |a| a.withheld),

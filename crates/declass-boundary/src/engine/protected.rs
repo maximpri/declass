@@ -519,9 +519,10 @@ fail, the local model gets their output and one more attempt; the last version i
                 ) && matches!(f.severity.as_str(), "high" | "medium")
             };
             let refused = findings.iter().any(serious);
+            let logged = crate::view::Presenter::redact_known_path(self, &label);
             for f in &findings {
                 self.record(crate::audit::AuditEvent::LocalReviewFinding {
-                    path: label.clone(),
+                    path: logged.clone(),
                     line: f.line,
                     category: f.category.clone(),
                     severity: f.severity.clone(),

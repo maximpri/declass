@@ -2732,9 +2732,10 @@ impl Presenter for Engine {
         let found = Self::block_on(local.review_diff(&label, before, after, None))
             .map_err(|e| format!("local review: {}", safe_local_error(&e)));
         if let Ok(findings) = &found {
+            let logged = self.redact_known_path(&label);
             for f in findings {
                 self.record(AuditEvent::LocalReviewFinding {
-                    path: label.clone(),
+                    path: logged.clone(),
                     line: f.line,
                     category: f.category.clone(),
                     severity: f.severity.clone(),
@@ -2983,13 +2984,8 @@ is written or as a test fixture. At most {rows} records."
 
     fn redact_known_path(&self, path: &str) -> String {
         let st = self.lock();
-        path.split('/')
-            .map(|component| match st.vault.disclosed_in(component) {
-                Some(_) => st.vault.tokenize(component).0,
-                None => component.to_owned(),
-            })
-            .collect::<Vec<_>>()
-            .join("/")
+        let (path, _) = st.vault.tokenize_any_case(path);
+        st.vault.tokenize_folded(&path).0
     }
 
     fn note_authored(&self, text: &str) {
@@ -3453,21 +3449,32 @@ mod tests {
 
     #[test]
     fn a_path_is_logged_with_only_components_that_hold_a_value_replaced() {
-        // A short value that is also a common word must not make a path the
-        // operator is shown (`declass triggers`) one they cannot find.
+        // Every value the frontier is not shown is kept out of a logged path:
+        // a short one, one across components, one in another letter case;
+        // what holds none stays as written, so the operator (`declass
+        // triggers`) can find the file.
         let (_d, e) = engine();
         e.present(
             &file(".env"),
-            b"DB_USER=admin\nDB_PASSWORD=quartz-otter-5519\n",
+            b"DB_USER=admin\nDB_PASSWORD=quartz-otter-5519\nPIN=Xq7Zk\n\
+              TEAM=acme-corp/finance-2\nOWNER=jdoe-9912x\n",
         );
-        assert_eq!(
-            e.redact_known_path(".github/workflows/admin/release.yml"),
-            ".github/workflows/admin/release.yml"
-        );
-        assert_eq!(
-            e.redact_known_path("out/quartz-otter-5519 admin.txt"),
-            "out/⟨secret:DB_PASSWORD#1⟩ ⟨secret:DB_USER#1⟩.txt"
-        );
+        for (path, logged) in [
+            (
+                ".github/workflows/admin/release.yml",
+                ".github/workflows/⟨secret:DB_USER#1⟩/release.yml",
+            ),
+            (
+                "out/quartz-otter-5519 admin.txt",
+                "out/⟨secret:DB_PASSWORD#1⟩ ⟨secret:DB_USER#1⟩.txt",
+            ),
+            ("u/Xq7Zk.log", "u/⟨secret:PIN#1⟩.log"),
+            ("acme-corp/finance-2/x.csv", "⟨secret:TEAM#1⟩/x.csv"),
+            ("a/JDOE-9912X.md", "a/⟨secret:OWNER#1⟩.md"),
+            ("reports/q3/summary.md", "reports/q3/summary.md"),
+        ] {
+            assert_eq!(e.redact_known_path(path), logged, "{path}");
+        }
         // Commands keep every known value as a placeholder.
         assert_eq!(
             e.redact_known("psql -U admin"),

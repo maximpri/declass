@@ -210,7 +210,7 @@ impl Engine {
                 self.clean_public(&mut st, &why, source)
             };
             self.record(AuditEvent::InjectionSuspected {
-                source: source.to_owned(),
+                source: crate::view::Presenter::redact_known_path(self, source),
                 why: why.clone(),
             });
             return Some(format!(
@@ -325,7 +325,7 @@ learned from sensitive data"
                     cache.insert(digest, c.real_data);
                     if c.real_data {
                         self.record(AuditEvent::ContentSensitive {
-                            path: f.clone(),
+                            path: crate::view::Presenter::redact_known_path(self, f),
                             data_kind: c.kind.chars().take(80).collect(),
                         });
                     }
