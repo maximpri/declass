@@ -5,6 +5,7 @@
 
 use crate::app::{App, Tab};
 use crate::ui::origin_name;
+use declass_boundary::policy::RuleKind;
 use declass_config::{Direction, Kind, REGISTRY, Scope, Setting};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -196,18 +197,35 @@ fn draw_detail(f: &mut Frame, app: &App, area: Rect) {
 pub(crate) fn tester_lines(app: &App, path: &str) -> Vec<String> {
     let policy = app.policy();
     let p = Path::new(path);
-    let matching = |keys: &[&str]| -> String {
-        let hits: Vec<String> = keys
-            .iter()
-            .flat_map(|k| app.cfg.list(k).unwrap_or_default())
-            .filter(|g| declass_boundary::policy::glob_match(g, path))
-            .map(|g| format!("\"{g}\""))
-            .collect();
+    // The rules that matched, as runtime matches them (names in Unicode
+    // normalization form C); secret sinks match as written.
+    let rules = policy.rules_for(p);
+    let listed = |hits: Vec<&str>| -> String {
         if hits.is_empty() {
             String::new()
         } else {
+            let hits: Vec<String> = hits.iter().map(|g| format!("\"{g}\"")).collect();
             format!(" ({})", hits.join(", "))
         }
+    };
+    let matching = |kinds: &[RuleKind]| {
+        listed(
+            rules
+                .iter()
+                .filter(|r| kinds.contains(&r.kind))
+                .map(|r| r.glob)
+                .collect(),
+        )
+    };
+    let sinks = || {
+        listed(
+            policy
+                .secret_sinks
+                .iter()
+                .filter(|g| declass_boundary::policy::glob_match(g, path))
+                .map(String::as_str)
+                .collect(),
+        )
     };
     let yes = |b: bool| if b { "yes" } else { "no" };
     vec![
@@ -215,13 +233,9 @@ pub(crate) fn tester_lines(app: &App, path: &str) -> Vec<String> {
         format!(
             "sensitive: {}{}",
             yes(policy.is_sensitive_path(p)),
-            matching(&["sensitivity.globs", "sensitivity.protected_paths"])
+            matching(&[RuleKind::Sensitive, RuleKind::Protected])
         ),
-        format!(
-            "secret sink: {}{}",
-            yes(policy.is_secret_sink(p)),
-            matching(&["sensitivity.secret_sinks"])
-        ),
+        format!("secret sink: {}{}", yes(policy.is_secret_sink(p)), sinks()),
         format!(
             "secret-bearing name: {}",
             yes(declass_boundary::policy::is_secret_bearing(p))
@@ -229,7 +243,7 @@ pub(crate) fn tester_lines(app: &App, path: &str) -> Vec<String> {
         format!(
             "IP level: {}{}",
             crate::ip::level_name(policy.ip_level(p)),
-            matching(&["ip.sealed", "ip.interface_only"])
+            matching(&[RuleKind::Sealed, RuleKind::InterfaceOnly])
         ),
     ]
 }

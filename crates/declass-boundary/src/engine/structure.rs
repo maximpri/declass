@@ -361,17 +361,16 @@ impl Engine {
             lines.peek().is_some()
                 && lines.all(|l| st.structure.sample_lines.contains(&line_hash(l)))
         };
-        let p = path.to_string_lossy();
-        let glob = self
-            .policy
-            .sensitive_globs
-            .iter()
-            .any(|g| crate::policy::glob_match(g, &p))
-            && !self
-                .policy
-                .protected_paths
-                .iter()
-                .any(|g| crate::policy::glob_match(g, &p));
+        // Sensitive by a sensitivity glob only, as runtime matches rules
+        // (names in normalization form C): a protected path, in any
+        // spelling, never becomes a fixture.
+        let glob = matches!(
+            self.policy.rule_for(path),
+            Some(crate::policy::PathRule {
+                kind: crate::policy::RuleKind::Sensitive,
+                ..
+            })
+        );
         let derived = self
             .derived
             .lock()
@@ -1182,5 +1181,43 @@ mod tests {
             "{task}"
         );
         assert_no_value("the task", &task);
+    }
+
+    #[test]
+    fn a_protected_path_in_either_unicode_form_is_never_a_fixture() {
+        // A protected path stored decomposed (NFD) under a rule written
+        // composed (NFC) is sensitive at runtime; a sample written there
+        // made it a fixture, readable by commands, since fixtures checked
+        // the rules as written.
+        let mut p = views(None);
+        p.protected_paths.push("tests/*/donn\u{e9}es/**".into());
+        let (_d, ws, e) = primed(p);
+        let _ = read(&e, "data/customers.csv", &csv());
+        let sample = e
+            .call_tool(
+                "synthetic_sample",
+                serde_json::json!({"handle": "h1", "rows": 2})
+                    .as_object()
+                    .unwrap(),
+            )
+            .unwrap()
+            .unwrap();
+        let fixture: String = sample.lines().skip(1).map(|l| format!("{l}\n")).collect();
+        for dir in ["tests/a/donn\u{e9}es", "tests/b/donne\u{301}es"] {
+            let path_s = format!("{dir}/customers.csv");
+            let path = Path::new(&path_s);
+            assert!(e.path_sensitive(path), "{dir:?}: protected by the NFC rule");
+            let written = e.resolve_for_write(path, &fixture).unwrap();
+            std::fs::create_dir_all(ws.join(dir)).unwrap();
+            std::fs::write(ws.join(path), &written).unwrap();
+            assert!(
+                e.path_sensitive(path),
+                "{dir:?}: protected paths are never fixtures"
+            );
+            assert!(
+                e.hidden_from_commands(&ws).contains(&ws.join(path)),
+                "{dir:?}: denied to commands"
+            );
+        }
     }
 }

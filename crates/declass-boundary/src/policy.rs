@@ -152,25 +152,94 @@ fn protects(pattern: &str, path: &str) -> bool {
     glob_match(&nfc(pattern), path)
 }
 
+/// What a path rule makes the paths it matches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuleKind {
+    /// `ip.sealed`: the file's existence only.
+    Sealed,
+    /// `ip.interface_only`: its interface, bodies withheld.
+    InterfaceOnly,
+    /// `sensitivity.protected_paths`: sensitive, never a fixture.
+    Protected,
+    /// `sensitivity.globs`: sensitive (environment templates excepted).
+    Sensitive,
+}
+
+/// A rule of the policy that protects a path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PathRule<'a> {
+    /// The setting it is written in (`ip.sealed`, `sensitivity.globs`, ...).
+    pub setting: &'static str,
+    /// The rule as written.
+    pub glob: &'a str,
+    pub kind: RuleKind,
+}
+
 impl Policy {
-    pub fn is_sensitive_path(&self, path: &Path) -> bool {
+    /// Every rule that protects `path`, as runtime matches them (names in
+    /// normalization form C, [`protects`]), sealed first, then
+    /// interface-only, protected paths and sensitivity globs (which leave
+    /// environment templates alone). Runtime's answers
+    /// ([`Policy::is_sensitive_path`], [`Policy::ip_level`]) and the reports'
+    /// (`declass privacy`, `declass exposure`, the settings' path tester)
+    /// all read rules here, so they cannot disagree about a path.
+    pub fn rules_for<'a>(&'a self, path: &Path) -> Vec<PathRule<'a>> {
         let p = path.to_string_lossy();
         let p = nfc(&p);
-        self.protected_paths.iter().any(|g| protects(g, &p))
-            || !is_env_template(path) && self.sensitive_globs.iter().any(|g| protects(g, &p))
+        let template = is_env_template(path);
+        [
+            ("ip.sealed", &self.sealed, RuleKind::Sealed),
+            (
+                "ip.interface_only",
+                &self.interface_only,
+                RuleKind::InterfaceOnly,
+            ),
+            (
+                "sensitivity.protected_paths",
+                &self.protected_paths,
+                RuleKind::Protected,
+            ),
+            (
+                "sensitivity.globs",
+                &self.sensitive_globs,
+                RuleKind::Sensitive,
+            ),
+        ]
+        .into_iter()
+        .filter(|(_, _, kind)| !(template && *kind == RuleKind::Sensitive))
+        .flat_map(|(setting, globs, kind)| {
+            globs
+                .iter()
+                .filter(|g| protects(g, &p))
+                .map(move |g| PathRule {
+                    setting,
+                    glob: g.as_str(),
+                    kind,
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect()
+    }
+
+    /// The first rule that protects `path` ([`Policy::rules_for`]), or
+    /// `None`: runtime's content checks decide.
+    pub fn rule_for<'a>(&'a self, path: &Path) -> Option<PathRule<'a>> {
+        self.rules_for(path).into_iter().next()
+    }
+
+    pub fn is_sensitive_path(&self, path: &Path) -> bool {
+        self.rules_for(path)
+            .iter()
+            .any(|r| matches!(r.kind, RuleKind::Protected | RuleKind::Sensitive))
     }
 
     /// The IP level of `path`; Sealed wins when both lists match.
     pub fn ip_level(&self, path: &Path) -> Option<IpLevel> {
-        let p = path.to_string_lossy();
-        let p = nfc(&p);
-        if self.sealed.iter().any(|g| protects(g, &p)) {
-            Some(IpLevel::Sealed)
-        } else if self.interface_only.iter().any(|g| protects(g, &p)) {
-            Some(IpLevel::InterfaceOnly)
-        } else {
-            None
-        }
+        self.rules_for(path).iter().find_map(|r| match r.kind {
+            RuleKind::Sealed => Some(IpLevel::Sealed),
+            RuleKind::InterfaceOnly => Some(IpLevel::InterfaceOnly),
+            _ => None,
+        })
     }
 
     /// Whether any path is protected by an IP level.
@@ -319,6 +388,47 @@ mod tests {
         // A rule that allows something matches only as written.
         assert!(!p.is_secret_sink(Path::new(&format!("{nfd}/.env"))));
         assert!(p.is_secret_sink(Path::new(&format!("{nfc}/.env"))));
+    }
+
+    #[test]
+    fn the_rule_a_path_is_reported_under_is_the_one_runtime_applies() {
+        // The reports read the first rule; runtime answers from all of
+        // them: for every path, in either form, the two agree.
+        let (nfc, nfd) = ("donn\u{e9}es", "donne\u{301}es");
+        let p = Policy {
+            protected_paths: vec![format!("{nfc}/**")],
+            sensitive_globs: vec![format!("{nfd}-raw/**"), ".env*".into()],
+            sealed: vec!["src/mod\u{e8}le.py".into()],
+            interface_only: vec!["src/**".into()],
+            ..Policy::default()
+        };
+        for (path, setting) in [
+            (
+                format!("{nfc}/clients.json"),
+                Some("sensitivity.protected_paths"),
+            ),
+            (
+                format!("{nfd}/clients.json"),
+                Some("sensitivity.protected_paths"),
+            ),
+            (format!("{nfc}-raw/x.txt"), Some("sensitivity.globs")),
+            (format!("{nfd}-raw/x.txt"), Some("sensitivity.globs")),
+            ("src/mode\u{300}le.py".to_owned(), Some("ip.sealed")),
+            ("src/mod\u{e8}le.py".to_owned(), Some("ip.sealed")),
+            ("src/lib.rs".to_owned(), Some("ip.interface_only")),
+            (".env.example".to_owned(), None),
+            (".env".to_owned(), Some("sensitivity.globs")),
+            ("README.md".to_owned(), None),
+        ] {
+            let path = Path::new(&path);
+            let rule = p.rule_for(path);
+            assert_eq!(rule.map(|r| r.setting), setting, "{path:?}");
+            assert_eq!(
+                rule.is_some(),
+                p.is_sensitive_path(path) || p.ip_level(path).is_some(),
+                "{path:?}"
+            );
+        }
     }
 
     #[test]

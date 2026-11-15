@@ -1525,6 +1525,43 @@ mod tests {
         assert_eq!(result["level"], "note");
     }
 
+    /// Rules match history as runtime matches paths, both names in Unicode
+    /// normalization form C: git stores `données/` composed, and a rule
+    /// written decomposed (as a name copied from a decomposed folder is)
+    /// names the same folder.
+    #[test]
+    fn history_under_a_rule_in_the_other_unicode_form_is_kept_local() {
+        let temp = tempfile::tempdir().unwrap();
+        let ws = temp.path().join("ws");
+        let dir = ws.join("donn\u{e9}es");
+        std::fs::create_dir_all(&dir).unwrap();
+        git(&ws, &["init", "-q"]);
+        std::fs::write(dir.join("app.py"), format!("API_KEY = \"{KEY}\"\n")).unwrap();
+        git(&ws, &["add", "-A"]);
+        git(&ws, &["commit", "-q", "-m", "one"]);
+        std::fs::write(dir.join("app.py"), "API_KEY = None\n").unwrap();
+        git(&ws, &["add", "-A"]);
+        git(&ws, &["commit", "-q", "-m", "two"]);
+        let r = collect(
+            &ws,
+            &config(
+                temp.path(),
+                "[sensitivity]\nprotected_paths = ['donne\u{301}es/**']\n",
+            ),
+            &Options {
+                fail_on: FailOn::Warning,
+                history: Some(history::Limits {
+                    blobs: 1000,
+                    bytes: 1 << 30,
+                }),
+            },
+        )
+        .unwrap();
+        let e = &r.history.as_ref().unwrap().exposed[0];
+        assert_eq!(e.level, Level::Note, "{}: {}", e.path, e.rule);
+        assert_eq!((r.failing, r.code()), (0, 0));
+    }
+
     #[test]
     fn history_counts_values_only_earlier_versions_hold() {
         const OLD: &str = concat!("ghp_", "Qz8vW3nL5kR2xT7mY4pB9cH6dJ1sF0aGeU2i");

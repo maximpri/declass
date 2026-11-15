@@ -30,7 +30,7 @@ No run, audit or vault is created.
 | Command network | Off, approved registry hosts or unrestricted, after applying the selected mode |
 | Web and MCP | Search origins, web-fetch host policy and remote tool-server origins; networked MCP is disabled in top clearance |
 | Exceptions | Settings that loosen the defaults, with their configuration origin; values are omitted |
-| File rules | Matching path rule or persistent classification for each inventoried file |
+| File rules | Matching path rule (matched as a run matches it, names in either Unicode form) or persistent classification for each inventoried file |
 
 Files can be sealed, limited to interfaces, classified as sensitive, or subject
 to runtime content checks. A file with no matching path rule is not a promise
@@ -76,8 +76,9 @@ preview lists, and runs Declass's pattern detectors for secrets and personal
 data (and your `sensitivity.custom_patterns`) over them. For each file with
 findings it reports how many values of each kind it found, where the first
 ones are, and what Declass does with the file in hybrid mode under the current
-path rules: read only by the local model, placeholders before any request,
-interface only or sealed. Files that path rules cover but where nothing was
+path rules, matched as a run matches them (a name stored decomposed and a rule
+written composed name one file): read only by the local model, placeholders
+before any request, interface only or sealed. Files that path rules cover but where nothing was
 detected are counted. Detectors turned off in your configuration are not run,
 and the report names them.
 

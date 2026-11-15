@@ -1111,7 +1111,9 @@ git; reset behaviour defined per entry).
   workspace root an open under another spelling is refused; writes are atomic with digest
   preconditions and rollback; `.git` and `.declass` are never writable by tools, in any spelling a
   file system folds to them (`declass_fs::is_reserved_name`). Rules that protect a path compare
-  names in Unicode normalization form C.
+  names in Unicode normalization form C, through one matcher (`Policy::rules_for`) that runtime
+  (`is_sensitive_path`, `ip_level`), fixtures and the reports (`declass privacy`, `declass
+  exposure` with its history, the settings' path tester) all read.
 - **Commands:** Seatbelt (macOS) or bwrap (Linux) with absolute binary paths; workspace-write with
   `.git`/`.declass` unwritable; `.declass` (the vault, handles, transcripts, audit log) unreadable to
   every command by the sandbox itself, `.git` (committed copies) to ordinary commands and checks,

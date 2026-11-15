@@ -3,7 +3,7 @@
 //! neither contents nor model clients are opened.
 use crate::{Mode, policy};
 use anyhow::Result;
-use declass_boundary::policy::{Policy, glob_match, is_env_template};
+use declass_boundary::policy::{Policy, RuleKind, is_env_template};
 use declass_config::Config;
 use declass_provider::{Role, endpoint::ApprovedEndpoint};
 use rustix::fs::{AtFlags, Dir, FileType, Mode as FsMode, OFlags};
@@ -208,23 +208,16 @@ fn classify(path: &Path, p: &Policy, mode: Mode) -> (&'static str, String) {
     if mode == Mode::TopClearance {
         return ("local-only", "top-clearance mode".into());
     }
-    let name = path.to_string_lossy();
-    for (setting, globs, disposition) in [
-        ("ip.sealed", &p.sealed, "sealed"),
-        ("ip.interface_only", &p.interface_only, "interface-only"),
-        (
-            "sensitivity.protected_paths",
-            &p.protected_paths,
-            "sensitive",
-        ),
-        ("sensitivity.globs", &p.sensitive_globs, "sensitive"),
-    ] {
-        if setting == "sensitivity.globs" && is_env_template(path) {
-            continue;
-        }
-        if let Some(glob) = globs.iter().find(|g| glob_match(g, &name)) {
-            return (disposition, format!("{setting}: {glob}"));
-        }
+    // The rule runtime applies, matched as runtime matches it (names in
+    // Unicode normalization form C): a report never classifies a path
+    // otherwise than a run does.
+    if let Some(rule) = p.rule_for(path) {
+        let disposition = match rule.kind {
+            RuleKind::Sealed => "sealed",
+            RuleKind::InterfaceOnly => "interface-only",
+            RuleKind::Protected | RuleKind::Sensitive => "sensitive",
+        };
+        return (disposition, format!("{}: {}", rule.setting, rule.glob));
     }
     (
         "content-checks",
@@ -897,6 +890,40 @@ mod tests {
             "sensitive"
         );
     }
+    #[test]
+    fn the_report_classifies_paths_as_runtime_does() {
+        // A folder stored decomposed (macOS keeps a name as the program that
+        // made it wrote it) under a rule written composed, and the reverse:
+        // runtime matches rules with both names in normalization form C, so
+        // the report must too, or it calls a file the run keeps local one
+        // the cloud model reads.
+        let (nfc, nfd) = ("donn\u{e9}es", "donne\u{301}es");
+        let p = Policy {
+            protected_paths: vec![format!("{nfc}/**")],
+            sensitive_globs: vec![format!("{nfd}-raw/**")],
+            sealed: vec!["src/mod\u{e8}le.py".into()],
+            ..Policy::default()
+        };
+        for path in [
+            format!("{nfc}/clients.json"),
+            format!("{nfd}/clients.json"),
+            format!("{nfc}-raw/x.txt"),
+            format!("{nfd}-raw/x.txt"),
+            "src/mode\u{300}le.py".to_owned(),
+            "src/mod\u{e8}le.py".to_owned(),
+            "src/other.py".to_owned(),
+        ] {
+            let path = Path::new(&path);
+            let runtime_keeps = p.is_sensitive_path(path) || p.ip_level(path).is_some();
+            let (disposition, rule) = classify(path, &p, Mode::Hybrid);
+            assert_eq!(
+                disposition != "content-checks",
+                runtime_keeps,
+                "{path:?}: {disposition} ({rule})"
+            );
+        }
+    }
+
     #[test]
     fn symlink_root_is_refused_and_terminal_names_are_escaped() {
         let temp = tempfile::tempdir().unwrap();
