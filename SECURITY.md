@@ -652,7 +652,7 @@ The boundary's own code is also tested against generated input, in the gate on e
   message, with a stand-in that transcribes them (`Options::images`; no image data may reach the
   frontier either). A gap a scenario finds is closed at the class level and the scenario stays as
   a regression test; a scenario for a gap with no defence yet is marked `#[ignore]` with the gap
-  as its reason (none is, at present). To add one: build a `Fixture` (name, task,
+  as its reason (one is, at present: `edit_file` anchors in a sensitive file, see Known limits). To add one: build a `Fixture` (name, task,
   stand-in), `script` the frontier's tool calls (`Step::From` builds one from the request it
   answers, to use a placeholder or handle it was shown), `run` it or open a `session`, then
   `assert_no_leak(&f.canaries([extra values]))`.
@@ -1567,6 +1567,13 @@ the next `declass resume` ends the run and calls it then.
   phrasing above, or when the local model classifies the question as targeted at one record or value
   (`sensitivity.question_intent`, any language; a `question_intent` event and the same structural
   rewording). A question it misclassifies is answered as asked.
+- `edit_file` matches its anchors against a file's real text, also in a sensitive file it may
+  edit (`.env`, a data file): an edit whose anchor is a guess (`DB_PASSWORD=q`, with the same new
+  text, so the file does not change) succeeds only when the guess is right. Edits therefore answer
+  guesses about values one at a time, with no probe budget, each recorded only as a `file_write`
+  event (four characters of a password in about 60 edits). The scenario
+  `edit_file_anchors_tell_nothing_of_a_sensitive_file` is ignored until the file tools match
+  anchors in a sensitive file against the text the frontier was shown.
 
 ## Prompt injection: residual risk
 
