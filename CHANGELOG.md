@@ -18,10 +18,13 @@ found. A first run without models now says what to do.
   local model. A web page the editor fetched (`http`, `https`) is checked like a fetched page,
   given to the cloud model as data and recorded as an `editor_attachment` audit event; anything
   else the editor attaches (rules, unsaved buffers, remote files) is declined, and you are told.
-- Replies stream with placeholders restored, tool calls show their results and diffs, and
-  approvals use the editor's permission dialog. MCP servers the editor offers are not started,
-  and Declass never uses the editor's own file and terminal methods. Run `declass setup` in a
-  terminal first. [Details](docs/USAGE.md#use-declass-from-an-editor)
+- Replies stream with placeholders restored and tool calls show their results and diffs, but a
+  file Declass keeps from the cloud model is only named, however the path is spelled, and the
+  editor is not told where it is. Security notices from the session (files it could not index,
+  files a command made another tool run) appear in the thread, and approvals use the editor's
+  permission dialog. MCP servers the editor offers are not started, and Declass never uses the
+  editor's own file and terminal methods. Run `declass setup` in a terminal first.
+  [Details](docs/USAGE.md#use-declass-from-an-editor)
 
 ### Exposure in CI
 
@@ -112,7 +115,7 @@ details.
 - `declass privacy` before setup says a model is "not set up" (exit 1), not "invalid origin ·
   refused" (exit 2).
 - The setup screen keeps the selected row and the choices on screen in narrow terminals, scrolls
-  a long review and saves only once all of it has been on screen, and returns to the chosen row on
+  a long review and saves only when all of it fits on screen, and returns to the chosen row on
   Esc; under `declass setup` it no longer says Enter starts Declass. Choosing a cloud model on the
   setup screen when your own configuration requires local-only work (as an earlier setup without
   a cloud model saves) offers to lift that requirement, never a project's or a policy's; it takes
@@ -125,6 +128,9 @@ details.
   now say so.
 - In top clearance the work status names the local model, not "the frontier". A reply that the
   model also wrote as text is shown once.
+- The workspace's Changes view showed the content of a sensitive file that the cloud model named
+  under another spelling (`./data/...`, or `.ENV` on macOS). It is named only, as are files
+  derived from sensitive data and protected source.
 - `declass config set` shows how to quote a text value (`'"gpt-6"'`). Stale and missing help is
   filled in (session limits are requests and time, not dollars). Report paths show quotes as
   written. `declass exposure` in an empty directory says there was nothing to read.

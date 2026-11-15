@@ -759,9 +759,6 @@ Linux differences and limits:
   on the host are not covered.
 - `.git` and `.declass` are found by their exact names: in a case-folding folder (ext4 `+F`), one
   spelled in another letter case is not covered by the read-only and stand-in mounts.
-- The file tools list a folder to check a path's spelling, and keep the listing until the folder
-  changes: reading right after a write in a folder of tens of thousands of files lists it again
-  (about 24 ms for 20,000 files).
 - The seccomp filter exists for x86-64 and AArch64; on other architectures commands without
   network are refused.
 - Tested in containers on one kernel (OrbStack's, AArch64), not yet on a distribution host with
@@ -1463,6 +1460,9 @@ the next `declass resume` ends the run and calls it then.
 
 ## Known limits
 
+- On every platform the file tools list a folder to check a path's spelling, and keep the
+  listing until the folder changes: reading right after a write in a folder of tens of thousands
+  of files lists it again (about 24 ms for 20,000 files on macOS).
 - With network on (`mcp.servers.<name>.network = true`, or `sandbox.network = "all"`), a
   sandboxed process under Seatbelt can connect to a local Unix socket outside the workspace, such
   as an SSH agent's or a container daemon's, and use what it offers. Under bubblewrap the
