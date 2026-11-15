@@ -272,6 +272,26 @@ mod tests {
     }
 
     #[test]
+    fn a_name_changed_since_its_folder_was_listed_is_checked_again() {
+        // The folder's listing is kept between reads; renaming an entry to
+        // another spelling must not leave the old spelling accepted.
+        let d = root();
+        let p = d.path().canonicalize().unwrap();
+        std::fs::create_dir_all(p.join("dir")).unwrap();
+        for n in 0..50 {
+            std::fs::write(p.join(format!("dir/f{n}.txt")), b"x").unwrap();
+        }
+        for n in 0..50 {
+            let rel = PathBuf::from(format!("dir/f{n}.txt"));
+            assert_eq!(read_file(&p, &rel, 10).unwrap(), b"x");
+        }
+        std::fs::rename(p.join("dir/f7.txt"), p.join("dir/F7.txt")).unwrap();
+        assert!(read_file(&p, Path::new("dir/f7.txt"), 10).is_err());
+        assert_eq!(read_file(&p, Path::new("dir/F7.txt"), 10).unwrap(), b"x");
+        assert_eq!(read_file(&p, Path::new("dir/f8.txt"), 10).unwrap(), b"x");
+    }
+
+    #[test]
     fn size_cap_and_missing_files() {
         let d = root();
         let p = d.path().canonicalize().unwrap();

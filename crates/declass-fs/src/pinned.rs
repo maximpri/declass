@@ -132,6 +132,19 @@ fn open_child(parent: &File, name: &OsStr, shown: &Path, create: bool) -> Result
     }
 }
 
+/// A directory as last listed: its device, inode and modification and change
+/// times, which adding, removing or renaming an entry changes.
+type ListingKey = (u64, u64, i64, i64, i64, i64);
+
+/// Names of recently listed directories, so that reading many files of one
+/// large directory (a search) lists it once, not once per file.
+static LISTINGS: std::sync::Mutex<
+    Option<std::collections::HashMap<ListingKey, std::collections::HashSet<Vec<u8>>>>,
+> = std::sync::Mutex::new(None);
+
+/// Directories whose names are kept at once; past it the cache starts over.
+const LISTINGS_KEPT: usize = 32;
+
 /// Refuses `name` when it opens an existing entry of `parent` that the
 /// directory lists under another spelling (see the module documentation). A
 /// name that does not exist yet is created as written: nothing to check.
@@ -142,17 +155,45 @@ fn check_spelling(parent: &File, name: &OsStr, shown: &Path) -> Result<(), FsErr
         Err(rustix::io::Errno::NOENT) => return Ok(()),
         Err(e) => return Err(FsError::io("inspect", shown, e)),
     };
+    let dir = rustix::fs::fstat(parent).map_err(|e| FsError::io("inspect", shown, e))?;
+    #[allow(clippy::unnecessary_cast)] // the field types differ between platforms
+    let key: ListingKey = (
+        dir.st_dev as u64,
+        dir.st_ino as u64,
+        dir.st_mtime as i64,
+        dir.st_mtime_nsec as i64,
+        dir.st_ctime as i64,
+        dir.st_ctime_nsec as i64,
+    );
+    let mut cache = LISTINGS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if cache
+        .as_ref()
+        .and_then(|c| c.get(&key))
+        .is_some_and(|names| names.contains(name.as_bytes()))
+    {
+        return Ok(());
+    }
     let list = |e| FsError::io("list directory", shown, e);
+    let mut names = std::collections::HashSet::new();
     let mut listed_as = None;
     for entry in rustix::fs::Dir::read_from(parent).map_err(list)? {
         let entry = entry.map_err(list)?;
         let listed = entry.file_name().to_bytes();
-        if listed == name.as_bytes() {
-            return Ok(());
-        }
-        if entry.ino() == st.st_ino {
+        if entry.ino() == st.st_ino && listed != name.as_bytes() {
             listed_as = Some(String::from_utf8_lossy(listed).into_owned());
         }
+        names.insert(listed.to_vec());
+    }
+    let exact = names.contains(name.as_bytes());
+    let kept = cache.get_or_insert_with(Default::default);
+    if kept.len() >= LISTINGS_KEPT {
+        kept.clear();
+    }
+    kept.insert(key, names);
+    if exact {
+        return Ok(());
     }
     Err(FsError::Spelling {
         path: shown.display().to_string(),
