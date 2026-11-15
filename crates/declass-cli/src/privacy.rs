@@ -127,8 +127,21 @@ fn search_origins(cfg: &Config, ws: &Path, frontier_url: &str) -> Result<Vec<Str
     origins.dedup();
     Ok(origins)
 }
+/// The trust of a role whose endpoint nobody chose yet (there is no default):
+/// nothing to refuse, and nothing that would be contacted.
+const NOT_SET_UP: &str = "not set up";
+
 fn endpoint(raw: &str, role: Role, enabled: bool) -> Destination {
     let local = matches!(role, Role::Local { .. });
+    if raw.trim().is_empty() {
+        return Destination {
+            role: if local { "local" } else { "frontier" },
+            origin: None,
+            enabled,
+            admitted: false,
+            trust: NOT_SET_UP,
+        };
+    }
     let admitted = ApprovedEndpoint::new(raw, &role).is_ok();
     // Never echo URL credentials, query strings, fragments or API path segments.
     let origin = origin(raw);
@@ -409,7 +422,12 @@ pub(crate) fn collect(
         warnings.push("Inventory incomplete: entry/depth limit, unreadable directory, changed entry or non-UTF8 name.".into());
     }
     for d in &destinations {
-        if d.enabled && !d.admitted {
+        if d.enabled && d.trust == NOT_SET_UP {
+            warnings.push(format!(
+                "No {} model is set up yet: `declass setup` chooses one.",
+                if d.role == "local" { "local" } else { "cloud" }
+            ));
+        } else if d.enabled && !d.admitted {
             warnings.push(format!(
                 "{} endpoint is refused by current endpoint policy.",
                 d.role
@@ -506,13 +524,17 @@ impl Report {
             self.scope.into(),
         ];
         for d in &self.destinations {
-            lines.push(format!(
-                "{}: {} · {} · {}",
-                d.role,
-                d.origin.as_deref().unwrap_or("invalid origin"),
-                if d.enabled { "enabled" } else { "disabled" },
-                d.trust
-            ));
+            let enabled = if d.enabled { "enabled" } else { "disabled" };
+            lines.push(if d.trust == NOT_SET_UP {
+                format!("{}: {NOT_SET_UP} · {enabled}", d.role)
+            } else {
+                format!(
+                    "{}: {} · {enabled} · {}",
+                    d.role,
+                    d.origin.as_deref().unwrap_or("invalid origin"),
+                    d.trust
+                )
+            });
         }
         lines.push(format!(
             "Commands: {} network · web tools: {}",
@@ -579,7 +601,9 @@ impl Report {
         declass_tui::term::safe(&lines.join("\n"))
     }
     fn code(&self) -> i32 {
-        if !self.complete || self.destinations.iter().any(|d| d.enabled && !d.admitted) {
+        // An endpoint nobody chose is a warning: nothing would be sent to it.
+        let refused = |d: &Destination| d.enabled && !d.admitted && d.trust != NOT_SET_UP;
+        if !self.complete || self.destinations.iter().any(refused) {
             2
         } else if !self.warnings.is_empty() || !self.exceptions.is_empty() {
             1
@@ -663,6 +687,34 @@ mod tests {
         assert_eq!(r.command_network, "off");
         assert!(!r.web_enabled);
     }
+    #[test]
+    fn models_nobody_chose_are_not_set_up_rather_than_refused() {
+        let temp = tempfile::tempdir().unwrap();
+        let ws = temp.path().join("ws");
+        std::fs::create_dir(&ws).unwrap();
+        std::fs::write(ws.join("main.py"), "print(1)\n").unwrap();
+        let cfg = config(temp.path(), "[extensions]\nplugins_enabled = false\n");
+        let r = collect(&ws, &cfg, Mode::Hybrid, None, None).unwrap();
+        for d in &r.destinations {
+            assert_eq!(d.trust, NOT_SET_UP, "{}", d.role);
+            assert!(!d.admitted);
+        }
+        let text = r.render(true);
+        assert!(text.contains("frontier: not set up · enabled"), "{text}");
+        assert!(text.contains("No cloud model is set up yet: `declass setup`"));
+        assert!(!text.contains("invalid origin") && !text.contains("refused by"));
+        // A warning to act on, not the exit code of a refused endpoint.
+        assert_eq!(r.code(), 1);
+        // A chosen endpoint the policy refuses still is one.
+        let refused = config(
+            temp.path(),
+            "[extensions]\nplugins_enabled = false\n[local]\nbase_url = \"http://192.0.2.1:9/v1\"\n",
+        );
+        let r = collect(&ws, &refused, Mode::Hybrid, None, None).unwrap();
+        assert_eq!(r.destinations[0].trust, "refused");
+        assert_eq!(r.code(), 2);
+    }
+
     #[test]
     fn runtime_routes_match_passthrough_and_top_clearance() {
         let temp = tempfile::tempdir().unwrap();

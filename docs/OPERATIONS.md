@@ -26,7 +26,7 @@ No run, audit or vault is created.
 
 | Report field | Meaning |
 | --- | --- |
-| Local and frontier destinations | Origin, enabled status and endpoint trust decision; credentials and API paths are omitted |
+| Local and frontier destinations | Origin, enabled status and endpoint trust decision, or `not set up` before a model is chosen; credentials and API paths are omitted |
 | Command network | Off, approved registry hosts or unrestricted, after applying the selected mode |
 | Web and MCP | Search origins, web-fetch host policy and remote tool-server origins; networked MCP is disabled in top clearance |
 | Exceptions | Settings that loosen the defaults, with their configuration origin; values are omitted |
@@ -51,9 +51,10 @@ inventory incomplete. Unavailable or unfinished derived-file classifications
 are reported as unknown; they are never silently treated as public.
 
 Exit 0 means the preview completed without reported exceptions or warnings.
-Exit 1 means it completed with items to review. Exit 2 means the inventory is
-incomplete or an enabled model endpoint is refused. A preview describes the
-observed configuration and paths; runtime enforcement still checks each action.
+Exit 1 means it completed with items to review, such as a model not set up yet
+(`declass setup` chooses one). Exit 2 means the inventory is incomplete or an
+enabled model endpoint is refused. A preview describes the observed
+configuration and paths; runtime enforcement still checks each action.
 
 Review endpoints with `declass doctor`. See the [security model](../SECURITY.md)
 and [deployment evaluation](SECURE_BY_DESIGN.md#evaluate-your-deployment) for
