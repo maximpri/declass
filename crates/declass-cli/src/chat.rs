@@ -1111,43 +1111,24 @@ Add --no-privacy to confirm, or use --mode hybrid."
                 }
                 // Setting up prints freely.
                 screen.hide();
-                // With the local model off nothing is probed for one.
-                let local = match mode {
-                    Mode::Hybrid | Mode::TopClearance if local_enabled(&cfg, mode)? => {
-                        match setup::bootstrap(&cfg).await {
-                            Ok(found) => found.map(|b| LocalOverride {
-                                base_url: b.base_url,
-                                model: b.model,
-                                api_key_env: b.api_key_env,
-                            }),
-                            Err(code) => return Ok(code),
-                        }
-                    }
-                    _ => None,
+                let local = match local_endpoint(&cfg, mode).await? {
+                    Ok(local) => local,
+                    Err(code) => return Ok(code),
                 };
-                let manifest = RunManifest {
-                    run_id: new_run_id(),
-                    mode,
-                    objective: first,
-                    checks: Some({
-                        let mut checks = cfg.list("checks.commands")?;
-                        checks.extend(args.check.iter().cloned());
-                        checks
-                    }),
-                    frontier_url: args
-                        .frontier_url
-                        .clone()
-                        .map_or_else(|| cfg.str("frontier.base_url"), Ok)?,
-                    frontier_model: args
-                        .frontier_model
-                        .clone()
-                        .map_or_else(|| cfg.str("frontier.model"), Ok)?,
-                    frontier_dialect: Some(frontier_dialect(&cfg)?.as_str().to_owned()),
-                    local,
-                    session: true,
-                    images: first_images,
-                    files: first_files,
-                };
+                let manifest = new_manifest(
+                    &cfg,
+                    NewSession {
+                        run_id: new_run_id(),
+                        mode,
+                        first,
+                        frontier_url: args.frontier_url.clone(),
+                        frontier_model: args.frontier_model.clone(),
+                        checks: &args.check,
+                        local,
+                        images: first_images,
+                        files: first_files,
+                    },
+                )?;
                 (manifest, false)
             }
         };
@@ -1164,11 +1145,7 @@ Add --no-privacy to confirm, or use --mode hybrid."
                 false,
             );
         }
-        eprintln!("session {} ({})", manifest.run_id, manifest.mode.as_str());
-        let lock = declass_fs::lock::WorkspaceLock::acquire(&ws)?;
-        let run_dir = ws.join(".declass/runs").join(&manifest.run_id);
-        declass_fs::private::ensure_private_dir(&run_dir)?;
-        declass_fs::private::ensure_private_dir(&ws.join(".declass/tmp"))?;
+        let (lock, run_dir) = session_dir(&ws, &manifest)?;
         if resuming && !runtime_restart {
             let mut plans =
                 declass_agent::plans::Store::load(&run_dir).map_err(anyhow::Error::msg)?;
@@ -1193,21 +1170,21 @@ Add --no-privacy to confirm, or use --mode hybrid."
                 declass_agent::transcript::Transcript::open(&run_dir)?
                     .append(&Entry::PlanMode { enabled: true })?;
             }
-            declass_fs::private::write_private(
-                &run_dir.join("run.json"),
-                &serde_json::to_vec_pretty(&manifest)?,
-            )?;
+            save_manifest(&run_dir, &manifest)?;
             if start_goal {
                 crate::goals::Store::load(&run_dir)?.start(&manifest.objective, goal_turns)?;
             }
         }
-        // Sessions last as long as the operator keeps them open: the provider's
-        // own retry deadline is far away, and each turn sets its own.
-        let limits = RunLimits {
-            deadline: tokio::time::Instant::now() + Duration::from_secs(7 * 24 * 3600),
-            interrupted: interrupted.clone(),
-        };
+        let limits = session_limits(&interrupted);
         let mut audit = None;
+        let mut front = ChatFront {
+            io: &io,
+            start_goal: start_goal && !resuming,
+            start_planning: start_planning && !resuming,
+            pending_attachments: &mut pending_attachments,
+            goal_turns,
+            plan_turns,
+        };
         let driven = std::panic::AssertUnwindSafe(converse(
             &ws,
             &manifest,
@@ -1217,57 +1194,17 @@ Add --no-privacy to confirm, or use --mode hybrid."
             resuming,
             &limits,
             &mut audit,
-            &io,
             emb.hooks(),
-            start_goal && !resuming,
-            start_planning && !resuming,
-            &mut pending_attachments,
-            goal_turns,
-            plan_turns,
+            &mut front,
         ))
         .catch_unwind()
         .await;
-        let (terminal, stats, switch) = match driven {
-            Ok(Ok(outcome)) => outcome,
-            Ok(Err(e)) => (
-                Terminal::Failed {
-                    reason: format!("{e:#}"),
-                },
-                RunStats::default(),
-                None,
-            ),
-            Err(panic) => (
-                Terminal::internal_error(panic.as_ref()),
-                RunStats::default(),
-                None,
-            ),
-        };
+        let (terminal, stats, switch) = settle(driven);
         if switch.is_none() {
             screen.close();
         }
-        let audit = match audit {
-            Some(a) => Some(a),
-            None => open_audit(&ws, &manifest.run_id, emb.hooks())
-                .map(AuditHandle::new)
-                .map_err(|e| eprintln!("warning: audit log not opened: {e:#}"))
-                .ok(),
-        };
-        // `declass` itself embeds nothing, so it adds no hooks (see ARCHITECTURE.md,
-        // "Embedding Declass").
-        declass_agent::conclude_with(
-            &run_dir,
-            &manifest.run_id,
-            audit.as_ref(),
-            &audit_log_path(&ws, &manifest.run_id),
-            &terminal,
-            &stats,
-            &declass_agent::Ending {
-                kind: declass_agent::RunKind::Session,
-                mode: manifest.mode.as_str(),
-                resumed: resuming,
-                policy: cfg.policy().map(declass_config::Policy::meta),
-                hooks: emb.hooks(),
-            },
+        conclude_session(
+            &ws, &manifest, &cfg, emb, audit, &terminal, &stats, resuming,
         )?;
         drop(lock);
         for line in crate::triggers::report(&audit_log_path(&ws, &manifest.run_id)) {
@@ -1310,29 +1247,195 @@ reaches the frontier; leaving top clearance needs a new session.",
             start_goal = false;
             continue;
         }
-        match &terminal {
-            Terminal::Completed { .. } => {
-                println!(
-                    "session {id} closed ({} frontier request(s) in total)",
-                    stats.frontier_requests()
-                );
-            }
-            Terminal::Open { .. } => {
-                println!(
-                    "session {id} left open ({} frontier request(s) so far); continue with: declass --resume {id}",
-                    stats.frontier_requests()
-                );
-            }
-            Terminal::Failed { reason } => {
-                eprintln!("session {id} stopped: {reason}");
-            }
-            Terminal::BudgetStopped { which } => {
-                println!(
-                    "session {id}: {which} is spent; raise it to continue with declass --resume {id}"
-                );
-            }
-        }
+        farewell(id, &terminal, &stats);
         return Ok(terminal.exit_code());
+    }
+}
+
+/// What a new session starts with (see [`new_manifest`]).
+pub(crate) struct NewSession<'a> {
+    pub run_id: String,
+    pub mode: Mode,
+    /// The operator's first message: the run's objective.
+    pub first: String,
+    pub frontier_url: Option<String>,
+    pub frontier_model: Option<String>,
+    /// Acceptance commands for this session, added to the project's.
+    pub checks: &'a [String],
+    pub local: Option<LocalOverride>,
+    pub images: Vec<crate::images::AttachedImage>,
+    pub files: Vec<crate::attachments::Attachment>,
+}
+
+/// The manifest of a new session: its objective, its acceptance checks and
+/// the endpoints it keeps across resume.
+pub(crate) fn new_manifest(
+    cfg: &declass_config::Config,
+    new: NewSession<'_>,
+) -> Result<RunManifest> {
+    Ok(RunManifest {
+        run_id: new.run_id,
+        mode: new.mode,
+        objective: new.first,
+        checks: Some({
+            let mut checks = cfg.list("checks.commands")?;
+            checks.extend(new.checks.iter().cloned());
+            checks
+        }),
+        frontier_url: new
+            .frontier_url
+            .map_or_else(|| cfg.str("frontier.base_url"), Ok)?,
+        frontier_model: new
+            .frontier_model
+            .map_or_else(|| cfg.str("frontier.model"), Ok)?,
+        frontier_dialect: Some(frontier_dialect(cfg)?.as_str().to_owned()),
+        local: new.local,
+        session: true,
+        images: new.images,
+        files: new.files,
+    })
+}
+
+/// The local model a new session in `mode` uses when the owner configured
+/// none: one server found on loopback, for this session only. `Ok(None)`
+/// uses the configuration (or none, with the local model off); `Err(code)`
+/// when no single server could be chosen (the reason is printed). Nothing is
+/// probed with the local model off.
+pub(crate) async fn local_endpoint(
+    cfg: &declass_config::Config,
+    mode: Mode,
+) -> Result<Result<Option<LocalOverride>, i32>> {
+    Ok(match mode {
+        Mode::Hybrid | Mode::TopClearance if local_enabled(cfg, mode)? => {
+            setup::bootstrap(cfg).await.map(|found| {
+                found.map(|b| LocalOverride {
+                    base_url: b.base_url,
+                    model: b.model,
+                    api_key_env: b.api_key_env,
+                })
+            })
+        }
+        _ => Ok(None),
+    })
+}
+
+/// The workspace lock and the run directory of a session invocation.
+pub(crate) fn session_dir(
+    ws: &Path,
+    manifest: &RunManifest,
+) -> Result<(declass_fs::lock::WorkspaceLock, PathBuf)> {
+    eprintln!("session {} ({})", manifest.run_id, manifest.mode.as_str());
+    let lock = declass_fs::lock::WorkspaceLock::acquire(ws)?;
+    let run_dir = ws.join(".declass/runs").join(&manifest.run_id);
+    declass_fs::private::ensure_private_dir(&run_dir)?;
+    declass_fs::private::ensure_private_dir(&ws.join(".declass/tmp"))?;
+    Ok((lock, run_dir))
+}
+
+/// Writes a new session's manifest: from then on it can be resumed.
+pub(crate) fn save_manifest(run_dir: &Path, manifest: &RunManifest) -> Result<()> {
+    declass_fs::private::write_private(
+        &run_dir.join("run.json"),
+        &serde_json::to_vec_pretty(manifest)?,
+    )?;
+    Ok(())
+}
+
+/// Sessions last as long as the operator keeps them open: the provider's own
+/// retry deadline is far away, and each turn sets its own.
+pub(crate) fn session_limits(interrupted: &Arc<AtomicBool>) -> RunLimits {
+    RunLimits {
+        deadline: tokio::time::Instant::now() + Duration::from_secs(7 * 24 * 3600),
+        interrupted: interrupted.clone(),
+    }
+}
+
+/// How a session invocation ended: what [`converse`] returned, or its error or
+/// panic as a failed run.
+pub(crate) fn settle(
+    driven: std::thread::Result<Result<(Terminal, RunStats, Option<SessionChange>)>>,
+) -> (Terminal, RunStats, Option<SessionChange>) {
+    match driven {
+        Ok(Ok(outcome)) => outcome,
+        Ok(Err(e)) => (
+            Terminal::Failed {
+                reason: format!("{e:#}"),
+            },
+            RunStats::default(),
+            None,
+        ),
+        Err(panic) => (
+            Terminal::internal_error(panic.as_ref()),
+            RunStats::default(),
+            None,
+        ),
+    }
+}
+
+/// Concludes a session invocation's run in every terminal state: `run_end`
+/// anchoring the audit log, `summary.json` and the end hooks (an audit log
+/// is opened for it when the session failed before its own was).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn conclude_session(
+    ws: &Path,
+    manifest: &RunManifest,
+    cfg: &declass_config::Config,
+    emb: &Embedding,
+    audit: Option<AuditHandle>,
+    terminal: &Terminal,
+    stats: &RunStats,
+    resumed: bool,
+) -> Result<()> {
+    let audit = match audit {
+        Some(a) => Some(a),
+        None => open_audit(ws, &manifest.run_id, emb.hooks())
+            .map(AuditHandle::new)
+            .map_err(|e| eprintln!("warning: audit log not opened: {e:#}"))
+            .ok(),
+    };
+    // `declass` itself embeds nothing, so it adds no hooks (see ARCHITECTURE.md,
+    // "Embedding Declass").
+    declass_agent::conclude_with(
+        &ws.join(".declass/runs").join(&manifest.run_id),
+        &manifest.run_id,
+        audit.as_ref(),
+        &audit_log_path(ws, &manifest.run_id),
+        terminal,
+        stats,
+        &declass_agent::Ending {
+            kind: declass_agent::RunKind::Session,
+            mode: manifest.mode.as_str(),
+            resumed,
+            policy: cfg.policy().map(declass_config::Policy::meta),
+            hooks: emb.hooks(),
+        },
+    )?;
+    Ok(())
+}
+
+/// A session invocation's last line: how to continue it, or why it stopped.
+pub(crate) fn farewell(id: &str, terminal: &Terminal, stats: &RunStats) {
+    match terminal {
+        Terminal::Completed { .. } => {
+            println!(
+                "session {id} closed ({} frontier request(s) in total)",
+                stats.frontier_requests()
+            );
+        }
+        Terminal::Open { .. } => {
+            println!(
+                "session {id} left open ({} frontier request(s) so far); continue with: declass --resume {id}",
+                stats.frontier_requests()
+            );
+        }
+        Terminal::Failed { reason } => {
+            eprintln!("session {id} stopped: {reason}");
+        }
+        Terminal::BudgetStopped { which } => {
+            println!(
+                "session {id}: {which} is spent; raise it to continue with declass --resume {id}"
+            );
+        }
     }
 }
 
@@ -1458,10 +1561,44 @@ fn watch_interrupts(interrupts: Arc<Interrupts>, screen: Screen) {
     });
 }
 
-/// Sets the session up and holds the conversation until the operator leaves
-/// or closes it.
+/// What a session's front end (the workspace, plain lines, or an editor
+/// over the Agent Client Protocol) works with once the session is open.
+pub(crate) struct Open<'s> {
+    pub ws: &'s Path,
+    pub manifest: &'s RunManifest,
+    pub cfg: &'s declass_config::Config,
+    pub run_dir: &'s Path,
+    /// The session was resumed rather than started.
+    pub resume: bool,
+    pub run_cfg: &'s declass_agent::RunConfig,
+    pub git: &'s declass_git::Git,
+    pub presenter: &'s dyn Presenter,
+    pub audit: &'s AuditHandle,
+    /// Restores placeholders for the operator, as every operator view does.
+    pub shown: &'s Arc<dyn Fn(&str) -> String + Send + Sync>,
+}
+
+/// A session's front end: it holds the conversation of the open session
+/// until the operator leaves it (`false`: it stays open to resume) or
+/// closes it (`true`), and may ask for the session to start again in
+/// another mode or planning state.
+pub(crate) trait Front {
+    /// A new session opens in planning mode (`/plan` before its first message).
+    fn starts_planning(&self) -> bool {
+        false
+    }
+
+    async fn hold(
+        &mut self,
+        session: &mut Session<'_>,
+        open: &Open<'_>,
+    ) -> Result<(bool, Option<SessionChange>)>;
+}
+
+/// Sets the session up, has `front` hold its conversation until the operator
+/// leaves or closes it, and ends it (its servers stopped).
 #[allow(clippy::too_many_arguments)]
-async fn converse(
+pub(crate) async fn converse<F: Front>(
     ws: &Path,
     manifest: &RunManifest,
     cfg: &declass_config::Config,
@@ -1470,18 +1607,13 @@ async fn converse(
     resume: bool,
     limits: &RunLimits,
     audit: &mut Option<AuditHandle>,
-    io: &Io,
     hooks: &declass_agent::Hooks,
-    start_goal: bool,
-    start_planning: bool,
-    pending_attachments: &mut PendingAttachments,
-    goal_turns: u64,
-    plan_turns: u64,
+    front: &mut F,
 ) -> Result<(Terminal, RunStats, Option<SessionChange>)> {
     let planning = if resume {
         Session::persisted_planning(run_dir).map_err(anyhow::Error::msg)?
     } else {
-        start_planning
+        front.starts_planning()
     };
     let Prepared {
         git,
@@ -1511,9 +1643,6 @@ async fn converse(
         resume,
     )
     .map_err(anyhow::Error::msg)?;
-    if start_planning {
-        session.set_planning(true).map_err(anyhow::Error::msg)?;
-    }
     let shown: Arc<dyn Fn(&str) -> String + Send + Sync> = match &engine {
         Some(e) => {
             let e = e.clone();
@@ -1521,71 +1650,19 @@ async fn converse(
         }
         None => Arc::new(|t: &str| t.to_owned()),
     };
-    if let Some(c) = io.screen.workspace() {
-        c.restore(shown.clone());
-        // History: the operator's own messages of this session.
-        c.remember(
-            session
-                .history()
-                .iter()
-                .flat_map(|x| std::iter::once(x.message.clone()).chain(x.steered.clone()))
-                .collect(),
-        );
-    }
-    for image in std::mem::take(&mut pending_attachments.images) {
-        // A failed recheck must stop before delivering the dependent request.
-        session
-            .attach(image.path, image.public)
-            .map_err(anyhow::Error::msg)?;
-    }
-    let files = Mutex::new(if resume {
-        std::mem::take(&mut pending_attachments.files)
-    } else {
-        manifest.files.clone()
-    });
-    let mut goals = crate::goals::Store::load(run_dir)?;
-    goals.checkpoint()?;
-    if start_goal {
-        goals.resume()?;
-    }
-    let ctx = TurnCtx {
-        cfg,
-        mode: manifest.mode,
-        skills: &run_cfg.skills,
-        run_dir,
-        io,
-        shown: &shown,
+    let open = Open {
         ws,
+        manifest,
+        cfg,
+        run_dir,
+        resume,
+        run_cfg: &run_cfg,
         git: &git,
         presenter,
         audit: frontier.audit(),
-        files: &files,
-        plan_turns,
+        shown: &shown,
     };
-    if let Some(w) = io.screen.workspace() {
-        // The side panel follows the files this session changes, holding
-        // back what the engine holds back.
-        w.attach(
-            ws.to_path_buf(),
-            run_dir.to_path_buf(),
-            audit_log_path(ws, &manifest.run_id),
-            crate::policy(cfg)?,
-        );
-    }
-    let (closed, switch) = conduct(
-        &mut session,
-        manifest,
-        cfg,
-        &ctx,
-        &mut goals,
-        resume,
-        goal_turns,
-    )
-    .await?;
-    if matches!(switch, Some(SessionChange::Planning)) {
-        pending_attachments.images = session.attached().to_vec();
-        pending_attachments.files = std::mem::take(&mut *files.lock().unwrap());
-    }
+    let (closed, switch) = front.hold(&mut session, &open).await?;
     let (terminal, mut stats) = session.end(closed);
     crate::mcp::stop(&run_cfg).await;
     // The session's language servers lived across its turns; stop them now.
@@ -1596,6 +1673,100 @@ async fn converse(
     Ok((terminal, stats, switch))
 }
 
+/// The workspace's or the line-by-line session's side of a session: the
+/// operator's lines, goals, plans and attachments.
+struct ChatFront<'x> {
+    io: &'x Io,
+    start_goal: bool,
+    start_planning: bool,
+    pending_attachments: &'x mut PendingAttachments,
+    goal_turns: u64,
+    plan_turns: u64,
+}
+
+impl Front for ChatFront<'_> {
+    fn starts_planning(&self) -> bool {
+        self.start_planning
+    }
+
+    async fn hold(
+        &mut self,
+        session: &mut Session<'_>,
+        open: &Open<'_>,
+    ) -> Result<(bool, Option<SessionChange>)> {
+        let io = self.io;
+        if self.start_planning {
+            session.set_planning(true).map_err(anyhow::Error::msg)?;
+        }
+        if let Some(c) = io.screen.workspace() {
+            c.restore(open.shown.clone());
+            // History: the operator's own messages of this session.
+            c.remember(
+                session
+                    .history()
+                    .iter()
+                    .flat_map(|x| std::iter::once(x.message.clone()).chain(x.steered.clone()))
+                    .collect(),
+            );
+        }
+        for image in std::mem::take(&mut self.pending_attachments.images) {
+            // A failed recheck must stop before delivering the dependent request.
+            session
+                .attach(image.path, image.public)
+                .map_err(anyhow::Error::msg)?;
+        }
+        let files = Mutex::new(if open.resume {
+            std::mem::take(&mut self.pending_attachments.files)
+        } else {
+            open.manifest.files.clone()
+        });
+        let mut goals = crate::goals::Store::load(open.run_dir)?;
+        goals.checkpoint()?;
+        if self.start_goal {
+            goals.resume()?;
+        }
+        let ctx = TurnCtx {
+            cfg: open.cfg,
+            mode: open.manifest.mode,
+            skills: &open.run_cfg.skills,
+            run_dir: open.run_dir,
+            io,
+            shown: open.shown,
+            ws: open.ws,
+            git: open.git,
+            presenter: open.presenter,
+            audit: open.audit,
+            files: &files,
+            plan_turns: self.plan_turns,
+        };
+        if let Some(w) = io.screen.workspace() {
+            // The side panel follows the files this session changes, holding
+            // back what the engine holds back.
+            w.attach(
+                open.ws.to_path_buf(),
+                open.run_dir.to_path_buf(),
+                audit_log_path(open.ws, &open.manifest.run_id),
+                crate::policy(open.cfg)?,
+            );
+        }
+        let (closed, switch) = conduct(
+            session,
+            open.manifest,
+            open.cfg,
+            &ctx,
+            &mut goals,
+            open.resume,
+            self.goal_turns,
+        )
+        .await?;
+        if matches!(switch, Some(SessionChange::Planning)) {
+            self.pending_attachments.images = session.attached().to_vec();
+            self.pending_attachments.files = std::mem::take(&mut *files.lock().unwrap());
+        }
+        Ok((closed, switch))
+    }
+}
+
 #[derive(Default)]
 struct PendingAttachments {
     images: Vec<declass_agent::images::Attachment>,
@@ -1603,7 +1774,7 @@ struct PendingAttachments {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-enum SessionChange {
+pub(crate) enum SessionChange {
     Privacy {
         mode: Mode,
         planning: bool,
@@ -2670,7 +2841,7 @@ pub(crate) async fn follow(
 }
 
 /// [`follow`] over a follower others may drain too.
-async fn following(f: Arc<Mutex<Follow>>, done: Arc<AtomicBool>) {
+pub(crate) async fn following(f: Arc<Mutex<Follow>>, done: Arc<AtomicBool>) {
     loop {
         let last = done.load(Ordering::SeqCst);
         f.lock()
@@ -2686,9 +2857,9 @@ async fn following(f: Arc<Mutex<Follow>>, done: Arc<AtomicBool>) {
 /// Streamed responses shown after every step recorded before them: at the
 /// start of each request the transcript is read up to its end first, so a
 /// step's progress line never shows after the reply that followed it.
-struct Ordered {
-    follow: Arc<Mutex<Follow>>,
-    inner: Arc<dyn declass_boundary::live::StreamTap>,
+pub(crate) struct Ordered {
+    pub follow: Arc<Mutex<Follow>>,
+    pub inner: Arc<dyn declass_boundary::live::StreamTap>,
 }
 
 impl declass_boundary::live::StreamTap for Ordered {
