@@ -1,0 +1,83 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Runs `declass exposure` in a GitHub workflow and writes SARIF for code
+# scanning. Upload it with github/codeql-action/upload-sarif in a later step:
+# examples/github/declass-exposure.yml. The steps are tools/github-action.sh.
+name: Declass exposure
+description: >-
+  Report what a coding agent could send to a cloud model from this repository,
+  and what Declass would do with each file, as SARIF for code scanning. Reads
+  the repository offline; counts and positions, never values.
+author: Maxim Priezjev
+branding:
+  icon: shield
+  color: green
+
+inputs:
+  version:
+    description: >-
+      Declass release to install, 0.4.0 or later. Empty installs the release
+      this action was tagged with. The release's SSH signature and checksums
+      are checked before it runs.
+    required: false
+    default: ""
+  path:
+    description: Directory to report on.
+    required: false
+    default: "."
+  sarif-file:
+    description: Where to write the SARIF report.
+    required: false
+    default: declass-exposure.sarif
+  fail-on:
+    description: >-
+      Fail for findings at this level or above. note: any finding. warning:
+      any finding in a file the cloud model reads. error: a secret in such a
+      file. never: findings never fail (code scanning shows them). An
+      incomplete report always fails.
+    required: false
+    default: never
+  history:
+    description: >-
+      Also read earlier file versions in git history: "true" or "false".
+      Check out with fetch-depth 0 for the whole history.
+    required: false
+    default: "false"
+  project-config:
+    description: >-
+      Which .declass/config.toml (and derived.json) the report uses on a pull
+      request. base: the pull request's base commit's, so a change to it
+      applies once merged and cannot loosen its own gate (check out with
+      fetch-depth 0). checkout: the checked-out files. Other events always
+      use the checked-out files.
+    required: false
+    default: base
+
+outputs:
+  sarif-file:
+    description: The SARIF report, for github/codeql-action/upload-sarif.
+    value: ${{ steps.exposure.outputs.sarif-file }}
+  exit-code:
+    description: >-
+      The exit code of declass exposure: 0 nothing at or above fail-on,
+      1 findings at or above it, 2 incomplete report.
+    value: ${{ steps.exposure.outputs.exit-code }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install Declass
+      shell: bash
+      env:
+        DECLASS_VERSION: ${{ inputs.version }}
+      run: '"$GITHUB_ACTION_PATH/tools/github-action.sh" install'
+    - name: Run declass exposure
+      id: exposure
+      shell: bash
+      env:
+        EXPOSURE_PATH: ${{ inputs.path }}
+        EXPOSURE_SARIF: ${{ inputs.sarif-file }}
+        EXPOSURE_FAIL_ON: ${{ inputs.fail-on }}
+        EXPOSURE_HISTORY: ${{ inputs.history }}
+        EXPOSURE_PROJECT_CONFIG: ${{ inputs.project-config }}
+        EXPOSURE_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+      run: '"$GITHUB_ACTION_PATH/tools/github-action.sh" exposure'

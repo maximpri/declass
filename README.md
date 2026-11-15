@@ -62,7 +62,7 @@ With Declass in hybrid mode: 3 read only by your local model, 2 with values repl
 
 It reads your files on your machine with Declass's pattern detectors for secrets and personal data, shows counts and never values, and says what Declass would do with each file. It needs no API key or model and sends nothing. It doesn't run Declass's local-model checks, and pattern detectors only find known formats, so a clean report doesn't prove a repository holds nothing private. (Output above is from a small fictional project.)
 
-In CI, `declass exposure --sarif` writes the report for GitHub code scanning, `--fail-on error` fails only for a secret the cloud model would read, and `--history` also reads earlier versions in git history ([CI and code scanning](docs/OPERATIONS.md#sarif-for-code-scanning)).
+In CI, `declass exposure --sarif` writes the report for GitHub code scanning, `--fail-on error` fails only for a secret the cloud model would read, and `--history` also reads earlier versions in git history. This repository is also a GitHub Action that runs it: [CI and code scanning](docs/OPERATIONS.md#sarif-for-code-scanning).
 
 ## Quick start
 

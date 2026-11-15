@@ -130,7 +130,7 @@ them. There is no separate allowlist.
 The same file can waive the gate: a pull request that adds `protected_paths =
 ["**"]` turns every finding into a note. When `--fail-on` gates CI, protect
 `.declass/` with code owners or branch rules, or run the report with the base
-branch's `.declass/`.
+branch's `.declass/`, as the GitHub Action does on pull requests (below).
 
 `--json` prints schema 2, which adds each finding's `level` and `positions`,
 `fail_on`, `failing`, `limits` and, with `--history`, `history` to schema 1.
@@ -161,6 +161,44 @@ identity while lines move. GitHub's `upload-sarif` action adds a fingerprint
 of its own to each result with a line: a hash it computes on the runner from
 that line of the file in your checkout, which is how code scanning tracks
 alerts across commits.
+
+### In GitHub Actions
+
+The repository is a GitHub Action. It installs a Declass release (0.4.0 or
+later; by default the one the action is tagged with), checking the release's
+SSH signature against the key in the action's own commit and every checksum
+before it runs, then runs `declass exposure --sarif`. Upload the report with
+GitHub's action in the next step:
+
+```yaml
+- uses: maximpri/declass@v0.4.0
+  with:
+    sarif-file: declass-exposure.sarif
+    fail-on: error        # default never: code scanning shows findings, the job passes
+    history: true         # needs actions/checkout with fetch-depth: 0
+- if: ${{ !cancelled() && hashFiles('declass-exposure.sarif') != '' }}
+  uses: github/codeql-action/upload-sarif@v4
+  with:
+    sarif_file: declass-exposure.sarif
+```
+
+[`examples/github/declass-exposure.yml`](../examples/github/declass-exposure.yml)
+is a complete workflow. Inputs: `version`, `path` (default `.`), `sarif-file`,
+`fail-on`, `history` and `project-config`; outputs: `sarif-file` and
+`exit-code`. The text report is added to the job summary. It runs on Linux and
+macOS runners, ARM64 or x86-64. An older release (a pre-release of 0.4.0
+included), a version that is not a release number or a key that is not the
+Declass release key fails the step with a message, before anything is
+downloaded. An incomplete report always fails the step.
+
+On a pull request the step uses the base commit's `.declass/config.toml` (and
+`derived.json`), not the pull request's (`project-config: base`, the default):
+a change there applies once it is merged, and cannot loosen the pull request's
+own gate. That needs the base commit in the checkout (`fetch-depth: 0`); without
+it the step fails and says so. `project-config: checkout` uses the checked-out
+files. The report is printed between `::stop-commands::` markers with a random
+token, so no file name or note in it acts as a workflow command. The steps are
+in `tools/github-action.sh`, which also runs outside GitHub.
 
 ### Git history
 

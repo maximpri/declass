@@ -1,0 +1,52 @@
+# Declass exposure in GitHub code scanning: copy to .github/workflows/.
+#
+# Each push and pull request gets a report of what a coding agent could send
+# to a cloud model from the repository, as code scanning alerts: one per file
+# and kind of value, with counts and positions, never the values. Pin the
+# actions to commit SHAs in your own workflow.
+name: Declass exposure
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "17 6 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  exposure:
+    runs-on: ubuntu-latest # macos-latest works the same way
+    permissions:
+      contents: read
+      security-events: write # upload-sarif
+      actions: read # upload-sarif, in private repositories
+    env:
+      SARIF: declass-exposure.sarif
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0 # the whole history (history: true) and the base commit
+          persist-credentials: false
+
+      - uses: maximpri/declass@v0.4.0
+        with:
+          sarif-file: ${{ env.SARIF }}
+          history: true
+          # Fail the job for a secret in a file the cloud model reads; code
+          # scanning shows the rest. To accept known findings (test fixtures),
+          # keep those files local: [sensitivity] protected_paths in
+          # .declass/config.toml. On a pull request the base commit's
+          # .declass/ decides (project-config: base, the default; it needs
+          # fetch-depth: 0 above), so a pull request cannot waive its own
+          # gate. Protect .declass/ with code owners or branch rules as well.
+          fail-on: error
+
+      # Upload even when the step above failed the job; the action removes
+      # any older report first, so this is always this run's.
+      - if: ${{ !cancelled() && hashFiles(env.SARIF) != '' }}
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: ${{ env.SARIF }}
