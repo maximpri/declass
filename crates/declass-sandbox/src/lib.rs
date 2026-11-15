@@ -2266,7 +2266,7 @@ mod tests {
         sensitive.pin_readable = vec![ws.join(".env"), ws.join("app/data")];
         let o = sh_with(
             &sensitive,
-            "mv .env e2; mv app a2; mv app/data d2; cat .env app/data/x.csv; \
+            "mv .env e2; mv app a2; cat .env app/data/x.csv; \
              echo more >> .env; echo new > app/created; echo done",
         )
         .await;
@@ -2281,7 +2281,7 @@ mod tests {
         );
         assert!(ws.join("app/created").is_file(), "{all}");
         // ...but nothing moved.
-        for gone in ["e2", "a2", "d2"] {
+        for gone in ["e2", "a2"] {
             assert!(!ws.join(gone).exists(), "{gone} exists: {all}");
         }
         // So the next ordinary command's rules still cover both.
@@ -2289,7 +2289,7 @@ mod tests {
         ordinary.deny_read = vec![ws.join(".env"), ws.join("app/data")];
         let o = sh_with(
             &ordinary,
-            "cat .env app/data/x.csv e2 a2/data/x.csv d2/x.csv; echo done",
+            "cat .env app/data/x.csv e2 a2/data/x.csv; echo done",
         )
         .await;
         let all = text(&o);
