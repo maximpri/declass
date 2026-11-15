@@ -24,7 +24,7 @@
 //!
 //! Found DECLASS-2026-019 (a value found in a later item stayed in earlier ones),
 //! DECLASS-2026-020 (a value spelling the wire format blocked every request)
-//! and DECLASS-2026-NEW-unicode-forms (a value hidden by a zero-width space
+//! and DECLASS-2026-049 (a value hidden by a zero-width space
 //! in an argument's key passed the filter, which read keys as written, and
 //! the check, which reads them folded, withheld the call's arguments).
 
