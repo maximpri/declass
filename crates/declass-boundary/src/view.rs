@@ -317,6 +317,13 @@ pub trait Presenter: Send + Sync {
     fn detokenize(&self, text: &str) -> String {
         text.to_owned()
     }
+    /// `text` with every value known as sensitive replaced by its placeholder,
+    /// as request records have them: for what a security event records that
+    /// the frontier wrote (a command, a path) or a command produced (the names
+    /// of the files it wrote). The audit log is kept and shared as evidence.
+    fn redact_known(&self, text: &str) -> String {
+        text.to_owned()
+    }
     /// Content about to be written to `path`, with placeholders resolved locally.
     /// `Err` explains why a placeholder may not be written there.
     fn resolve_for_write(&self, _path: &std::path::Path, text: &str) -> Result<String, String> {

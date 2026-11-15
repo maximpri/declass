@@ -102,10 +102,13 @@ pub enum AuditEvent {
         host: String,
         trust: String,
     },
-    /// A sandboxed command was refused access to a hidden path.
+    /// A sandboxed command was refused access to a hidden path. The command
+    /// holds every known value as its placeholder.
     SandboxDenial { command: String, access: String },
     /// A command ran with `sensitive_data`: its output was held locally and the
-    /// files it wrote became sensitive.
+    /// files it wrote became sensitive. The command and the files' names (a
+    /// command can take them from the data) hold every known value as its
+    /// placeholder.
     SensitiveCommand {
         command: String,
         exit_code: Option<i32>,

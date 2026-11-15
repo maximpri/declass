@@ -2727,6 +2727,10 @@ is written or as a test fixture. At most {rows} records."
         self.lock().vault.detokenize(text).0
     }
 
+    fn redact_known(&self, text: &str) -> String {
+        self.lock().vault.tokenize(text).0
+    }
+
     fn note_authored(&self, text: &str) {
         let mut st = self.lock();
         for f in scan_with(text, self.detectors, &self.custom) {

@@ -509,7 +509,9 @@ The gate applies filters to the request, then checks, then appends to the audit 
   sandbox denials, `sensitive_data` commands (command, exit code, files marked derived), blocked
   sends (check name), requests sent with parts withheld (check name, parts), protected edits, images (origin, size, digest, destination, rule),
   `ask_local` probes of a value (handle, rule, pieces withheld, count). Names, paths and outcomes
-  only, never content.
+  only, never content; a command, and a path the frontier wrote or a command created (a
+  sensitive command's derived files, a trigger file), is recorded through
+  `Presenter::redact_known`, every known value as its placeholder.
 - **Images in the body:** checks and the audit record see each image's data replaced by a digest
   marker (`[image sha256:…, N bytes]`; `declass_provider::image::redact`), and `request_sha256` is of
   that form; the provider sends the real body. Every check also gets the digests

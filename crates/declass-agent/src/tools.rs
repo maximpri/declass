@@ -604,7 +604,8 @@ fn write_file(ctx: &mut Ctx<'_>, args: &Map<String, Value>) -> Result<String, St
 }
 
 /// Records a write the agent made (`FileWrite`), and, for a file another
-/// tool runs later, `TriggerWritten`. Paths and digests only.
+/// tool runs later, `TriggerWritten`. Paths (known values in them as
+/// placeholders) and digests only.
 pub(crate) fn record_write(
     ctx: &Ctx<'_>,
     tool: &str,
@@ -612,7 +613,7 @@ pub(crate) fn record_write(
     receipt: &declass_fs::WriteReceipt,
 ) {
     let trigger = declass_fs::triggers::classify(rel);
-    let path = rel.display().to_string();
+    let path = ctx.presenter.redact_known(&rel.display().to_string());
     ctx.record(AuditEvent::FileWrite {
         tool: tool.into(),
         path: path.clone(),
@@ -853,7 +854,7 @@ pub(crate) async fn sandboxed(
     // Run state is denied to every command, so any command can meet a denial.
     if o.shows_denial() {
         ctx.record(AuditEvent::SandboxDenial {
-            command: command.to_owned(),
+            command: ctx.presenter.redact_known(command),
             access: access_name.to_owned(),
         });
     }
@@ -951,10 +952,16 @@ async fn run_command(ctx: &mut Ctx<'_>, args: &Map<String, Value>) -> Result<Str
                 "Cannot persist private file classifications; further runs require owner review."
                     .to_owned()
             })?;
+        // The audit log is shared as evidence: the command as the frontier
+        // wrote it and the names the command gave its files (which it can
+        // take from the data) hold known values as placeholders.
         ctx.record(AuditEvent::SensitiveCommand {
-            command: command.to_owned(),
+            command: ctx.presenter.redact_known(command),
             exit_code,
-            derived_files: changed.iter().map(|p| p.display().to_string()).collect(),
+            derived_files: changed
+                .iter()
+                .map(|p| ctx.presenter.redact_known(&p.display().to_string()))
+                .collect(),
         });
         Source::SensitiveCommand {
             command: command.to_owned(),
@@ -1102,7 +1109,7 @@ fn record_command_triggers(
         let sha256 = declass_fs::read_file(ctx.workspace, &rel, MAX_READ_BYTES)
             .ok()
             .map(|b| declass_fs::sha256_hex(&b));
-        let path = rel.display().to_string();
+        let path = ctx.presenter.redact_known(&rel.display().to_string());
         ctx.record(AuditEvent::TriggerWritten {
             path: path.clone(),
             by: "command".into(),

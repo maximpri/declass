@@ -317,6 +317,60 @@ async fn a_secret_restored_into_a_config_file_never_comes_back_through_a_command
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn names_a_sensitive_command_gives_its_files_stay_out_of_the_audit_log() {
+    // A `sensitive_data` command can name the files it writes after the
+    // data. The audit log, kept and shared as evidence, recorded each name as
+    // written, and the command as the frontier wrote it.
+    let f = Fixture::new(
+        "derived-names",
+        "Split the customer export into one file per customer.",
+        Local::Cooperative,
+    );
+    f.script(vec![
+        Step::Call(
+            "run_command",
+            json!({"command": "mkdir -p out && tail -n +2 data/customers.csv | \
+                while IFS=, read id name born email card; do echo \"$born\" > \"out/$name $email.txt\"; done",
+                "sensitive_data": true}),
+        ),
+        Step::Call(
+            "run_command",
+            json!({"command": format!("grep -c {DB_PASSWORD} .env"), "sensitive_data": true}),
+        ),
+        Step::Call(
+            "run_command",
+            json!({"command": format!("cat .env # {}", CUSTOMERS[1].email)}),
+        ),
+        Step::Call("finish", json!({"summary": "Split."})),
+    ]);
+    let end = f.run().await;
+    assert!(completed(&end), "{end:?}");
+    let c = &CUSTOMERS[0];
+    assert!(
+        f.ws.join(format!("out/{} {}.txt", c.name, c.email))
+            .exists(),
+        "the command named its files after the data"
+    );
+    let log = std::fs::read_to_string(
+        f.ws.join(".declass/audit")
+            .join(format!("{}.jsonl", f.run_id)),
+    )
+    .unwrap();
+    let planted = f.canaries([]);
+    let found: Vec<String> = planted
+        .find(&log)
+        .iter()
+        .map(|x| planted.values()[x.canary_index].clone())
+        .collect();
+    assert!(found.is_empty(), "in the audit log: {found:?}");
+    assert!(
+        log.contains("\"derived_files\"") && log.contains("out/⟨name:"),
+        "the files are still named, by placeholder"
+    );
+    f.assert_no_leak(&planted);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_file_derived_into_target_stays_sensitive_when_read() {
     let f = Fixture::new(
         "derived-target",
