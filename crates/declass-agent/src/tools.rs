@@ -678,6 +678,9 @@ fn write_file(ctx: &mut Ctx<'_>, args: &Map<String, Value>) -> Result<String, St
         .map_err(fs_err)?
         .is_some();
     ctx.presenter.note_authored(content);
+    // The size reported is the size of the text the frontier wrote: the
+    // file's own would count the bytes of each value restored into it.
+    let written = content.len();
     let was_sensitive = ctx.presenter.path_sensitive(&rel);
     let content = ctx.presenter.resolve_for_write(&rel, content)?;
     let receipt = ctx
@@ -686,10 +689,9 @@ fn write_file(ctx: &mut Ctx<'_>, args: &Map<String, Value>) -> Result<String, St
         .map_err(fs_err)?;
     record_write(ctx, "write_file", &rel, &receipt);
     Ok(format!(
-        "{} {} ({} bytes){}",
+        "{} {} ({written} bytes){}",
         if existed { "replaced" } else { "created" },
         rel.display(),
-        content.len(),
         restored_note(ctx.presenter, &rel, was_sensitive)
     ))
 }
@@ -2409,6 +2411,23 @@ mod sensitive_command_tests {
         )
         .await;
         assert!(public.starts_with("edited src/lib.rs"), "{public}");
+        // A write reports the size of the text the frontier wrote, never of
+        // the file holding the values restored into it (their length).
+        let content = "DB_PASSWORD=⟨secret:DB_PASSWORD#1⟩\n";
+        let wrote = call(
+            &mut ctx,
+            "write_file",
+            json!({"path": ".env.local", "content": content}),
+        )
+        .await;
+        assert!(
+            wrote.starts_with(&format!("created .env.local ({} bytes)", content.len())),
+            "{wrote}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(ws.join(".env.local")).unwrap(),
+            "DB_PASSWORD=quartz-otter-5519\n"
+        );
         // Searches look into neither sensitive files nor protected source:
         // which of their lines match would answer a guess.
         for pattern in ["1_337", "1987-03", "quartz"] {
