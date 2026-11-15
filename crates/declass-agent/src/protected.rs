@@ -33,7 +33,7 @@ pub async fn edit_protected(
     args: &Map<String, Value>,
 ) -> Result<String, String> {
     let raw = string_arg(args, "path")?;
-    let rel = declass_fs::writable_relative(raw).map_err(fs_err)?;
+    let rel = declass_fs::resolve_writable(ctx.workspace, raw).map_err(fs_err)?;
     let spec = string_arg(args, "spec")?;
     let tests = match args.get("tests") {
         Some(Value::Object(t)) => Some((string_arg(t, "path")?, string_arg(t, "content")?)),
@@ -77,7 +77,7 @@ pub async fn edit_protected(
             Some(Ok(done)) => done,
         };
         if let (Some((path, content)), false) = (tests, tests_written) {
-            let test_rel = declass_fs::writable_relative(path).map_err(fs_err)?;
+            let test_rel = declass_fs::resolve_writable(ctx.workspace, path).map_err(fs_err)?;
             let content = ctx.presenter.resolve_for_write(&test_rel, content)?;
             let receipt = ctx
                 .journal

@@ -12,11 +12,45 @@
 
 use std::path::{Path, PathBuf};
 
-/// The directories a `.git` entry stands for: the directory itself, or for a
-/// `.git` file (`gitdir: <path>`) the directory it names and the common
-/// directory that one shares (`commondir`). Paths are resolved (canonical);
-/// ones that do not exist are left out.
+/// The directories a `.git` entry stands for: the directory itself (a
+/// symlink to one included), or for a `.git` file (`gitdir: <path>`) the
+/// directory it names and the common directory that one shares
+/// (`commondir`); and the object stores those borrow objects from
+/// (`objects/info/alternates`: a clone made with `--shared` or
+/// `--reference`). Paths are resolved (canonical); ones that do not exist
+/// are left out.
 pub fn named_by(dot_git: &Path) -> Vec<PathBuf> {
+    let mut out = git_dirs(dot_git);
+    // Alternates may name alternates in turn; git follows five levels.
+    let mut from: Vec<PathBuf> = out.iter().map(|d| d.join("objects")).collect();
+    for _ in 0..5 {
+        let mut next = Vec::new();
+        for objects in &from {
+            let Ok(list) = std::fs::read_to_string(objects.join("info/alternates")) else {
+                continue;
+            };
+            for line in list.lines().map(str::trim) {
+                if line.is_empty() || line.starts_with('#') {
+                    continue;
+                }
+                if let Ok(store) = objects.join(line).canonicalize()
+                    && !out.iter().any(|d| store.starts_with(d))
+                {
+                    out.push(store.clone());
+                    next.push(store);
+                }
+            }
+        }
+        if next.is_empty() {
+            break;
+        }
+        from = next;
+    }
+    out
+}
+
+/// [`named_by`] without the alternates.
+fn git_dirs(dot_git: &Path) -> Vec<PathBuf> {
     let Ok(meta) = std::fs::metadata(dot_git) else {
         return Vec::new();
     };
@@ -87,6 +121,24 @@ mod tests {
         std::fs::create_dir_all(common.join("modules/lib")).unwrap();
         std::fs::write(sub.join(".git"), "gitdir: ../../.git/modules/lib\n").unwrap();
         assert_eq!(history_dirs(&sub), vec![common.join("modules/lib")]);
+        // A clone that borrows objects (`--shared`, `--reference`), by an
+        // absolute path and, in turn, by a relative one.
+        let shared = root.join("shared");
+        let borrowed = root.join("store/objects");
+        let further = root.join("further/objects");
+        std::fs::create_dir_all(shared.join(".git/objects/info")).unwrap();
+        std::fs::create_dir_all(borrowed.join("info")).unwrap();
+        std::fs::create_dir_all(&further).unwrap();
+        std::fs::write(
+            shared.join(".git/objects/info/alternates"),
+            format!("# comment\n{}\n", borrowed.display()),
+        )
+        .unwrap();
+        std::fs::write(borrowed.join("info/alternates"), "../../further/objects\n").unwrap();
+        assert_eq!(
+            history_dirs(&shared),
+            vec![shared.join(".git"), borrowed.clone(), further.clone()]
+        );
         // Outside any repository, and a malformed `.git` file.
         let plain = root.join("plain");
         std::fs::create_dir_all(&plain).unwrap();

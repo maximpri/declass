@@ -219,7 +219,8 @@ pub async fn dispatch(ctx: &mut Ctx<'_>, name: &str, args: &Map<String, Value>) 
 
 fn read_file(ctx: &Ctx<'_>, args: &Map<String, Value>) -> Result<String, String> {
     let raw = string_arg(args, "path")?;
-    let rel = declass_fs::normalize_relative(raw).map_err(fs_err)?;
+    // Spelled as on disk: the checks below must name what the open reads.
+    let rel = declass_fs::resolve_relative(ctx.workspace, raw).map_err(fs_err)?;
     // `.declass` (raw handles, the vault, transcripts) and `.git` (committed
     // copies) are run state, never workspace content.
     if declass_fs::is_reserved(&rel) || !ctx.presenter.path_visible(&rel) {
@@ -267,7 +268,7 @@ fn read_file(ctx: &Ctx<'_>, args: &Map<String, Value>) -> Result<String, String>
 fn visible_files(ctx: &Ctx<'_>, dir: Option<&str>) -> Result<Vec<String>, String> {
     let prefix = match dir {
         Some(d) if !d.trim().is_empty() && d.trim() != "." => {
-            let rel = declass_fs::normalize_relative(d).map_err(fs_err)?;
+            let rel = declass_fs::resolve_relative(ctx.workspace, d).map_err(fs_err)?;
             Some(format!("{}/", rel.display()))
         }
         _ => None,
@@ -553,7 +554,7 @@ Each call edits one file; use separate calls for different files. No edits appli
 
 fn edit_file(ctx: &mut Ctx<'_>, args: &Map<String, Value>) -> Result<String, String> {
     let (raw, edits) = edit_arguments(args)?;
-    let rel = declass_fs::writable_relative(raw).map_err(fs_err)?;
+    let rel = declass_fs::resolve_writable(ctx.workspace, raw).map_err(fs_err)?;
     let bytes = declass_fs::read_file(ctx.workspace, &rel, MAX_READ_BYTES).map_err(fs_err)?;
     let original =
         String::from_utf8(bytes.clone()).map_err(|_| "file is not valid UTF-8".to_owned())?;
@@ -583,7 +584,7 @@ fn edit_file(ctx: &mut Ctx<'_>, args: &Map<String, Value>) -> Result<String, Str
 fn write_file(ctx: &mut Ctx<'_>, args: &Map<String, Value>) -> Result<String, String> {
     let raw = string_arg(args, "path")?;
     let content = string_arg(args, "content")?;
-    let rel = declass_fs::writable_relative(raw).map_err(fs_err)?;
+    let rel = declass_fs::resolve_writable(ctx.workspace, raw).map_err(fs_err)?;
     let existed = declass_fs::read_optional(ctx.workspace, &rel, MAX_READ_BYTES)
         .map_err(fs_err)?
         .is_some();
@@ -1799,18 +1800,21 @@ mod sensitive_command_tests {
     #[tokio::test]
     async fn commands_cannot_read_history_kept_outside_the_workspace() {
         // The workspace is the folder declass was started in. In a linked
-        // worktree (`git worktree add`), or a subdirectory of a repository,
-        // the git directory holding committed copies of its files is outside
-        // it, where no walk of the workspace finds it.
+        // worktree (`git worktree add`), a subdirectory of a repository, a
+        // clone that borrows another repository's objects (`--shared`), or
+        // under a `.git` link, the history holding committed copies of its
+        // files is outside it, where no walk of the workspace finds it.
         let d = tempfile::tempdir().unwrap();
         let root = d.path().canonicalize().unwrap();
-        let main = root.join("main");
+        let (main, other) = (root.join("main"), root.join("other"));
         std::fs::create_dir_all(main.join("app/data")).unwrap();
         std::fs::create_dir_all(main.join("data")).unwrap();
+        std::fs::create_dir_all(other.join("data")).unwrap();
         let row = format!("id,total\n1,{BALANCE}\n");
         std::fs::write(main.join("data/orders.csv"), &row).unwrap();
         std::fs::write(main.join("app/data/orders.csv"), &row).unwrap();
         std::fs::write(main.join("README.md"), "public\n").unwrap();
+        std::fs::write(other.join("data/orders.csv"), &row).unwrap();
         let git = |dir: &Path, args: &[&str]| {
             let ok = std::process::Command::new("/usr/bin/git")
                 .args(["-c", "user.name=t", "-c", "user.email=t@t.test"])
@@ -1821,19 +1825,45 @@ mod sensitive_command_tests {
                 .success();
             assert!(ok, "git {args:?}");
         };
-        git(&main, &["init", "-q"]);
-        git(&main, &["add", "-A"]);
-        git(&main, &["commit", "-qm", "start"]);
+        for repo in [&main, &other] {
+            git(repo, &["init", "-q"]);
+            git(repo, &["add", "-A"]);
+            git(repo, &["commit", "-qm", "start"]);
+        }
         let worktree = root.join("wt");
         git(
             &main,
             &["worktree", "add", "-q", worktree.to_str().unwrap()],
         );
-        for (ws, committed) in [
-            (worktree.clone(), "data/orders.csv"),
-            (main.join("app"), "app/data/orders.csv"),
-        ] {
-            let run = ws.join(".declass/runs/r1");
+        // A vendored checkout inside the worktree whose `.git` is a link.
+        std::fs::create_dir_all(worktree.join("vendor/lib/data")).unwrap();
+        std::os::unix::fs::symlink(other.join(".git"), worktree.join("vendor/lib/.git")).unwrap();
+        let shared = root.join("shared");
+        git(
+            &root,
+            &["clone", "-q", "--shared", "main", shared.to_str().unwrap()],
+        );
+        let main_git = main.join(".git");
+        let cases = [
+            (worktree.clone(), "git show HEAD:data/orders.csv".to_owned()),
+            (
+                worktree.clone(),
+                "git -C vendor/lib show HEAD:data/orders.csv".to_owned(),
+            ),
+            (
+                main.join("app"),
+                "git show HEAD:app/data/orders.csv".to_owned(),
+            ),
+            (
+                shared.clone(),
+                format!(
+                    "git --git-dir={} show HEAD:data/orders.csv",
+                    main_git.display()
+                ),
+            ),
+        ];
+        for (i, (ws, read)) in cases.into_iter().enumerate() {
+            let run = ws.join(format!(".declass/runs/r{i}"));
             std::fs::create_dir_all(&run).unwrap();
             let policy = Policy {
                 sensitive_globs: vec!["data/**".into()],
@@ -1860,16 +1890,134 @@ mod sensitive_command_tests {
                 git_tools: None,
                 lsp: None,
             };
+            let command = format!("git --version; {read} | od -c; echo done");
+            let out = call(&mut ctx, "run_command", json!({ "command": command })).await;
+            // git ran (it reports the refused history as no repository).
+            assert!(
+                out.contains("git version") && out.contains("done"),
+                "{read}: {out}"
+            );
+            assert!(!out.contains("  8   9   7"), "{read}: {out}");
+            // The control: a command that may read history (its output stays
+            // on this machine, in a handle) does print the committed file.
+            let held = call(
+                &mut ctx,
+                "run_command",
+                json!({"command": command, "sensitive_data": true}),
+            )
+            .await;
+            assert!(!held.contains("  8   9   7"), "{read}: {held}");
+            let handles: String = std::fs::read_dir(run.join("handles"))
+                .unwrap()
+                .flatten()
+                .filter_map(|e| std::fs::read_to_string(e.path()).ok())
+                .collect();
+            assert!(handles.contains("  8   9   7"), "{read}: no control");
+        }
+    }
+
+    #[tokio::test]
+    async fn names_stored_decomposed_are_found_and_protected_whatever_their_spelling() {
+        // macOS keeps a name decomposed (NFD) when the program that made it
+        // wrote it so; git lists it composed (NFC, `core.precomposeunicode`),
+        // rules and models write NFC. Priming, the file tools and commands
+        // must all take it for the file the rule names.
+        let d = tempfile::tempdir().unwrap();
+        let ws = d.path().canonicalize().unwrap().join("ws");
+        let (nfd, nfc) = ("donne\u{301}es", "donn\u{e9}es");
+        let (pub_nfd, pub_nfc) = ("re\u{301}sume\u{301}.md", "r\u{e9}sum\u{e9}.md");
+        std::fs::create_dir_all(ws.join(nfd)).unwrap();
+        std::fs::create_dir_all(ws.join("notes")).unwrap();
+        std::fs::write(
+            ws.join(nfd).join("clients.csv"),
+            format!("id,born,total\n1,1987-03-14,{BALANCE}\n"),
+        )
+        .unwrap();
+        std::fs::write(ws.join("notes").join(pub_nfd), "public-notes-ok\n").unwrap();
+        std::fs::write(ws.join("Readme.md"), "readme-ok\n").unwrap();
+        let git = |args: &[&str]| {
+            let ok = std::process::Command::new("/usr/bin/git")
+                .args(["-c", "user.name=t", "-c", "user.email=t@t.test"])
+                .args(args)
+                .current_dir(&ws)
+                .status()
+                .unwrap()
+                .success();
+            assert!(ok, "git {args:?}");
+        };
+        git(&["init", "-q"]);
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "start"]);
+        // A rename only in letter case: git's index keeps the old name.
+        std::fs::rename(ws.join("Readme.md"), ws.join("tmp-readme")).unwrap();
+        std::fs::rename(ws.join("tmp-readme"), ws.join("README.md")).unwrap();
+        let folds = ws.join(nfc).exists() && ws.join("readme.md").exists();
+        let run = ws.join(".declass/runs/r1");
+        std::fs::create_dir_all(&run).unwrap();
+        let policy = Policy {
+            sensitive_globs: vec![format!("{nfc}/**")],
+            command_output_sensitive: true,
+            detect_pii: true,
+            ..Policy::default()
+        };
+        let engine = Engine::open(&run, policy, None).unwrap();
+        let git_bin = Git::locate().unwrap();
+        let files = git_bin.list_files(&ws).unwrap();
+        engine.prime(&ws, &files, "");
+        assert!(engine.unindexed().is_empty(), "{:?}", engine.unindexed());
+        assert!(
+            std::fs::read_to_string(run.join("vault.json"))
+                .unwrap()
+                .contains(BALANCE),
+            "not vaulted at priming: {files:?}"
+        );
+        let mut journal = WriteJournal::open(&run).unwrap();
+        let mut ctx = Ctx {
+            workspace: &ws,
+            run_dir: &run,
+            sandbox: declass_sandbox::detect().unwrap(),
+            git: &git_bin,
+            presenter: engine.as_ref(),
+            journal: &mut journal,
+            command_timeout: Duration::from_secs(30),
+            network: &crate::egress::Network::Off,
+            checks: &[],
+            audit: None,
+            interrupted: None,
+            web: None,
+            git_tools: None,
+            lsp: None,
+        };
+        for name in [nfc, nfd] {
+            let path = format!("{name}/clients.csv");
+            let shown = call(&mut ctx, "read_file", json!({ "path": path })).await;
+            assert!(
+                !shown.contains("1987-03-14") && !shown.contains(BALANCE),
+                "{path:?}: {shown}"
+            );
             let out = call(
                 &mut ctx,
                 "run_command",
-                json!({"command": format!(
-                    "git show HEAD:{committed} | od -c; git log -p | od -c | head -40; echo done"
-                )}),
+                json!({ "command": format!("od -c '{path}'; echo done") }),
             )
             .await;
-            assert!(out.contains("done"), "{}: {out}", ws.display());
-            assert!(!out.contains("  8   9   7"), "{}: {out}", ws.display());
+            assert!(
+                out.contains("done") && !out.contains("  8   9   7"),
+                "{path:?}: {out}"
+            );
+        }
+        if folds {
+            let notes = call(
+                &mut ctx,
+                "read_file",
+                json!({ "path": format!("notes/{pub_nfc}") }),
+            )
+            .await;
+            assert!(notes.contains("public-notes-ok"), "{notes}");
+            let readme = call(&mut ctx, "read_file", json!({"path": "Readme.md"})).await;
+            assert!(readme.contains("readme-ok"), "{readme}");
+            let listed = call(&mut ctx, "list_files", json!({})).await;
+            assert!(listed.contains("README.md"), "{listed}");
         }
     }
 

@@ -421,7 +421,7 @@ fn target(
     raw: &str,
     positions: bool,
 ) -> Result<Target, Fail> {
-    let rel = declass_fs::normalize_relative(raw).map_err(fs_err)?;
+    let rel = declass_fs::resolve_relative(ctx.workspace, raw).map_err(fs_err)?;
     if declass_fs::is_reserved(&rel) || !ctx.presenter.path_visible(&rel) {
         return Err(Fail::Refused(format!("{raw} is not available")));
     }

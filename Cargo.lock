@@ -484,6 +484,7 @@ dependencies = [
  "declass-review",
  "futures-util",
  "hex",
+ "icu_normalizer",
  "proptest",
  "regex",
  "regex-syntax",

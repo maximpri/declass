@@ -1014,26 +1014,30 @@ git; reset behaviour defined per entry).
 ## 8. Safety primitives
 
 - **File I/O:** all workspace access goes through `PinnedParent` (`O_NOFOLLOW` walk, `openat`,
-  `renameat`, `fsync`); every existing component must be spelled as its folder lists it, so a
-  case-insensitive volume cannot open `.DECLASS` or `DATA/x` for a check made on that spelling;
-  writes are atomic with digest preconditions and rollback; `.git` and `.declass` are never
-  writable by tools, in any spelling a file system folds to them (`declass_fs::is_reserved_name`).
+  `renameat`, `fsync`); a tool's path, and every name in git's listing, is first resolved to the
+  spelling its folders list (`declass_fs::resolve`, by the file system's own matching: letter
+  case, Unicode normalization), so every check sees the file the open reads, and under a
+  workspace root an open under another spelling is refused; writes are atomic with digest
+  preconditions and rollback; `.git` and `.declass` are never writable by tools, in any spelling a
+  file system folds to them (`declass_fs::is_reserved_name`). Rules that protect a path compare
+  names in Unicode normalization form C.
 - **Commands:** Seatbelt (macOS) or bwrap (Linux) with absolute binary paths; workspace-write with
   `.git`/`.declass` unwritable; `.declass` (the vault, handles, transcripts, audit log) unreadable to
   every command by the sandbox itself, `.git` (committed copies) to ordinary commands and checks,
   wherever the repository keeps it (`declass_fs::gitdir`: a folder above the workspace, the main
-  repository of a linked worktree, a `.git` file's target);
+  repository of a linked worktree, a `.git` file's or link's target, borrowed object stores);
   command `TMPDIR` outside the workspace (a sub-agent's commands can write nothing else: the
   workspace is read-only to them, `Spec.read_only`), a separate one for `sensitive_data` commands that no
   other sandboxed process (command, check, MCP server) can read (`tools::hidden_from_processes`), where
   their cargo builds go too (`CARGO_TARGET_DIR`); sensitive and protected paths unreadable (deny-read), and under
-  Seatbelt, whose rules name paths, not movable (a denied path and the folders above it cannot be
-  renamed or removed), except for
+  Seatbelt, whose rules name paths, not movable (a denied path, the folders above it and the
+  workspace and scratch directory themselves cannot be renamed or removed; run state is denied
+  wherever it is), except for
   `sensitive_data` commands (whose placeholders are resolved locally), and protected source readable by the host's checks; credential
   stores in the home directory unreadable to every command; network only through the egress proxy
   by default (§5.6b), none for `sensitive_data` commands and checks that read protected source;
   tmpfs `/run`; restricted service lookup; process-tree and process-group kill when a command ends,
-  on timeout or interrupt.
+  on timeout, on interrupt or when its call is dropped, before the leader is reaped.
   On Linux: denied paths covered by mode-000 stand-ins, no capabilities, a seccomp filter against
   Unix sockets unless the network is unrestricted, and `.git`/`.declass` entries a command created removed when
   it ends. A sandbox that cannot start refuses the command.

@@ -141,19 +141,40 @@ pub enum IpLevel {
     Sealed,
 }
 
+/// `s` in Unicode normalization form C. A file system that compares names
+/// regardless of normalization (macOS's) may store decomposed (`e` and a
+/// combining accent) a name a rule writes composed (`é`): what a rule
+/// protects is matched in one form.
+fn nfc(s: &str) -> std::borrow::Cow<'_, str> {
+    if s.is_ascii() {
+        std::borrow::Cow::Borrowed(s)
+    } else {
+        icu_normalizer::ComposingNormalizerBorrowed::new_nfc().normalize(s)
+    }
+}
+
+/// [`glob_match`] with both sides in normalization form C, for the rules
+/// that protect a path (sensitive, protected, interface-only, sealed); rules
+/// that allow something (secret sinks) keep matching as written.
+fn protects(pattern: &str, path: &str) -> bool {
+    glob_match(&nfc(pattern), path)
+}
+
 impl Policy {
     pub fn is_sensitive_path(&self, path: &Path) -> bool {
         let p = path.to_string_lossy();
-        self.protected_paths.iter().any(|g| glob_match(g, &p))
-            || !is_env_template(path) && self.sensitive_globs.iter().any(|g| glob_match(g, &p))
+        let p = nfc(&p);
+        self.protected_paths.iter().any(|g| protects(g, &p))
+            || !is_env_template(path) && self.sensitive_globs.iter().any(|g| protects(g, &p))
     }
 
     /// The IP level of `path`; Sealed wins when both lists match.
     pub fn ip_level(&self, path: &Path) -> Option<IpLevel> {
         let p = path.to_string_lossy();
-        if self.sealed.iter().any(|g| glob_match(g, &p)) {
+        let p = nfc(&p);
+        if self.sealed.iter().any(|g| protects(g, &p)) {
             Some(IpLevel::Sealed)
-        } else if self.interface_only.iter().any(|g| glob_match(g, &p)) {
+        } else if self.interface_only.iter().any(|g| protects(g, &p)) {
             Some(IpLevel::InterfaceOnly)
         } else {
             None
@@ -277,6 +298,35 @@ mod tests {
         assert_eq!(p.ip_level(Path::new("src/invoice.rs")), None);
         assert!(p.has_ip() && !Policy::default().has_ip());
         assert!(!p.is_sensitive_path(Path::new("src/pricing/engine.rs")));
+    }
+
+    #[test]
+    fn protecting_rules_match_a_name_in_either_unicode_form() {
+        // macOS keeps a name decomposed (NFD) when a program wrote it so,
+        // while git and rules write it composed (NFC); it is one file.
+        let (nfc, nfd) = ("donn\u{e9}es", "donne\u{301}es");
+        let p = Policy {
+            sensitive_globs: vec![format!("{nfc}/**"), "*.csv".into()],
+            sealed: vec![format!("{nfd}/mod\u{e8}le.py")],
+            secret_sinks: vec![format!("{nfc}/.env")],
+            ..Policy::default()
+        };
+        for path in [format!("{nfc}/clients.json"), format!("{nfd}/clients.json")] {
+            assert!(p.is_sensitive_path(Path::new(&path)), "{path:?}");
+        }
+        for path in [
+            format!("{nfd}/mode\u{300}le.py"),
+            format!("{nfc}/mod\u{e8}le.py"),
+        ] {
+            assert_eq!(
+                p.ip_level(Path::new(&path)),
+                Some(IpLevel::Sealed),
+                "{path:?}"
+            );
+        }
+        // A rule that allows something matches only as written.
+        assert!(!p.is_secret_sink(Path::new(&format!("{nfd}/.env"))));
+        assert!(p.is_secret_sink(Path::new(&format!("{nfc}/.env"))));
     }
 
     #[test]

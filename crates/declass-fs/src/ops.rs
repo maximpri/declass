@@ -272,6 +272,69 @@ mod tests {
     }
 
     #[test]
+    fn paths_resolve_to_the_spelling_their_folders_list() {
+        // A name stored decomposed (NFD, as some macOS programs write it)
+        // that git, and models, write composed (NFC); and other letter cases.
+        let d = root();
+        let p = d.path().canonicalize().unwrap();
+        let (nfd, nfc) = ("donne\u{301}es", "donn\u{e9}es");
+        std::fs::create_dir_all(p.join(nfd)).unwrap();
+        std::fs::create_dir_all(p.join("data")).unwrap();
+        std::fs::write(p.join(nfd).join("clients.csv"), b"secret").unwrap();
+        std::fs::write(p.join("data/orders.csv"), b"8977066").unwrap();
+        // macOS's default volumes fold both; others may fold neither.
+        let folds = p.join("DATA").exists() && p.join(nfc).exists();
+        let mut batch = crate::Spellings::new(&p);
+        for (given, on_disk) in [
+            (format!("{nfc}/clients.csv"), format!("{nfd}/clients.csv")),
+            (format!("{nfd}/clients.csv"), format!("{nfd}/clients.csv")),
+            ("DATA/Orders.csv".into(), "data/orders.csv".into()),
+            ("data/orders.csv".into(), "data/orders.csv".into()),
+            ("DATA/new/File.txt".into(), "data/new/File.txt".into()),
+            ("fresh/File.txt".into(), "fresh/File.txt".into()),
+        ] {
+            let got = crate::resolve(&p, Path::new(&given)).unwrap();
+            assert_eq!(batch.resolve(Path::new(&given)).unwrap(), got, "{given}");
+            if folds {
+                assert_eq!(got, PathBuf::from(&on_disk), "{given}");
+            }
+            // Whatever the file system: the path resolved opens what the path
+            // given opens, spelled as listed, and only that spelling opens.
+            if p.join(&given).is_file() {
+                use std::os::unix::fs::MetadataExt;
+                let ino = |q: &Path| std::fs::metadata(q).unwrap().ino();
+                assert_eq!(ino(&p.join(&got)), ino(&p.join(&given)), "{given}");
+                assert!(read_file(&p, &got, 100).is_ok(), "{given}");
+                if got.as_path() != Path::new(&given) {
+                    assert!(read_file(&p, Path::new(&given), 100).is_err(), "{given}");
+                }
+            } else {
+                assert!(!p.join(&got).exists() || folds, "{given}");
+            }
+        }
+    }
+
+    #[test]
+    fn paths_from_the_file_system_root_are_opened_as_written() {
+        // The owner's own files (images, plans, skills) are named by absolute
+        // paths and belong to no workspace: their folders are not listed (a
+        // folder macOS's privacy controls let a program open but not list
+        // stays usable), and their spelling is not checked.
+        let d = root();
+        let p = d.path().canonicalize().unwrap();
+        std::fs::create_dir_all(p.join("Shared/notes")).unwrap();
+        std::fs::write(p.join("Shared/notes/note.txt"), b"n").unwrap();
+        let from_root = |rel: &str| {
+            let abs = p.join(rel);
+            read_file(Path::new("/"), abs.strip_prefix("/").unwrap(), 10)
+        };
+        assert_eq!(from_root("Shared/notes/note.txt").unwrap(), b"n");
+        if p.join("SHARED").exists() {
+            assert_eq!(from_root("SHARED/Notes/note.txt").unwrap(), b"n");
+        }
+    }
+
+    #[test]
     fn a_name_changed_since_its_folder_was_listed_is_checked_again() {
         // The folder's listing is kept between reads; renaming an entry to
         // another spelling must not leave the old spelling accepted.

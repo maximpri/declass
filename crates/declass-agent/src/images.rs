@@ -155,7 +155,7 @@ pub fn read(
     let Some(raw) = args.get("path").and_then(Value::as_str) else {
         return Placed::failed("missing string argument `path`".into());
     };
-    let rel = match declass_fs::normalize_relative(raw) {
+    let rel = match declass_fs::resolve_relative(&cfg.workspace, raw) {
         Ok(rel) => rel,
         Err(e) => return Placed::failed(e.to_string()),
     };

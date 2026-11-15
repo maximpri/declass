@@ -166,6 +166,11 @@ fn walk(workspace: &Path, mut visit: impl FnMut(&Path, bool) -> bool) {
                 Ok(t) if t.is_file() => {
                     visit(&child, false);
                 }
+                // A `.git` or `.declass` link stands for the folder it names
+                // (git follows one); other links are not followed.
+                Ok(t) if t.is_symlink() && declass_fs::is_reserved_name(&entry.file_name()) => {
+                    visit(&child, false);
+                }
                 _ => {}
             }
         }
@@ -284,6 +289,9 @@ struct State {
     public_words: std::collections::HashSet<String>,
     /// Sensitive files found when priming, for the note added to the task.
     sensitive_files: Vec<String>,
+    /// Sensitive and protected files priming could not read (path, why):
+    /// their values are not known in advance, so they are named, not skipped.
+    unindexed: Vec<(String, String)>,
     /// Protected source (IP levels).
     ip: protected::IpState,
     /// Detector matches the frontier wrote itself (never replaced unless the
@@ -472,6 +480,7 @@ impl Engine {
             overlap: OverlapIndex::default(),
             public_words: Default::default(),
             sensitive_files: Vec::new(),
+            unindexed: Vec::new(),
             ip: protected::IpState::open(run_dir),
             authored: Default::default(),
             brief: None,
@@ -532,6 +541,13 @@ impl Engine {
     /// [`PRIME_UNLISTED_BYTES`] in total: a value from them that no detector
     /// recognizes is then replaced wherever it appears, including in what the
     /// operator types.
+    /// Sensitive and protected files [`Engine::prime`] could not read, with
+    /// why: until one is read, a value from it that no detector recognizes
+    /// is not replaced elsewhere.
+    pub fn unindexed(&self) -> Vec<(String, String)> {
+        self.lock().unindexed.clone()
+    }
+
     pub fn prime(&self, workspace: &Path, all_files: &[String], objective: &str) -> usize {
         self.structure_prime(workspace);
         // Public files that are really data are held as sensitive before
@@ -575,8 +591,14 @@ impl Engine {
             if !self.is_sensitive(path) {
                 continue;
             }
-            let Ok(bytes) = declass_fs::read_file(workspace, path, PRIME_MAX_BYTES as u64) else {
-                continue;
+            let bytes = match declass_fs::read_file(workspace, path, PRIME_MAX_BYTES as u64) {
+                Ok(bytes) => bytes,
+                Err(e) => {
+                    let mut st = self.lock();
+                    st.sensitive_files.push(f.clone());
+                    st.unindexed.push((f.clone(), e.to_string()));
+                    continue;
+                }
             };
             if !listed {
                 if bytes.len() as u64 > budget {
@@ -2429,8 +2451,8 @@ impl Presenter for Engine {
                 }
                 return !scan_skipped(rel);
             }
-            // A `.git` file (a submodule, a nested worktree) names history
-            // kept elsewhere.
+            // A `.git` file (a submodule, a nested worktree) or link names
+            // history kept elsewhere.
             if declass_fs::is_reserved_name(name) {
                 out.extend(declass_fs::gitdir::named_by(&abs));
                 return false;

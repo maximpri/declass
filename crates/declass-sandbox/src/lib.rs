@@ -407,8 +407,10 @@ pub fn seatbelt_profile(spec: &Spec, host_ports: Option<&[u16]>) -> Result<Strin
         .ok_or_else(|| SandboxError::Path(spec.workspace.display().to_string()))?;
     let reserved = format!("^{}(/.*)?/\\.(git|declass)(/.*)?$", regex_escape(root));
     // Run state (the vault maps every placeholder to its real value; handles,
-    // transcripts, the audit log) is unreadable whatever the caller denies.
-    let run_state = format!("^{}(/.*)?/\\.declass(/.*)?$", regex_escape(root));
+    // transcripts, the audit log) is unreadable whatever the caller denies,
+    // wherever it is: a rule tied to the workspace's path would not follow a
+    // folder holding it that was moved out of the workspace.
+    let run_state = "/\\.declass(/.*)?$";
     let mut rules = vec![
         "(version 1)".to_owned(),
         "(deny default)".to_owned(),
@@ -427,13 +429,21 @@ pub fn seatbelt_profile(spec: &Spec, host_ports: Option<&[u16]>) -> Result<Strin
     rules.extend([
         format!("(allow file-write* (subpath {scratch}))"),
         format!("(deny file-write* (regex #\"{reserved}\"))"),
-        // Apple's toolchain helper caches here regardless of TMPDIR; allow only its cache files.
-        "(allow file-write* (regex #\"^/private/var/folders/[^/]+/[^/]+/T/xcrun_db\"))".to_owned(),
+        // Apple's toolchain helper caches here regardless of TMPDIR; allow only
+        // its cache files (`xcrun_db` and its temporary `xcrun_db-<random>`).
+        "(allow file-write* (regex #\"^/private/var/folders/[^/]+/[^/]+/T/xcrun_db[^/]*$\"))"
+            .to_owned(),
     ]);
     // Later rules win: these override the blanket read allowance above.
     rules.push(format!("(deny file-read* (regex #\"{run_state}\"))"));
-    // Directories above a denied path, inside what the command may write.
-    let mut above = std::collections::BTreeSet::new();
+    // The rules name paths and are checked at each access, so what they name
+    // must keep its path. A rename needs `file-write-unlink` on what it
+    // moves: denied for a denied path, every folder above one, and the
+    // workspace and scratch directory themselves (with the workspace moved
+    // into the scratch directory, no rule named anything in it). Files may
+    // still be created and written in those folders.
+    let mut fixed =
+        std::collections::BTreeSet::from([spec.workspace.clone(), spec.scratch.clone()]);
     for p in &spec.deny_read {
         // A denied symlink is denied at its target too, so the content is not
         // readable under the target's own path.
@@ -446,25 +456,20 @@ pub fn seatbelt_profile(spec: &Spec, host_ports: Option<&[u16]>) -> Result<Strin
                 format!("(literal {q})")
             };
             rules.push(format!("(deny file-read* {filter})"));
-            // The rules name paths and are checked at each access, so a
-            // denied path must keep its name: moving it, or a directory
-            // above it, would make its content readable under a path no
-            // rule names. A rename needs `file-write-unlink` on what it
-            // moves; files may still be created and written there.
-            rules.push(format!("(deny file-write-unlink {filter})"));
-            above.extend(
+            // Nor may its mode or flags change: a denied file made
+            // unreadable to Declass itself would go unindexed at run start.
+            rules.push(format!(
+                "(deny file-write-unlink file-write-mode file-write-flags file-write-owner {filter})"
+            ));
+            fixed.extend(
                 p.ancestors()
                     .skip(1)
-                    .filter(|a| {
-                        [&spec.workspace, &spec.scratch]
-                            .iter()
-                            .any(|root| a.starts_with(root) && a != root)
-                    })
+                    .filter(|a| a.starts_with(&spec.workspace) || a.starts_with(&spec.scratch))
                     .map(Path::to_path_buf),
             );
         }
     }
-    for a in &above {
+    for a in &fixed {
         rules.push(format!("(deny file-write-unlink (literal {}))", quote(a)?));
     }
     let services: Vec<String> = MACH_SERVICES
@@ -1218,6 +1223,10 @@ async fn run_with(
         SandboxKind::Seatbelt => SandboxError::Spawn(format!("{program}: {e}")),
     })?;
     let pid = child.id();
+    // Declared after `child`, so dropped first: a future dropped while the
+    // command runs (a cancelled call) still sweeps its tree and group before
+    // the child's own drop kills and reaps the leader.
+    let mut sweep_on_drop = SweepOnDrop(pid);
     let watch = pid.map(|p| governor::Governor::watch(p, limits));
     let mut out = child
         .stdout
@@ -1237,17 +1246,24 @@ async fn run_with(
         let _ = err.read_to_end(&mut b).await;
         b
     });
+    // The leader is not reaped until its tree and group are swept, so its
+    // process id, which names the group, cannot be reused meanwhile.
+    let exited = async {
+        match pid {
+            Some(p) => exited_unreaped(p).await,
+            None => child.wait().await.ok().map(|s| s.code()),
+        }
+    };
     let (exit_code, timed_out, interrupted) = tokio::select! {
-        waited = tokio::time::timeout(spec.timeout, child.wait()) => match waited {
-            Ok(status) => (status.ok().and_then(|s| s.code()), false, false),
+        waited = tokio::time::timeout(spec.timeout, exited) => match waited {
+            Ok(code) => (code.flatten(), false, false),
             Err(_) => (None, true, false),
         },
         () = stop => (None, false, true),
     };
     // Always sweep the tree: backgrounded or detached descendants must not outlive the command.
-    if let Some(pid) = pid {
-        kill_tree(pid);
-        kill_group(pid);
+    if let Some(pid) = sweep_on_drop.0.take() {
+        sweep(pid);
     }
     let _ = child.kill().await;
     let memory = match watch {
@@ -1456,18 +1472,22 @@ impl Process {
     }
 
     /// Its exit code once it has exited (`Some(None)`: killed by a signal).
+    /// The process is not reaped here, so its id (and the group it leads)
+    /// stays its own until [`Process::stop`] or the drop sweeps the group.
     pub fn exited(&mut self) -> Option<Option<i32>> {
-        self.child.try_wait().ok().flatten().map(|s| s.code())
+        match self.pid {
+            Some(pid) => exit_status(pid, rustix::process::WaitidOptions::NOHANG),
+            None => self.child.try_wait().ok().flatten().map(|s| s.code()),
+        }
     }
 
     /// Stops it: waits up to `grace` for it to exit (its input should be
-    /// closed first), then kills its whole tree. Returns the `.git` and
-    /// `.declass` entries it created, which are removed (bubblewrap).
+    /// closed first), then kills its whole tree and group. Returns the `.git`
+    /// and `.declass` entries it created, which are removed (bubblewrap).
     pub async fn stop(&mut self, grace: Duration) -> Vec<PathBuf> {
-        let _ = tokio::time::timeout(grace, self.child.wait()).await;
         if let Some(pid) = self.pid.take() {
-            kill_tree(pid);
-            kill_group(pid);
+            let _ = tokio::time::timeout(grace, exited_unreaped(pid)).await;
+            sweep(pid);
         }
         let _ = self.child.kill().await;
         if let Some(g) = self.governor.take() {
@@ -1485,9 +1505,9 @@ impl Process {
 
 impl Drop for Process {
     fn drop(&mut self) {
+        // Runs before the child's own drop kills and reaps the leader.
         if let Some(pid) = self.pid.take() {
-            kill_tree(pid);
-            kill_group(pid);
+            sweep(pid);
         }
         if let Some(g) = self.governor.take() {
             g.abandon();
@@ -1534,17 +1554,70 @@ fn process_table() -> Vec<(u32, u32)> {
         .collect()
 }
 
-/// Kills what is left of the process group `leader` leads. Every sandboxed
-/// process is started as the leader of a group of its own, and a process
-/// orphaned away from the tree (its parent exited first, so the parent-link
-/// walk of [`kill_tree`] cannot find it) keeps that group. Under bubblewrap
-/// the PID namespace ends with the command anyway; under Seatbelt this is
-/// what stops such a process (one that starts a session of its own, with
-/// `setsid`, still survives: SECURITY.md, Known limits).
-fn kill_group(leader: u32) {
-    if let Some(p) = rustix::process::Pid::from_raw(leader as i32) {
-        let _ = rustix::process::kill_process_group(p, rustix::process::Signal::Kill);
+/// Ends everything a sandboxed process left: the process group `leader`
+/// leads is frozen, the tree below it is stopped and killed ([`kill_tree`]),
+/// then the group is killed. Every sandboxed process is started as the
+/// leader of a group of its own, and a process orphaned away from the tree
+/// (its parent exited first, so the parent-link walk cannot find it) keeps
+/// that group. Under bubblewrap the PID namespace ends with the command
+/// anyway; under Seatbelt this is what stops such a process (one that starts
+/// a session of its own, with `setsid`, still survives: SECURITY.md, Known
+/// limits). `leader` must not have been reaped yet, so that neither its id
+/// nor its group can belong to another process.
+fn sweep(leader: u32) {
+    let group = |signal| {
+        if let Some(p) = rustix::process::Pid::from_raw(leader as i32) {
+            let _ = rustix::process::kill_process_group(p, signal);
+        }
+    };
+    group(rustix::process::Signal::Stop);
+    kill_tree(leader);
+    group(rustix::process::Signal::Kill);
+}
+
+/// Sweeps a command's processes ([`sweep`]) when dropped while armed.
+struct SweepOnDrop(Option<u32>);
+
+impl Drop for SweepOnDrop {
+    fn drop(&mut self) {
+        if let Some(pid) = self.0.take() {
+            sweep(pid);
+        }
     }
+}
+
+/// The exit code of the child `pid` once it has exited (`Some(None)`:
+/// killed by a signal), without reaping it. `options` adds `NOHANG` to ask
+/// without waiting. `None` while it runs, or when it is not ours to wait for.
+fn exit_status(pid: u32, options: rustix::process::WaitidOptions) -> Option<Option<i32>> {
+    use rustix::process::{WaitId, WaitidOptions};
+    let p = rustix::process::Pid::from_raw(pid as i32)?;
+    loop {
+        match rustix::process::waitid(
+            WaitId::Pid(p),
+            WaitidOptions::EXITED | WaitidOptions::NOWAIT | options,
+        ) {
+            Ok(status) => {
+                let status = status?;
+                return Some(if status.exited() {
+                    status.exit_status().map(|c| c as i32)
+                } else {
+                    None
+                });
+            }
+            Err(rustix::io::Errno::INTR) => continue,
+            Err(_) => return None,
+        }
+    }
+}
+
+/// Waits until the child `pid` has exited, without reaping it (see
+/// [`sweep`]). `None` when it cannot be waited for.
+async fn exited_unreaped(pid: u32) -> Option<Option<i32>> {
+    tokio::task::spawn_blocking(move || exit_status(pid, rustix::process::WaitidOptions::empty()))
+        .await
+        .ok()
+        .flatten()
 }
 
 /// Stops the discovered tree from root down, then kills it from leaves up.
@@ -1859,6 +1932,48 @@ mod tests {
             assert!(all.contains("created-in-denied-dir"), "{all}");
         }
         assert!(o.shows_denial(), "{all}");
+    }
+
+    #[tokio::test]
+    async fn the_workspace_and_scratch_directory_stay_where_the_rules_name_them() {
+        // With the workspace itself moved into the scratch directory (the
+        // same volume, as usual), every rule named its old path: the denied
+        // file and the vault were readable under the new one.
+        let (_d, ws) = setup();
+        std::fs::create_dir_all(ws.join(".declass/runs/r1")).unwrap();
+        std::fs::create_dir_all(ws.join("sub/.declass")).unwrap();
+        std::fs::write(ws.join(".env"), "TOKEN=Qx7pL2mN9vR4\n").unwrap();
+        std::fs::write(ws.join(".declass/runs/r1/vault.json"), "{\"v\":\"4539\"}").unwrap();
+        std::fs::write(ws.join("sub/.declass/state"), "6121\n").unwrap();
+        let mut ordinary = spec(&ws);
+        ordinary.deny_read = vec![ws.join(".env")];
+        // An ordinary command, and one with no deny list (`sensitive_data`).
+        for s in [ordinary, spec(&ws)] {
+            let o = sh_with(
+                &s,
+                "mv \"$PWD\" \"$TMPDIR/w\"; cat \"$TMPDIR/w/.env\" \"$TMPDIR/w/.declass/runs/r1/vault.json\"; \
+                 mv \"$TMPDIR\" \"$PWD/s\"; \
+                 mv sub \"$TMPDIR/s\"; cat \"$TMPDIR/s/.declass/state\" sub/.declass/state; \
+                 chmod 000 .env; echo done",
+            )
+            .await;
+            let all = text(&o);
+            assert!(all.contains("done"), "{all}");
+            for secret in ["4539", "6121"] {
+                assert!(!all.contains(secret), "{secret} readable: {all}");
+            }
+            if !s.deny_read.is_empty() {
+                assert!(!all.contains("Qx7p"), "readable: {all}");
+                // Nor can it make the file unreadable to Declass itself.
+                use std::os::unix::fs::PermissionsExt;
+                let mode = std::fs::metadata(ws.join(".env")).unwrap().permissions();
+                assert_ne!(mode.mode() & 0o777, 0, "a denied file's mode changed");
+            }
+            assert!(ws.join(".declass/runs/r1/vault.json").is_file(), "{all}");
+            assert!(s.scratch.is_dir() && !ws.join("s").exists(), "{all}");
+            // A folder above nothing denied may move; run state stays unreadable there.
+            let _ = std::fs::rename(s.scratch.join("s"), ws.join("sub"));
+        }
     }
 
     #[tokio::test]
@@ -2284,6 +2399,63 @@ mod tests {
             "a process outlived its command: {:?}",
             std::fs::read_to_string(&copy)
         );
+    }
+
+    #[tokio::test]
+    async fn a_command_whose_call_is_dropped_leaves_nothing_running() {
+        // A dropped future (a cancelled tool call) used to kill only the
+        // leader, through the child's own drop.
+        let (_d, ws) = setup();
+        let marker = ws.join("survivor");
+        let script = format!(
+            "( sleep 3; echo alive > {} ) </dev/null >/dev/null 2>&1 & sleep 30",
+            marker.display()
+        );
+        let run = sh(&ws, &script);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(800), run)
+                .await
+                .is_err()
+        );
+        tokio::time::sleep(Duration::from_secs(4)).await;
+        assert!(!marker.exists(), "a process outlived its dropped command");
+    }
+
+    #[tokio::test]
+    async fn a_server_that_exits_is_not_reaped_before_its_group_is_swept() {
+        // Its id names its process group: reaped first, the id could be
+        // reused by an unrelated process before the group is signalled.
+        let (_d, ws) = setup();
+        let mut p = spawn(
+            KIND,
+            &spec(&ws),
+            &["/bin/sh".into(), "-c".into(), "exit 3".into()],
+            &ws,
+        )
+        .await
+        .unwrap();
+        let pid = p.pid.unwrap();
+        let started = Instant::now();
+        let code = loop {
+            if let Some(code) = p.exited() {
+                break code;
+            }
+            assert!(started.elapsed() < Duration::from_secs(10));
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        };
+        if KIND == SandboxKind::Seatbelt {
+            assert_eq!(code, Some(3));
+        }
+        let alive = |pid: u32| {
+            rustix::process::test_kill_process(rustix::process::Pid::from_raw(pid as i32).unwrap())
+                .is_ok()
+        };
+        assert!(
+            alive(pid),
+            "reaped while its group could still be signalled"
+        );
+        p.stop(Duration::from_secs(1)).await;
+        assert!(!alive(pid), "not reaped after the stop");
     }
 
     #[tokio::test]

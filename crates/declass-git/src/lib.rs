@@ -173,10 +173,11 @@ impl Git {
         .is_ok()
     }
 
-    /// Tracked and untracked-but-not-ignored files, relative to the workspace.
-    /// Outside a git repository, the files a walk finds that the workspace's
-    /// `.gitignore` and `.ignore` files do not exclude ([`walk::list`]).
-    /// Reserved directories are excluded. There is no file-count cap.
+    /// Tracked and untracked-but-not-ignored files, relative to the workspace,
+    /// spelled as their folders list them. Outside a git repository, the files
+    /// a walk finds that the workspace's `.gitignore` and `.ignore` files do
+    /// not exclude ([`walk::list`]). Reserved directories are excluded. There
+    /// is no file-count cap.
     pub fn list_files(&self, workspace: &Path) -> Result<Vec<String>, GitError> {
         let listed = self.run(
             workspace,
@@ -198,10 +199,23 @@ impl Git {
             }
             Err(e) => return Err(e),
         };
+        // Git lists a name as its index holds it: composed (NFC) on macOS
+        // (`core.precomposeunicode`) when the file is stored decomposed, or in
+        // a letter case the file no longer has. Everything that reads the
+        // list (priming, listings, searches) must name what the file system
+        // opens, so each name is spelled as its folder lists it.
+        let mut spellings = declass_fs::Spellings::new(workspace);
         let mut files: Vec<String> = out
             .split(|&b| b == 0)
             .filter(|p| !p.is_empty())
             .map(|p| String::from_utf8_lossy(p).into_owned())
+            .map(|p| {
+                spellings
+                    .resolve(Path::new(&p))
+                    .ok()
+                    .and_then(|r| r.to_str().map(str::to_owned))
+                    .unwrap_or(p)
+            })
             .filter(|p| !declass_fs::is_reserved(Path::new(p)))
             .collect();
         files.sort();

@@ -410,6 +410,20 @@ fn trigger_action(oversight: &Oversight, tool: &str, args: &Map<String, Value>) 
     })
 }
 
+/// `args` with its `path` spelled as the file system lists it under
+/// `workspace` ([`declass_fs::resolve_relative`]): an action is judged by the
+/// file the tool will write, whatever case or normalization it was named in.
+pub fn spelled(workspace: &Path, args: &Map<String, Value>) -> Map<String, Value> {
+    let mut out = args.clone();
+    if let Some(raw) = args.get("path").and_then(Value::as_str)
+        && let Ok(rel) = declass_fs::resolve_relative(workspace, raw)
+        && let Some(rel) = rel.to_str()
+    {
+        out.insert("path".into(), Value::String(rel.to_owned()));
+    }
+    out
+}
+
 /// Asks for approval when `tool` needs it. `Err` holds the tool error for a
 /// denied action; every decision is recorded in `audit`.
 pub fn review(

@@ -982,6 +982,31 @@ async fn start(
     Ok((terminal, stats))
 }
 
+/// Sensitive and protected files the security engine could not read at run
+/// start: named, so a file it cannot index is never skipped unseen.
+pub(crate) fn note_unindexed(engine: &Engine) {
+    let unread = engine.unindexed();
+    if unread.is_empty() {
+        return;
+    }
+    let shown: Vec<String> = unread
+        .iter()
+        .take(10)
+        .map(|(path, why)| format!("{path} ({why})"))
+        .collect();
+    let more = unread.len().saturating_sub(shown.len());
+    eprintln!(
+        "warning: {} sensitive or protected file(s) could not be indexed: {}{}\n  values from them are not replaced elsewhere until one is read; commands still cannot read them",
+        unread.len(),
+        term::safe(&shown.join("; ")),
+        if more > 0 {
+            format!("; and {more} more")
+        } else {
+            String::new()
+        }
+    );
+}
+
 /// Public files the local model found to hold real data (held as sensitive
 /// from now on): named, with the setting that would make it explicit.
 pub(crate) fn note_classified(engine: &Engine) {
@@ -1085,6 +1110,7 @@ async fn prepare(
         let files = git.list_files(ws).unwrap_or_default();
         let primed = e.prime(ws, &files, &manifest.objective);
         eprintln!("security engine: indexed {primed} sensitive file(s)");
+        note_unindexed(e);
         note_classified(e);
     }
     let frontier = gated(ws, &manifest.run_id, driver, engine.as_ref(), hooks)?;

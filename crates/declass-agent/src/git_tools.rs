@@ -215,7 +215,7 @@ fn hidden(ctx: &Ctx<'_>, path: &Path) -> bool {
 
 /// A model-supplied path that history may show.
 fn history_path(ctx: &Ctx<'_>, raw: &str) -> Result<PathBuf, String> {
-    let rel = declass_fs::normalize_relative(raw).map_err(fs_err)?;
+    let rel = declass_fs::resolve_relative(ctx.workspace, raw).map_err(fs_err)?;
     if hidden(ctx, &rel) {
         return Err(format!("{raw} is not available"));
     }
@@ -681,7 +681,7 @@ it was not committed. Describe the change without it."
         Some(list) => {
             for v in list {
                 let raw = v.as_str().ok_or("`paths` must hold strings")?;
-                let rel = declass_fs::normalize_relative(raw).map_err(fs_err)?;
+                let rel = declass_fs::resolve_relative(ctx.workspace, raw).map_err(fs_err)?;
                 if !written.contains(&rel) {
                     return Err(format!(
                         "{raw} was not written in this run; git_commit commits only files you wrote"

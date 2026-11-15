@@ -973,7 +973,7 @@ fn render(
     let mut kept: Vec<Checked> = Vec::new();
     let mut dropped = report.findings.len().saturating_sub(MAX_REFERENCES);
     for f in report.findings.iter().take(MAX_REFERENCES) {
-        let Ok(rel) = declass_fs::normalize_relative(&f.path) else {
+        let Ok(rel) = declass_fs::resolve_relative(ctx.workspace, &f.path) else {
             dropped += 1;
             continue;
         };

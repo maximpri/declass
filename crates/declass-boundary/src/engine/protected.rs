@@ -105,9 +105,12 @@ impl Engine {
                 continue;
             };
             st.ip.files.push((f.clone(), level));
-            if let Ok(bytes) = declass_fs::read_file(workspace, path, PRIME_MAX_BYTES as u64) {
-                self.ip_index(&mut st, path, level, &String::from_utf8_lossy(&bytes));
-                n += 1;
+            match declass_fs::read_file(workspace, path, PRIME_MAX_BYTES as u64) {
+                Ok(bytes) => {
+                    self.ip_index(&mut st, path, level, &String::from_utf8_lossy(&bytes));
+                    n += 1;
+                }
+                Err(e) => st.unindexed.push((f.clone(), e.to_string())),
             }
         }
         n
