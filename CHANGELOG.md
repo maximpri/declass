@@ -1,6 +1,148 @@
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 # Changelog
 
+## 0.4.0 — not yet released
+
+Use Declass from an editor, run `declass exposure` in CI, and close fourteen leak and isolation
+classes that an adversarial review of the privacy boundary, the sandbox and the tool channels
+found. A first run without models now says what to do.
+
+### Use Declass from an editor (experimental)
+
+- `declass acp` makes Declass the agent of an editor that hosts agents over the Agent Client
+  Protocol (Zed, JetBrains IDEs, and Neovim and Emacs through their ACP plugins). Each thread is a
+  session in its directory, with the same privacy boundary, sandbox, approvals, limits and audit
+  as `declass`; threads keep their sessions, and `declass --resume <id>` continues one in a
+  terminal once the editor has let go of the workspace.
+- A file you @-mention becomes its path, never its content, so a `.env` is still read only by the
+  local model. A web page the editor fetched (`http`, `https`) is checked like a fetched page,
+  given to the cloud model as data and recorded as an `editor_attachment` audit event; anything
+  else the editor attaches (rules, unsaved buffers, remote files) is declined, and you are told.
+- Replies stream with placeholders restored, tool calls show their results and diffs, and
+  approvals use the editor's permission dialog. MCP servers the editor offers are not started,
+  and Declass never uses the editor's own file and terminal methods. Run `declass setup` in a
+  terminal first. [Details](docs/USAGE.md#use-declass-from-an-editor)
+
+### Exposure in CI
+
+- `declass exposure --sarif` writes the report as SARIF 2.1.0 for GitHub code scanning and other
+  SARIF tools: one result per file and kind of value, at the first value's line and column, with
+  stable rule ids (`exposure/secret`, `exposure/email`, ...) and help that says what Declass does
+  with such a file. No value, line of content or hash of either is in it. `--output FILE` writes
+  JSON or SARIF to a file and prints the text report. The JSON report is schema 2.
+- Findings have levels: a secret in a file the cloud model reads is an error, other values there
+  warnings, values in files that path rules keep local notes. `--fail-on note|warning|error|never`
+  sets what exits 1; to accept known findings such as test fixtures, keep those files local with
+  `[sensitivity] protected_paths`. Exit 2 still means the report is incomplete.
+- `--history` also reads earlier versions of files in git and reports, by path, the values only
+  history holds, such as a key committed and removed since, within blob and byte limits. It runs
+  no git command that reads the working tree, so no filter a repository configures runs, and a
+  partial clone's missing objects are counted, never fetched.
+- Large repositories: the report covers up to 1,000,000 entries (was 20,000), reads files on every
+  core while the walk streams, and keeps only files with findings in memory. The detectors'
+  screening set no longer falls back to a slow engine on data files and non-ASCII text; a sample
+  of JSON and bundles that took 19.6 s of CPU takes 2.2 s, in runs as in the report.
+- The repository is a GitHub Action: `uses: maximpri/declass@v0.4.0` installs a release after
+  checking its signature against the key in the action's own commit, writes SARIF for
+  `github/codeql-action/upload-sarif`, and on a pull request uses the base commit's
+  `.declass/config.toml`, so a pull request cannot loosen its own gate.
+  [Example workflow](examples/github/declass-exposure.yml)
+  [Details](docs/OPERATIONS.md#see-what-an-agent-could-send)
+
+### Security
+
+An adversarial review of the sandbox and tool channels and of the boundary found these classes.
+Each was demonstrated by a test that fails without its fix; [SECURITY.md](SECURITY.md) has the
+details.
+
+- **A command could move a file it may not read, and read it under another name**
+  (DECLASS-2026-041, macOS). Seatbelt names paths, so `mv .env x` or moving a folder above a
+  denied file, or the workspace itself, put it out of reach of every rule. Denied paths, the
+  folders above them, the workspace and its scratch directory can no longer be renamed, removed
+  or have their permissions changed by a sandboxed process; a folder Declass cannot list is
+  denied whole, and every sensitive file is denied by name.
+- **The file tools opened other spellings of a path** (DECLASS-2026-042, macOS). `.DECLASS/...`,
+  `DATA/orders.csv` under a `data/**` rule or `.GIT/config` reached run state, sensitive data or
+  git's configuration past the checks. Every path is resolved to its spelling on disk before any
+  check, and rules compare names in Unicode NFC, so a file whose name macOS stores decomposed is
+  protected however it is spelled.
+- **Git history kept outside the workspace was readable by commands** (DECLASS-2026-043): in a
+  linked worktree (`git worktree add`), in a subdirectory of a repository, or through borrowed
+  object stores. It is hidden wherever git keeps it.
+- **Processes outlived their command** (DECLASS-2026-044, macOS): `( cmd & )` escaped the
+  end-of-command sweep. A command's whole process group now ends with it. A process that starts a
+  session of its own can still survive (SECURITY.md, Known limits).
+- **The egress proxy forwarded stray line breaks** (DECLASS-2026-045) inside request heads, which
+  some servers read as another `Host` or another request. Such heads are refused.
+- **A secret written into a config file stayed readable by commands** (DECLASS-2026-046). A
+  placeholder written into a secret sink outside the sensitivity globs (`config/*.toml`) was
+  restored into a file any command could print reversed or spaced out. Such a file is sensitive
+  from the write on, and the write's result says so.
+- **Multi-line `.env` values were read line by line** (DECLASS-2026-047), so parts of a private
+  key or a JSON value were shown. Both views of `.env` files read values as dotenv does: a quoted
+  value is withheld whole, whatever follows a line's first `=` is withheld whatever its key, and a
+  placeholder written back restores the value with its quotes, comments and line ends.
+- **Record keys were shown as schema** (DECLASS-2026-048): a JSON export keyed by user names
+  showed them in structure views, outlines and samples. Keys are judged by where they stand;
+  record names are `*`, while fields, environments, locales and package names stay visible.
+- **Values in other Unicode forms passed every filter** (DECLASS-2026-049): a zero-width
+  character inside a value, full-width or another script's digits, or a name composed where the
+  data has it decomposed. Local output, the final check and the third-party check read text folded
+  (NFKC, invisible characters removed), and a value folding reveals is replaced where it stands.
+- **The audit log held values from command text and file names** (DECLASS-2026-050). Commands
+  and paths in audit events show known values as placeholders and the rest as written.
+- **`search` answered guesses about sensitive files** (DECLASS-2026-051): which of their lines a
+  pattern matched, one guess per search. Sensitive files and protected source are not searched.
+- **A headerless CSV's first record was shown as its column names** (DECLASS-2026-052).
+- **Edit anchors answered guesses** (DECLASS-2026-053): an `edit_file` anchor in a sensitive file
+  was matched against the real text, so a successful edit confirmed a guess. Anchors in a
+  sensitive `.env`-style file match only what `read_file` showed; other sensitive files and
+  protected source refuse anchor edits.
+- **A write's result gave a restored secret's length** (DECLASS-2026-054). It reports the size of
+  the text the cloud model wrote.
+
+### First run and setup
+
+- A run or session without a cloud model stops before anything starts, with one message: run
+  `declass setup` (or use `--mode local-only`). A key variable that is not set is named, and a
+  ChatGPT plan that is not signed in says `declass login chatgpt`. Before, `declass run` looked for
+  a local server, recorded a failed run and printed its summary, or gave only local-server advice.
+  In a terminal session the message is shown and the session stays open. `declass setup` without
+  a terminal that finds nothing to set up says so and exits 1.
+- `declass privacy` before setup says a model is "not set up" (exit 1), not "invalid origin ·
+  refused" (exit 2).
+- The setup screen keeps the selected row and the choices on screen in narrow terminals, scrolls
+  a long review and saves only once all of it has been on screen, and returns to the chosen row on
+  Esc; under `declass setup` it no longer says Enter starts Declass. Choosing a cloud model on the
+  setup screen when your own configuration requires local-only work (as an earlier setup without
+  a cloud model saves) offers to lift that requirement, never a project's or a policy's; it takes
+  `y`.
+
+### Fixes
+
+- `declass doctor --help` and the Models screen said `--online` makes no model calls. It sends
+  each model two short built-in prompts and two generated images, which a paid plan bills. Both
+  now say so.
+- In top clearance the work status names the local model, not "the frontier". A reply that the
+  model also wrote as text is shown once.
+- `declass config set` shows how to quote a text value (`'"gpt-6"'`). Stale and missing help is
+  filled in (session limits are requests and time, not dollars). Report paths show quotes as
+  written. `declass exposure` in an empty directory says there was nothing to read.
+  `declass history` says "1 turn".
+
+### Upgrading
+
+- On macOS, commands can no longer rename, remove or change the permissions of a file Declass
+  denies them, a folder that holds one, the workspace or its scratch directory: `rm -rf data`,
+  `mv config settings` and rotating denied logs fail part-way. Use the file tools, or run them
+  yourself outside Declass. [Details](docs/USAGE.md#command-networking-and-troubleshooting)
+- A server a command starts in the background (`npm run dev &`) stops when that command ends.
+- A config file a secret is written into is sensitive from then on: commands that read it need
+  `sensitive_data`, and `git_commit` refuses it.
+- `search` no longer looks into sensitive files or protected source, and sensitive files other
+  than `.env`-style ones are no longer edited by anchor; write them whole with `write_file`.
+- `declass privacy` exits 1, not 2, when no model is set up. `declass exposure --json` is schema 2.
+
 ## 0.3.0 — 2026-11-14
 
 Try Declass on a repository before setting anything up, pin the extensions it loads, and keep
