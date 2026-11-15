@@ -2157,13 +2157,20 @@ value; run_command with sensitive_data resolves placeholders in the command on t
     }
 
     /// `text` with its placeholders resolved for a write to `path` (see
-    /// [`Presenter::resolve_for_write`]).
+    /// [`Presenter::resolve_for_write`]). A file a value is restored into
+    /// holds that value from then on: when it is not sensitive already (a
+    /// secret sink such as `config/*.toml`), it is classified as derived
+    /// before the write, so commands cannot read it (they could print the
+    /// value reversed, spaced out or encoded, which no value filter reads)
+    /// and the frontier is shown it as sensitive content. A failure to
+    /// record that refuses the write.
     fn resolve_placeholders(&self, path: &Path, text: &str) -> Result<String, String> {
         self.ip_guard_write(path)?;
         let st = self.lock();
         let sink = self.policy.is_secret_sink(path) || self.is_sensitive(path);
-        for token in Vault::tokens_in(text) {
-            match st.vault.value_of(&token) {
+        let tokens = Vault::tokens_in(text);
+        for token in &tokens {
+            match st.vault.value_of(token) {
                 None => {
                     return Err(format!(
                         "{token} is not a known placeholder; it cannot be written"
@@ -2188,6 +2195,20 @@ in {} read it at runtime instead (for example from the environment variable {key
                     ));
                 }
                 Some(_) => {}
+            }
+        }
+        if !tokens.is_empty() && !self.is_sensitive(path) {
+            let mut derived = self
+                .derived
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            derived.insert(path.to_path_buf());
+            if self.derived_store.save(&derived).is_err() {
+                derived.remove(path);
+                return Err(format!(
+                    "{} could not be recorded as holding a restored value; nothing was written",
+                    path.display()
+                ));
             }
         }
         Ok(st.vault.detokenize(text).0)
@@ -3350,6 +3371,43 @@ mod tests {
                 .is_err()
         );
         assert_eq!(e.detokenize(&format!("old {token}")), format!("old {KEY}"));
+    }
+
+    #[test]
+    fn a_file_a_secret_is_restored_into_is_sensitive_from_then_on() {
+        // `config/*.toml` is a secret sink but no sensitive path: a value
+        // restored into it was readable to every command, which could print
+        // it reversed, spaced out or encoded, forms no value filter reads.
+        let (d, e) = engine();
+        let ws = d.path().join("ws");
+        std::fs::create_dir_all(ws.join("config")).unwrap();
+        e.present(
+            &file(".env"),
+            format!("PAYMENTS_API_KEY={KEY}\n").as_bytes(),
+        );
+        let token = "⟨secret:PAYMENTS_API_KEY#1⟩";
+        let sink = Path::new("config/app.toml");
+        assert!(!e.path_sensitive(sink));
+        let written = e
+            .resolve_for_write(sink, &format!("key = \"{token}\"\n"))
+            .unwrap();
+        assert!(written.contains(KEY));
+        std::fs::write(ws.join(sink), &written).unwrap();
+        assert!(
+            e.path_sensitive(sink),
+            "a restored value makes it sensitive"
+        );
+        assert!(e.hidden_from_commands(&ws).contains(&ws.join(sink)));
+        let shown = e.present(&file("config/app.toml"), written.as_bytes());
+        assert!(!shown.contains(KEY), "{shown}");
+        assert!(shown.contains("Raw content is withheld"), "{shown}");
+        // A sink written with no placeholder stays an ordinary file.
+        let plain = Path::new("config/other.toml");
+        e.resolve_for_write(plain, "retries = 3\n").unwrap();
+        assert!(!e.path_sensitive(plain));
+        // The classification outlives the run.
+        let again = Engine::open(d.path(), policy(), None).unwrap();
+        assert!(again.path_sensitive(sink));
     }
 
     #[test]

@@ -377,7 +377,7 @@ Layers run independently; the result is the most restrictive class any layer ass
 | Local personal-data pass | public content, optional (`sensitivity.local_pii_pass`) | prose lines sent to the local model, which lists names and postal addresses; values that occur as written and look plausible enter the vault (`engine/pii_pass.rs`) |
 | Operator-number rule | operator text (task, session and steering messages) | every 12–19 digit number, labelled or not (`⟨id:number#n⟩`, an `ask_local` handle) |
 | Sensitive-text detector | sensitive text only | title-case name runs (split on stop words and sentence-initial function words), person/address field values of any shape, long numbers; in local-model output a name counts only if a word of it occurs in the content the model read; digit runs sharing 4+ consecutive digits with a vaulted card, account, ID, IBAN or phone number are replaced |
-| Taint | files | files a `sensitive_data` command created or changed (`derived.json`, kept across resume); under `target/` and `node_modules/` (which the snapshot skips) those modified since the command started; each is indexed again, and denied to commands by name |
+| Taint | files | files a `sensitive_data` command created or changed (`derived.json`, kept across resume); under `target/` and `node_modules/` (which the snapshot skips) those modified since the command started; each is indexed again, and denied to commands by name; files a write resolved a placeholder into (§5.5) |
 | IP | path | `ip.interface_only` / `ip.sealed` |
 
 Every value found enters the run's **vault** under one token per value (`⟨kind:label#n⟩`). Values
@@ -521,7 +521,11 @@ Write tools receive frontier text containing placeholders. A placeholder resolve
 a secret sink (`sensitivity.secret_sinks`) or a sensitive file. Anywhere else, and for any unknown
 placeholder, the write is refused with an error telling the frontier to read the value at runtime
 (for example from an environment variable of that name). `edit_file` anchors may contain
-placeholders; they are matched against the real text.
+placeholders; they are matched against the real text. A write that resolves a placeholder into a
+file that is not sensitive already (a secret sink outside the sensitivity globs, such as
+`config/*.toml`) first records that file as derived (`derived.json`, as a `sensitive_data`
+command's writes are), or is refused if that cannot be recorded: from then on it is in the
+commands' deny list and presented as sensitive content (handle, structure view, local summary).
 
 ### 5.6 Third-party channels (web)
 

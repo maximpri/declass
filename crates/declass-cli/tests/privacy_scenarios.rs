@@ -256,6 +256,66 @@ async fn a_file_derived_by_a_sensitive_data_command_stays_sensitive_when_read() 
     }
 }
 
+/// The placeholder `⟨secret:{label}#n⟩` that a request body shows.
+fn placeholder_named(body: &serde_json::Value, label: &str) -> String {
+    let text = body.to_string();
+    let at = text
+        .find(&format!("⟨secret:{label}#"))
+        .expect("the placeholder in a tool result");
+    let end = at + text[at..].find('⟩').expect("a closed placeholder") + '⟩'.len_utf8();
+    text[at..end].to_owned()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_secret_restored_into_a_config_file_never_comes_back_through_a_command() {
+    // `config/*.toml` is a secret sink but no sensitive path: a placeholder
+    // written there is restored on disk, where an ordinary command printed
+    // the value reversed or spaced out, forms no value filter reads.
+    let f = Fixture::new(
+        "sink",
+        "Wire the database password into config/app.toml.",
+        Local::Cooperative,
+    );
+    std::fs::create_dir_all(f.ws.join("config")).unwrap();
+    std::fs::write(
+        f.ws.join("config/app.toml"),
+        "[db]\nhost = \"localhost\"\npassword = \"\"\n",
+    )
+    .unwrap();
+    f.script(vec![
+        Step::Call("read_file", json!({"path": ".env"})),
+        Step::From(Box::new(|body| {
+            let token = placeholder_named(body, "DB_PASSWORD");
+            (
+                "edit_file",
+                json!({"path": "config/app.toml", "edits": [{"old": "password = \"\"",
+                    "new": format!("password = \"{token}\"")}]}),
+            )
+        })),
+        Step::Call(
+            "run_command",
+            json!({"command": "rev config/app.toml; sed 's/./& /g' config/app.toml; \
+                od -c config/app.toml | head -20; base64 < config/app.toml"}),
+        ),
+        Step::Call("read_file", json!({"path": "config/app.toml"})),
+        Step::Call("search", json!({"pattern": "password"})),
+        Step::Call("diff", json!({})),
+        Step::Call("finish", json!({"summary": "Wired the password."})),
+    ]);
+    let end = f.run().await;
+    assert!(completed(&end), "{end:?}");
+    assert_eq!(f.unscripted(), 0);
+    let config = std::fs::read_to_string(f.ws.join("config/app.toml")).unwrap();
+    assert!(config.contains(DB_PASSWORD), "restored on disk: {config}");
+    // The file holds a secret now: the sandbox refuses it to the command,
+    // and the frontier reads it as sensitive content.
+    let ran = &f.results_of("run_command")[0];
+    assert!(ran.contains("Operation not permitted"), "{ran}");
+    let read = &f.results_of("read_file")[1];
+    assert!(read.contains("Raw content is withheld"), "{read}");
+    f.assert_no_leak(&f.canaries([]));
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_file_derived_into_target_stays_sensitive_when_read() {
     let f = Fixture::new(
