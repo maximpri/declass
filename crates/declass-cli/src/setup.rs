@@ -58,12 +58,12 @@ pub fn preset(
 ) -> Result<i32> {
     let Some(name) = name else {
         println!(
-            "{:<9} {:<20} {:<26} models / context window",
+            "{:<10} {:<20} {:<26} models / context window",
             "preset", "backend", "local.base_url"
         );
         for p in PRESETS {
             println!(
-                "{:<9} {:<20} {:<26} {}\n{:<57} {}",
+                "{:<10} {:<20} {:<26} {}\n{:<58} {}",
                 p.name,
                 p.label,
                 p.base_url(None),
@@ -73,7 +73,7 @@ pub fn preset(
             );
         }
         println!(
-            "\n{:<9} {:<24} {:<10} {:<18} frontier.base_url / model",
+            "\n{:<10} {:<24} {:<10} {:<18} frontier.base_url / model",
             "preset", "frontier", "dialect", "key variable"
         );
         for p in FRONTIER_PRESETS {
@@ -82,13 +82,19 @@ pub fn preset(
             } else {
                 p.api_key_env
             };
+            // Mistral, Together and Fireworks have no fixed model: setup lists theirs.
+            let model = if p.model.is_empty() {
+                "(chosen with declass setup)"
+            } else {
+                p.model
+            };
             println!(
-                "{:<9} {:<24} {:<10} {:<18} {} / {}",
-                p.name, p.label, p.dialect, credential, p.base_url, p.model
+                "{:<10} {:<24} {:<10} {:<18} {} / {model}",
+                p.name, p.label, p.dialect, credential, p.base_url
             );
         }
         println!(
-            "\n{:<9} private web search: a SearXNG instance in Docker or OrbStack on 127.0.0.1:{SEARXNG_PORT} \
+            "\n{:<10} private web search: a SearXNG instance in Docker or OrbStack on 127.0.0.1:{SEARXNG_PORT} \
 (prints the commands; runs nothing)",
             "searxng"
         );

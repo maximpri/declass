@@ -567,14 +567,14 @@ fn render_listing(list: &Listing, searched: bool) -> String {
     };
     for (i, record) in list.runs.iter().enumerate() {
         out.push_str(&format!(
-            "{}. {}\n   {} · {} · {} · {} turns · {} model requests{}\n   ID: {}\n",
+            "{}. {}\n   {} · {} · {} · {} · {}{}\n   ID: {}\n",
             i + 1,
             record.title,
             record.kind,
             record.status,
             record.started_at,
-            record.turns,
-            record.requests,
+            counted(record.turns, "turn"),
+            counted(record.requests, "model request"),
             if record.incomplete { " (partial)" } else { "" },
             record.id
         ));
@@ -601,16 +601,21 @@ fn render_listing(list: &Listing, searched: bool) -> String {
     out.trim_end().to_owned()
 }
 
+/// `n` and its noun, singular for one ("1 turn", "3 model requests").
+fn counted(n: u64, noun: &str) -> String {
+    format!("{n} {noun}{}", if n == 1 { "" } else { "s" })
+}
+
 fn detail(record: &Record) -> String {
     let mut out = format!(
-        "{}\n{} · {} · {}\nID: {}\n{} turns · {} model requests{}\n",
+        "{}\n{} · {} · {}\nID: {}\n{} · {}{}\n",
         record.title,
         record.kind,
         record.status,
         record.started_at,
         record.id,
-        record.turns,
-        record.requests,
+        counted(record.turns, "turn"),
+        counted(record.requests, "model request"),
         if record.incomplete { " (partial)" } else { "" }
     );
     for note in &record.notes {
@@ -684,6 +689,13 @@ mod tests {
     fn read(ws: &Path, id: &str) -> Record {
         let mut budget = MAX_TRANSCRIPT;
         read_record(ws, id, true, None, &mut budget).unwrap().0
+    }
+
+    #[test]
+    fn counts_of_one_are_singular() {
+        assert_eq!(counted(1, "turn"), "1 turn");
+        assert_eq!(counted(0, "model request"), "0 model requests");
+        assert_eq!(counted(3, "model request"), "3 model requests");
     }
 
     #[test]
