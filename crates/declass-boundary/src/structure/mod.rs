@@ -299,99 +299,68 @@ pub fn schema_key(key: &str, k: &dyn Knowledge) -> bool {
 }
 
 /// The keys of the JSON document `root` that name records rather than
-/// fields, by the byte ranges of their names: values, whatever their shape,
-/// unless the frontier already has the key ([`known_key`]). They are
-/// - the keys of a map: an object of two or more members all of one kind
-///   (all objects, all strings, all numbers…: an export keyed by user names
-///   or ids, `{"mlopez": "gold", "jsmith": "silver"}`), or of one member
-///   holding a record (`{"mlopez": {"plan": "gold"}}`);
-/// - a key that only one of several records has (elements of an array,
-///   JSON lines): records keyed by their own names, `[{"mlopez": {…}},
-///   {"jsmith": {…}}]`. A key several records have is a field, whatever
-///   the kinds of their values.
+/// fields, by the byte ranges of their names: values, whatever their shape.
+/// Objects are read by place: the elements of an array (or the lines of
+/// JSON lines) are at one place, and so are the values of one field in each
+/// of them, or of every member of a map. A key that several of the objects
+/// at its place have is a field, unless they are elements of one member
+/// each (records keyed by a name, `[{"mlopez": …}, {"mlopez": …}]`). Any other
+/// key (of an object alone at its place, `{"mlopez": 30, "jsmith": null}`;
+/// of one object of several, `[{"mlopez": …}, {"jsmith": …}]`) is a value
+/// unless the frontier knows it ([`known_key`]); locale codes and
+/// environment names count only as the keys of objects that have no other
+/// (`{"en": …, "fr": …}`), so a person's initials are not taken for a
+/// language. The values under a key that is a value, a locale, an
+/// environment or a package's path are at one place, as a map's records.
 pub fn record_keys(
     root: &parse::Json,
     k: &dyn Knowledge,
 ) -> std::collections::HashSet<std::ops::Range<usize>> {
     use parse::Json;
-    type Keys = std::collections::HashSet<std::ops::Range<usize>>;
-    fn kind(v: &Json) -> u8 {
-        match v {
-            Json::Object { .. } => 0,
-            Json::Array { .. } => 1,
-            Json::String { .. } => 2,
-            Json::Number { .. } => 3,
-            Json::Bool { .. } => 4,
-            Json::Null { .. } => 5,
+    let mut out = std::collections::HashSet::new();
+    // The values at each place, and whether they are elements of arrays.
+    let mut places: Vec<(Vec<&Json>, bool)> = vec![(vec![root], false)];
+    while let Some((place, elements)) = places.pop() {
+        let mut items: Vec<&Json> = Vec::new();
+        let mut objects: Vec<&[(parse::Key, Json)]> = Vec::new();
+        for v in place {
+            match v {
+                Json::Array { items: xs, .. } => items.extend(xs),
+                Json::Object { entries, .. } => objects.push(entries),
+                _ => {}
+            }
         }
-    }
-    /// Whether two of the objects that are the members of `entries` share a
-    /// field: records of one kind, not sections of a configuration
-    /// (`{"database": {"host": …}, "limits": {"retries": …}}`).
-    fn shares_a_field(entries: &[(parse::Key, Json)]) -> bool {
-        let mut seen = std::collections::HashSet::new();
-        entries.iter().any(|(_, x)| match x {
-            Json::Object { entries: inner, .. } => {
-                let names: std::collections::HashSet<&str> =
-                    inner.iter().map(|(key, _)| key.name.as_str()).collect();
-                names.into_iter().any(|n| !seen.insert(n))
-            }
-            _ => false,
-        })
-    }
-    /// `record`: `v` is one of several records, judged by the array.
-    fn walk(v: &Json, k: &dyn Knowledge, out: &mut Keys, record: bool) {
-        match v {
-            Json::Object { entries, .. } => {
-                let map = !record
-                    && match entries.as_slice() {
-                        [(_, Json::Object { entries: inner, .. })] => inner
-                            .iter()
-                            .any(|(_, x)| !matches!(x, Json::Object { .. } | Json::Array { .. })),
-                        [_] | [] => false,
-                        [(_, first), rest @ ..] => {
-                            rest.iter().all(|(_, x)| kind(x) == kind(first))
-                                && (kind(first) != 0 || shares_a_field(entries))
-                        }
-                    };
-                for (key, x) in entries {
-                    if map && !known_key(&key.name, k) {
-                        out.insert(key.span.clone());
-                    }
-                    walk(x, k, out, false);
-                }
-            }
-            Json::Array { items, .. } => {
-                let records: Vec<&Vec<(parse::Key, Json)>> = items
-                    .iter()
-                    .filter_map(|x| match x {
-                        Json::Object { entries, .. } => Some(entries),
-                        _ => None,
-                    })
-                    .collect();
-                let several = records.len() >= 2;
-                if several {
-                    let mut seen: std::collections::HashMap<&str, usize> = Default::default();
-                    for r in &records {
-                        let names: std::collections::HashSet<&str> =
-                            r.iter().map(|(key, _)| key.name.as_str()).collect();
-                        for n in names {
-                            *seen.entry(n).or_default() += 1;
-                        }
-                    }
-                    for (key, _) in records.iter().flat_map(|r| r.iter()) {
-                        if seen[key.name.as_str()] == 1 && !known_key(&key.name, k) {
-                            out.insert(key.span.clone());
-                        }
-                    }
-                }
-                items.iter().for_each(|x| walk(x, k, out, several));
-            }
-            _ => {}
+        if !items.is_empty() {
+            places.push((items, true));
         }
+        let mut count: std::collections::HashMap<&str, usize> = Default::default();
+        for o in &objects {
+            let names: std::collections::HashSet<&str> =
+                o.iter().map(|(key, _)| key.name.as_str()).collect();
+            for n in names {
+                *count.entry(n).or_default() += 1;
+            }
+        }
+        let fields = objects.len() >= 2 && (!elements || objects.iter().any(|o| o.len() > 1));
+        let locales = count.keys().all(|n| locale(n));
+        let environments = count
+            .keys()
+            .all(|n| ENVIRONMENTS.contains(&n.to_lowercase().as_str()));
+        let mut under: std::collections::HashMap<&str, Vec<&Json>> = Default::default();
+        for (key, x) in objects.iter().flat_map(|o| o.iter()) {
+            let name = key.name.as_str();
+            let map_key = locales || environments || package_path(name);
+            let value = !(fields && count[name] >= 2) && !map_key && !known_key(name, k);
+            if value {
+                out.insert(key.span.clone());
+            }
+            under
+                .entry(if value || map_key { "\u{0}" } else { name })
+                .or_default()
+                .push(x);
+        }
+        places.extend(under.into_values().map(|values| (values, false)));
     }
-    let mut out = Keys::new();
-    walk(root, k, &mut out, false);
     out
 }
 
@@ -419,21 +388,137 @@ const ENVIRONMENTS: &[&str] = &[
     "uat",
 ];
 
-/// Whether the frontier already has the key `name`, which may then be
-/// shown even where keys name records ([`record_keys`]): words of the
-/// public files, the task or the schema shown ([`known_words`]), an
-/// environment's name (`dev`, `staging`, `prod`), a locale (`en`, `pt-BR`)
-/// or a package's path (`node_modules/x`, `@scope/name`, `/name@1.2.3`).
-pub fn known_key(name: &str, k: &dyn Knowledge) -> bool {
+/// ISO 639-1 language codes.
+const LANGUAGES: &[&str] = &[
+    "aa", "ab", "ae", "af", "ak", "am", "an", "ar", "as", "av", "ay", "az", "ba", "be", "bg", "bh",
+    "bi", "bm", "bn", "bo", "br", "bs", "ca", "ce", "ch", "co", "cr", "cs", "cu", "cv", "cy", "da",
+    "de", "dv", "dz", "ee", "el", "en", "eo", "es", "et", "eu", "fa", "ff", "fi", "fj", "fo", "fr",
+    "fy", "ga", "gd", "gl", "gn", "gu", "gv", "ha", "he", "hi", "ho", "hr", "ht", "hu", "hy", "hz",
+    "ia", "id", "ie", "ig", "ii", "ik", "io", "is", "it", "iu", "ja", "jv", "ka", "kg", "ki", "kj",
+    "kk", "kl", "km", "kn", "ko", "kr", "ks", "ku", "kv", "kw", "ky", "la", "lb", "lg", "li", "ln",
+    "lo", "lt", "lu", "lv", "mg", "mh", "mi", "mk", "ml", "mn", "mr", "ms", "mt", "my", "na", "nb",
+    "nd", "ne", "ng", "nl", "nn", "no", "nr", "nv", "ny", "oc", "oj", "om", "or", "os", "pa", "pi",
+    "pl", "ps", "pt", "qu", "rm", "rn", "ro", "ru", "rw", "sa", "sc", "sd", "se", "sg", "si", "sk",
+    "sl", "sm", "sn", "so", "sq", "sr", "ss", "st", "su", "sv", "sw", "ta", "te", "tg", "th", "ti",
+    "tk", "tl", "tn", "to", "tr", "ts", "tt", "tw", "ty", "ug", "uk", "ur", "uz", "ve", "vi", "vo",
+    "wa", "wo", "xh", "yi", "yo", "za", "zh", "zu",
+];
+
+/// Whether `name` is a locale: an ISO 639-1 language, with a region
+/// (`pt-BR`, `es_419`) or a script (`zh-Hant`) if any.
+fn locale(name: &str) -> bool {
     static LOCALE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
-        regex::Regex::new(r"^[a-z]{2}(?:[-_](?:[A-Z]{2}|[A-Z][a-z]{3}|\d{3}))?$")
+        regex::Regex::new(r"^([a-z]{2})(?:[-_](?:[A-Z]{2}|[A-Z][a-z]{3}|\d{3}))?$")
             .expect("static regex")
     });
-    known_words(name, k)
-        || ENVIRONMENTS.contains(&name.to_lowercase().as_str())
-        || LOCALE.is_match(name)
-        || name.starts_with("node_modules/")
-        || (name.contains('@') && name.contains('/') && !name.contains(char::is_whitespace))
+    LOCALE
+        .captures(name)
+        .and_then(|c| c.get(1))
+        .is_some_and(|l| LANGUAGES.contains(&l.as_str()))
+}
+
+/// Whether `name` is a package's path in a lock file: under `node_modules/`,
+/// or an npm package's scoped name (`@babel/core`).
+fn package_path(name: &str) -> bool {
+    static SCOPED: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r"^@[a-z0-9~-][a-z0-9._~-]*/[a-z0-9~-][a-z0-9._~-]*$")
+            .expect("static regex")
+    });
+    name.starts_with("node_modules/") || SCOPED.is_match(name)
+}
+
+/// Words of the names of fields and settings, which name no record.
+#[rustfmt::skip]
+const KEY_WORDS: &[&str] = &[
+    "access", "account", "accounts", "action", "actions", "address", "addresses", "admin", "after",
+    "age", "agent", "alias", "aliases", "all", "allow", "amount", "api", "app", "apps", "archive",
+    "args", "arguments", "at", "attachment", "attachments", "attribute", "attributes", "audit",
+    "auth", "author", "authors", "avatar", "backup", "balance", "bank", "base", "batch", "before",
+    "billing", "bin", "birth", "blob", "body", "branch", "brand", "bucket", "budget", "buffer",
+    "build", "bundle", "by", "cache", "callback", "card", "cards", "cart", "categories", "category",
+    "cert", "certificate", "channel", "channels", "charge", "checksum", "city", "claim", "claims",
+    "class", "client", "clients", "cluster", "code", "color", "column", "columns", "command",
+    "comment", "comments", "commit", "company", "config", "configuration", "connection",
+    "connections", "contact", "contacts", "content", "context", "count", "country", "coupon",
+    "created", "credentials", "currency", "cursor", "customer", "customers", "data", "database",
+    "databases", "date", "day", "days", "db", "debug", "default", "defaults", "delay", "deleted",
+    "dependencies", "dependency", "deploy", "deployment", "description", "detail", "details", "dev",
+    "device", "devices", "diff", "digest", "dir", "directory", "disabled", "discount", "display",
+    "doc", "docs", "document", "documents", "domain", "download", "driver", "due", "duration",
+    "editor", "email", "emails", "enabled", "end", "endpoint", "endpoints", "engine", "engines",
+    "entries", "entry", "env", "environment", "environments", "envs", "error", "errors", "event",
+    "events", "expires", "expiry", "export", "extra", "feature", "features", "fee", "field",
+    "fields", "file", "files", "filter", "filters", "first", "flag", "flags", "folder", "format",
+    "from", "full", "group", "groups", "has", "hash", "header", "headers", "health", "height",
+    "history", "home", "host", "hosts", "hour", "hours", "href", "icon", "id", "ids", "image",
+    "images", "import", "in", "index", "info", "input", "integrity", "interval", "invoice",
+    "invoices", "ip", "is", "issue", "issues", "item", "items", "job", "jobs", "key", "keys",
+    "kind", "label", "labels", "lang", "language", "last", "latitude", "layout", "level", "license",
+    "limit", "limits", "line", "lines", "link", "links", "list", "locale", "location", "lock",
+    "lockfile", "log", "login", "logs", "longitude", "mail", "main", "manager", "max", "member",
+    "members", "message", "messages", "meta", "metadata", "method", "metrics", "min", "minute",
+    "minutes", "mobile", "mode", "model", "models", "module", "modules", "month", "name", "names",
+    "network", "next", "no", "node", "note", "notes", "num", "number", "object", "of", "offset",
+    "on", "optional", "options", "order", "orders", "org", "organization", "origin", "output",
+    "owner", "package", "packages", "page", "pages", "parameters", "params", "parent", "password",
+    "path", "paths", "payload", "payment", "payments", "peer", "pending", "per", "period",
+    "permission", "permissions", "phone", "pin", "plan", "plans", "platform", "plugin", "plugins",
+    "policy", "pool", "port", "postal", "prefix", "prev", "price", "prices", "priority", "private",
+    "product", "products", "profile", "profiles", "project", "projects", "properties", "property",
+    "provider", "proxy", "public", "quantity", "queue", "quota", "range", "rate", "reason",
+    "record", "records", "ref", "region", "release", "remote", "repo", "report", "reports",
+    "repository", "request", "requests", "requires", "resolved", "resource", "resources",
+    "response", "result", "results", "retries", "retry", "revision", "role", "roles", "root",
+    "route", "routes", "rule", "rules", "sample", "schema", "scope", "scopes", "score", "script",
+    "scripts", "secret", "secrets", "section", "sections", "seed", "server", "servers", "service",
+    "services", "session", "sessions", "setting", "settings", "sha", "shipping", "size", "sku",
+    "slug", "source", "sources", "start", "state", "stats", "status", "step", "steps", "storage",
+    "store", "street", "subject", "subscription", "summary", "tag", "tags", "target", "task",
+    "tasks", "tax", "team", "teams", "template", "tenant", "test", "text", "theme", "time",
+    "timeout", "timestamp", "timezone", "title", "to", "token", "tokens", "topic", "total", "type",
+    "types", "unit", "units", "updated", "uri", "url", "user", "username", "users", "uuid", "value",
+    "values", "variant", "variants", "vendor", "version", "versions", "volume", "webhook", "weight",
+    "width", "workers", "workspace", "year", "years", "zip", "zone",
+];
+
+/// Whether the frontier already has the key `name`, which is then shown
+/// even where keys name records ([`record_keys`]): words of the public
+/// files, the task or the schema shown ([`known_words`]), or words of the
+/// names of fields and settings ([`KEY_WORDS`]: `created_at`,
+/// `lockfileVersion`), every word of it, and numbers of two digits at most.
+pub fn known_key(name: &str, k: &dyn Knowledge) -> bool {
+    known_words(name, k) || {
+        let words = key_words(name);
+        !words.is_empty()
+            && words.iter().all(|w| {
+                KEY_WORDS.binary_search(&w.as_str()).is_ok()
+                    || (w.len() <= 2 && w.bytes().all(|b| b.is_ascii_digit()))
+            })
+    }
+}
+
+/// The words of a key, lower-cased: its letters and digits, split where a
+/// lower-case letter meets an upper-case one and where letters meet digits.
+fn key_words(name: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut prev: Option<char> = None;
+    for c in name.chars() {
+        if !c.is_alphanumeric() {
+            prev = None;
+            continue;
+        }
+        let split = prev.is_none_or(|p| {
+            (p.is_lowercase() && c.is_uppercase()) || (p.is_alphabetic() != c.is_alphabetic())
+        });
+        if split {
+            out.push(String::new());
+        }
+        if let Some(w) = out.last_mut() {
+            w.extend(c.to_lowercase());
+        }
+        prev = Some(c);
+    }
+    out
 }
 
 /// Whether `name` is made of words the frontier already has (of the
@@ -451,6 +536,49 @@ pub fn known_words(name: &str, k: &dyn Knowledge) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn key_word_lists_are_sorted_and_keys_split_into_words() {
+        for list in [KEY_WORDS, LANGUAGES] {
+            assert!(list.windows(2).all(|w| w[0] < w[1]));
+        }
+        assert_eq!(key_words("lockfileVersion"), ["lockfile", "version"]);
+        assert_eq!(key_words("created_at"), ["created", "at"]);
+        assert_eq!(key_words("address2"), ["address", "2"]);
+        assert_eq!(key_words("jd_001"), ["jd", "001"]);
+        for known in [
+            "created_at",
+            "lockfileVersion",
+            "devDependencies",
+            "line2",
+            "userId",
+        ] {
+            assert!(known_key(known, &Nothing), "{known}");
+        }
+        for value in [
+            "mlopez",
+            "jd_001",
+            "jd",
+            "mk",
+            "bob@corp.example/inbox",
+            "acme",
+        ] {
+            assert!(!known_key(value, &Nothing), "{value}");
+        }
+        for (name, is) in [
+            ("en", true),
+            ("pt-BR", true),
+            ("es_419", true),
+            ("zh-Hant", true),
+        ] {
+            assert_eq!(locale(name), is, "{name}");
+        }
+        for name in ["jd", "jd_001", "xx-YY"] {
+            assert!(!locale(name), "{name}");
+        }
+        assert!(package_path("@babel/core") && package_path("node_modules/a/node_modules/b"));
+        assert!(!package_path("bob@corp.example/inbox") && !package_path("@ x/y"));
+    }
 
     #[test]
     fn formats_are_detected_by_content_and_extension() {

@@ -994,7 +994,7 @@ mod tests {
         // file's own text, which the copy check refuses.
         let mut record = String::from("1");
         for i in (0..30).rev() {
-            record = format!("{{\"k{i}\": {record}}}");
+            record = format!("{{\"item{i}\": {record}}}");
         }
         let json = format!("[{record}, {record}]");
         let d = tempfile::tempdir().unwrap();

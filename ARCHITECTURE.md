@@ -889,9 +889,11 @@ resolve_for_write(path, content) → note_fixture: every line from a sample show
 ```
 
 Formats: JSON (records: the array itself, or the longest array of objects under a top-level key;
-a key is shown only as schema (`schema_key`) and not as a record's name (`record_keys`: a map's keys,
-a key only one of several records has) unless the frontier already has it (`known_key`); others
-are `*`, and faked in a twin), JSON lines, delimited text (delimiter sniffed, RFC 4180 quoting, header detected: a row of distinct names that is
+a key is shown only as schema (`schema_key`) and not as a record's name (`record_keys`: by place,
+a key several objects at one place have is a field, any other a record's name) unless the frontier
+already has it (`known_key`: public words, words of field and setting names, package paths, and
+locales or environment names where every key beside them is one); others are `*`, and faked in a
+twin), JSON lines, delimited text (delimiter sniffed, RFC 4180 quoting, header detected: a row of distinct names that is
 not one more record, its cells of kinds their columns' values do not have or words the frontier
 already has, `has_header`), `KEY=value`,
 fixed-width (columns from blank gaps), simple XML (records: the root's children), logs (timestamp

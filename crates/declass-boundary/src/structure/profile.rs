@@ -1633,8 +1633,8 @@ mod tests {
         );
         assert!(view.contains("accounts.*.plan — string; 2"), "{view}");
         assert!(view.contains("2 key(s) look like data"), "{view}");
-        // Objects of fields keep their keys: scalars, or objects that share
-        // no member.
+        // Keys that are words of fields and settings, and environments'
+        // names, are shown.
         assert!(
             view.contains("limits.retries") && view.contains("envs.dev.host"),
             "{view}"
@@ -1664,6 +1664,27 @@ mod tests {
                 r#"{"mlopez": {"plan": "gold", "card": "x", "a": 1}, "jsmith": {"plan": "silver", "note": "y", "b": 2}}"#,
                 "data/a.json",
             ),
+            // Members of unlike kinds, or sharing no field, a one-member map
+            // holding only nested data at any depth, a name that repeats in
+            // records of one member each.
+            (
+                r#"{"mlopez": 30, "jsmith": null, "pbrown": "n/a"}"#,
+                "data/a.json",
+            ),
+            (
+                r#"{"mlopez": {"plan": "x"}, "jsmith": {"card": "y"}}"#,
+                "data/a.json",
+            ),
+            (r#"{"mlopez": {"orders": [{"id": 1}]}}"#, "data/a.json"),
+            (
+                r#"{"users": {"mlopez": {"profile": {"orders": [1]}}}}"#,
+                "data/a.json",
+            ),
+            (r#"{"mlopez": [1, 2], "jsmith": {"a": 1}}"#, "data/a.json"),
+            (
+                r#"[{"mlopez": 1}, {"mlopez": 2}, {"jsmith": 3}]"#,
+                "data/a.json",
+            ),
         ] {
             let view = profile(doc, Some(Path::new(path)), &Nothing)
                 .unwrap()
@@ -1672,6 +1693,29 @@ mod tests {
                 !view.contains("mlopez") && !view.contains("jsmith"),
                 "{doc}:\n{view}"
             );
+        }
+        // Initials are no locale, an address with a `/` no package, and
+        // `jd_001` neither.
+        for (doc, names) in [
+            (
+                r#"{"jd": {"plan": "gold"}, "mk": {"plan": "silver"}}"#,
+                &["jd", "mk"][..],
+            ),
+            (
+                r#"{"bob@corp.example/inbox": {"n": 1}, "amy@corp.example/inbox": {"n": 2}}"#,
+                &["bob@", "amy@"],
+            ),
+            (
+                r#"{"jd_001": {"n": 1}, "mk_002": {"n": 2}}"#,
+                &["jd_", "mk_"],
+            ),
+        ] {
+            let view = profile(doc, Some(Path::new("data/a.json")), &Nothing)
+                .unwrap()
+                .render();
+            for name in names {
+                assert!(!view.contains(name), "{name} in {doc}:\n{view}");
+            }
         }
         // Ordinary keys stay: environments, locales, package paths, sections
         // sharing no field, the fields of records.
@@ -1695,6 +1739,14 @@ mod tests {
             (
                 r#"[{"name": "a", "email": "b"}, {"name": "c", "email": "d"}]"#,
                 &["[].name", "[].email"],
+            ),
+            (
+                r#"{"users": [{"id": 1, "fooBar": 2}, {"id": 2, "fooBar": 3}], "lockfileVersion": 3}"#,
+                &["users[].fooBar", "lockfileVersion"],
+            ),
+            (
+                r#"{"en-US": {"greeting": "a"}, "pt-BR": {"greeting": "b"}}"#,
+                &["en-US.greeting", "pt-BR.greeting"],
             ),
         ] {
             let view = profile(doc, None, &Nothing).unwrap().render();
