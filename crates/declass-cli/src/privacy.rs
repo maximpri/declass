@@ -8,12 +8,27 @@ use declass_config::Config;
 use declass_provider::{Role, endpoint::ApprovedEndpoint};
 use rustix::fs::{AtFlags, Dir, FileType, Mode as FsMode, OFlags};
 use serde::Serialize;
-use std::os::fd::AsFd;
+use std::collections::HashSet;
+use std::ffi::OsStr;
+use std::os::fd::OwnedFd;
 use std::os::unix::ffi::OsStrExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
-const MAX_ENTRIES: usize = 20_000;
-const MAX_DEPTH: usize = 48;
+/// How much of the workspace a walk may visit.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Limits {
+    /// Entries of every kind, directories and skipped directories included.
+    pub(crate) entries: usize,
+    /// Directory levels below the workspace.
+    pub(crate) depth: usize,
+}
+
+/// The preview's bounds (docs/OPERATIONS.md, "Preview privacy before starting").
+const PREVIEW: Limits = Limits {
+    entries: 20_000,
+    depth: 48,
+};
 pub(crate) const SKIPPED: &[&str] = &[
     ".git",
     ".declass",
@@ -222,52 +237,71 @@ fn classify(path: &Path, p: &Policy, mode: Mode) -> (&'static str, String) {
     )
 }
 
-struct Inventory<'a> {
-    policy: &'a Policy,
-    mode: Mode,
-    files: Vec<FileRule>,
-    complete: bool,
-    seen: usize,
+/// One entry a walk found.
+pub(crate) enum Entry<'a> {
+    /// A regular file, with the directory that holds it, opened without
+    /// following links from the workspace root down.
+    File {
+        path: &'a str,
+        name: &'a OsStr,
+        dir: &'a Arc<OwnedFd>,
+    },
+    /// A symlink or special file: listed, never followed or opened.
+    Other { path: &'a str },
 }
-impl Inventory<'_> {
-    fn walk(&mut self, fd: impl AsFd, parent: &Path, depth: usize) -> std::io::Result<()> {
-        if depth > MAX_DEPTH {
+
+struct Walker<'v> {
+    limits: Limits,
+    seen: usize,
+    complete: bool,
+    visit: &'v mut dyn FnMut(Entry<'_>),
+}
+
+impl Walker<'_> {
+    fn walk(&mut self, fd: &Arc<OwnedFd>, parent: &Path, depth: usize) -> std::io::Result<()> {
+        if depth > self.limits.depth {
             self.complete = false;
             return Ok(());
         }
-        for entry in Dir::read_from(&fd)? {
+        for entry in Dir::read_from(&**fd)? {
             let entry = entry?;
             let raw = entry.file_name().to_bytes();
             if raw == b"." || raw == b".." {
                 continue;
             }
             self.seen += 1;
-            if self.seen > MAX_ENTRIES {
+            if self.seen > self.limits.entries {
                 self.complete = false;
                 break;
             }
-            let name = std::ffi::OsStr::from_bytes(raw);
+            let name = OsStr::from_bytes(raw);
             let path = parent.join(name);
             // Fail visibly on non-UTF8 names: lossy names cannot prove which rule matched.
             let Some(text) = path.to_str() else {
                 self.complete = false;
                 continue;
             };
-            let stat = match rustix::fs::statat(&fd, name, AtFlags::SYMLINK_NOFOLLOW) {
-                Ok(s) => s,
-                Err(_) => {
-                    self.complete = false;
-                    continue;
+            // The directory entry's type when the filesystem records it, else
+            // the entry itself (never what a link points to).
+            let kind = match entry.file_type() {
+                FileType::Unknown => {
+                    match rustix::fs::statat(&**fd, name, AtFlags::SYMLINK_NOFOLLOW) {
+                        Ok(s) => FileType::from_raw_mode(s.st_mode),
+                        Err(_) => {
+                            self.complete = false;
+                            continue;
+                        }
+                    }
                 }
+                known => known,
             };
-            let kind = FileType::from_raw_mode(stat.st_mode);
             if kind == FileType::Directory {
                 if SKIPPED.contains(&name.to_str().unwrap_or_default()) {
                     continue;
                 }
-                match rustix::fs::openat(&fd, name, DIR_FLAGS, FsMode::empty()) {
+                match rustix::fs::openat(&**fd, name, DIR_FLAGS, FsMode::empty()) {
                     Ok(child) => {
-                        if self.walk(child, &path, depth + 1).is_err() {
+                        if self.walk(&Arc::new(child), &path, depth + 1).is_err() {
                             self.complete = false;
                         }
                     }
@@ -275,18 +309,78 @@ impl Inventory<'_> {
                 }
                 continue;
             }
-            let (disposition, rule) = if kind == FileType::RegularFile {
-                classify(&path, self.policy, self.mode)
+            (self.visit)(if kind == FileType::RegularFile {
+                Entry::File {
+                    path: text,
+                    name,
+                    dir: fd,
+                }
             } else {
-                ("blocked", "symlink or special file; not followed".into())
-            };
-            self.files.push(FileRule {
-                path: text.to_owned(),
-                disposition,
-                rule,
+                Entry::Other { path: text }
             });
         }
         Ok(())
+    }
+}
+
+/// Visits the workspace's files without following links or entering the
+/// excluded directories, within `limits`. Names and metadata only: no file is
+/// opened. Returns whether the walk was complete (no limit reached, no
+/// unreadable directory, no non-UTF8 name).
+pub(crate) fn walk(ws: &Path, limits: Limits, visit: &mut dyn FnMut(Entry<'_>)) -> Result<bool> {
+    let root = Arc::new(rustix::fs::open(ws, DIR_FLAGS, FsMode::empty())?);
+    let mut walker = Walker {
+        limits,
+        seen: 0,
+        complete: true,
+        visit,
+    };
+    if walker.walk(&root, Path::new(""), 0).is_err() {
+        walker.complete = false;
+    }
+    Ok(walker.complete)
+}
+
+/// The rule for a workspace path: path rules, then the persistent
+/// classification of files derived from sensitive data.
+pub(crate) struct Classifier<'a> {
+    policy: &'a Policy,
+    mode: Mode,
+    /// Derived files, or `None` when their classification cannot be read.
+    derived: Option<HashSet<PathBuf>>,
+}
+
+impl<'a> Classifier<'a> {
+    pub(crate) fn new(ws: &Path, policy: &'a Policy, mode: Mode) -> Self {
+        Self {
+            policy,
+            mode,
+            derived: declass_boundary::derived::workspace_paths(ws).ok(),
+        }
+    }
+
+    /// False when derived-file classifications could not be read: files
+    /// without a path rule are then of unknown classification.
+    pub(crate) fn derived_known(&self) -> bool {
+        self.derived.is_some()
+    }
+
+    pub(crate) fn classify(&self, path: &str) -> (&'static str, String) {
+        let (disposition, rule) = classify(Path::new(path), self.policy, self.mode);
+        if disposition != "content-checks" {
+            return (disposition, rule);
+        }
+        match &self.derived {
+            Some(paths) if self.mode == Mode::Hybrid && paths.contains(Path::new(path)) => (
+                "sensitive",
+                "persistent classification: derived from sensitive data".into(),
+            ),
+            Some(_) => (disposition, rule),
+            None => (
+                "unknown",
+                "derived classification unavailable; run startup requires recovery".into(),
+            ),
+        }
     }
 }
 
@@ -300,42 +394,30 @@ pub(crate) struct Files {
 }
 
 pub(crate) fn inventory(ws: &Path, p: &Policy, mode: Mode) -> Result<Files> {
-    let mut inventory = Inventory {
-        policy: p,
-        mode,
-        files: Vec::new(),
-        complete: true,
-        seen: 0,
-    };
-    let root = rustix::fs::open(ws, DIR_FLAGS, FsMode::empty())?;
-    if inventory.walk(root, Path::new(""), 0).is_err() {
-        inventory.complete = false;
-    }
-    inventory.files.sort_by(|a, b| a.path.cmp(&b.path));
-    let derived = declass_boundary::derived::workspace_paths(ws);
-    if let Ok(paths) = &derived {
-        if mode == Mode::Hybrid {
-            for file in &mut inventory.files {
-                if file.disposition == "content-checks" && paths.contains(Path::new(&file.path)) {
-                    file.disposition = "sensitive";
-                    file.rule = "persistent classification: derived from sensitive data".into();
+    let classifier = Classifier::new(ws, p, mode);
+    let mut files = Vec::new();
+    let complete = walk(ws, PREVIEW, &mut |entry| {
+        files.push(match entry {
+            Entry::File { path, .. } => {
+                let (disposition, rule) = classifier.classify(path);
+                FileRule {
+                    path: path.to_owned(),
+                    disposition,
+                    rule,
                 }
             }
-        }
-    } else {
-        inventory.complete = false;
-        for file in &mut inventory.files {
-            if file.disposition == "content-checks" {
-                file.disposition = "unknown";
-                file.rule =
-                    "derived classification unavailable; run startup requires recovery".into();
-            }
-        }
-    }
+            Entry::Other { path } => FileRule {
+                path: path.to_owned(),
+                disposition: "blocked",
+                rule: "symlink or special file; not followed".into(),
+            },
+        })
+    })?;
+    files.sort_by(|a, b| a.path.cmp(&b.path));
     Ok(Files {
-        files: inventory.files,
-        complete: inventory.complete,
-        derived_known: derived.is_ok(),
+        files,
+        complete: complete && classifier.derived_known(),
+        derived_known: classifier.derived_known(),
     })
 }
 
@@ -747,6 +829,55 @@ mod tests {
         assert!(top.search_origins.is_empty());
         assert!(top.command_registries.is_empty());
         assert!(top.web_private_hosts.is_empty());
+    }
+
+    #[test]
+    fn the_walk_visits_every_file_once_and_says_when_a_limit_cuts_it_short() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(temp.path().join("a/b/c")).unwrap();
+        std::fs::create_dir_all(temp.path().join("node_modules/pkg")).unwrap();
+        for name in [
+            "one",
+            "two",
+            "a/three",
+            "a/b/c/four",
+            "node_modules/pkg/x.js",
+        ] {
+            std::fs::write(temp.path().join(name), "").unwrap();
+        }
+        std::os::unix::fs::symlink("/etc/hosts", temp.path().join("a/link")).unwrap();
+        let (mut files, mut other) = (Vec::new(), Vec::new());
+        let complete = walk(
+            temp.path(),
+            Limits {
+                entries: 100,
+                depth: 48,
+            },
+            &mut |e| match e {
+                Entry::File { path, .. } => files.push(path.to_owned()),
+                Entry::Other { path } => other.push(path.to_owned()),
+            },
+        )
+        .unwrap();
+        assert!(complete);
+        files.sort();
+        assert_eq!(files, ["a/b/c/four", "a/three", "one", "two"]);
+        assert_eq!(other, ["a/link"]);
+        for limits in [
+            Limits {
+                entries: 2,
+                depth: 48,
+            },
+            Limits {
+                entries: 100,
+                depth: 1,
+            },
+        ] {
+            assert!(
+                !walk(temp.path(), limits, &mut |_| {}).unwrap(),
+                "{limits:?}"
+            );
+        }
     }
 
     #[test]

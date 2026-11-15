@@ -31,6 +31,9 @@ declass-net.workspace = true
 url = "2"
 anyhow.workspace = true
 sha2.workspace = true
+# Git's blob ids (SHA-1 or SHA-256) of the working tree's files for
+# `declass exposure --history`, computed without letting git read them.
+ring.workspace = true
 hex.workspace = true
 clap.workspace = true
 serde.workspace = true

@@ -44,6 +44,9 @@ declass audit retention            # review raw-data expiry and audit archival t
 declass purge --dry-run            # preview expired raw runs without deleting them
 declass privacy                    # offline file rules, model destinations and exceptions
 declass exposure                   # what an agent could send from this repo: counts, never values; offline
+declass exposure --sarif --output exposure.sarif  # the same as SARIF for code scanning
+declass exposure --fail-on error   # exit 1 only for a secret in a file the cloud model reads
+declass exposure --history         # also values only earlier versions in git history hold
 declass audit disclosure <run>     # what was withheld from the frontier, by class (counts only)
 declass audit disclosure <run> --narrative  # the local model's account of what the frontier could have learned
 declass resume <run>               # continue an interrupted one-shot run

@@ -1021,6 +1021,15 @@ channel in; a commit is a side effect that outlives the run.
 | Commits without the operator knowing | `git.commit = "ask"` (default): each commit waits for approval showing the message and paths, in an interactive session inline even with `oversight.approve = "off"`; `git_commit` is not offered where nobody can be asked (a one-shot run or a session without a terminal, with approval off); `allow` needs a confirmed owner change or an owner default; a project can only tighten (`allow` → `ask` → `off`). Every commit is a `git_commit` audit event (hash, paths; never the message) |
 | Commits under a made-up identity | Author and committer are the operator: `git.author` (owner only), else `user.name`/`user.email` from the repository config, else the owner's git config files (read with `--file`, those two keys only); none → refused |
 
+`declass exposure --history` reads history through the same runner, offline and outside any run,
+to count what earlier versions hold (never showing a value). It runs only commands that read
+objects, refs and configuration (`rev-parse`, `rev-list`, `diff-tree` with raw output, `cat-file`
+without `--filters` or `--textconv`), never one that reads a working-tree file: `status`,
+`diff-files` and `hash-object` hash such a file through the repository's clean filter, which then
+runs, also for a racily clean index entry that only looks unchanged. It computes the working tree's
+blob ids itself, and sets `GIT_NO_LAZY_FETCH` so a partial clone's missing objects are counted, not
+fetched.
+
 Why there is no `git.run_hooks`: a hook is code chosen by the repository (or by whoever last wrote
 `.git/hooks`), and it would run outside the sandbox with the operator's rights and network. Declass
 never runs it; run your hooks yourself (`pre-commit run --files ...`) or make them checks

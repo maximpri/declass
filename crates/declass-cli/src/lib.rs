@@ -224,6 +224,10 @@ enum Cmd {
     Privacy(privacy::Args),
     /// Show what a coding agent could send to the cloud from this repository,
     /// and what Declass keeps local instead. Offline; no models needed.
+    ///
+    /// Counts and positions, never values. Exit 0: the report is complete and
+    /// nothing is at or above --fail-on; 1: a finding is (or an error, with no
+    /// report written); 2: the report is incomplete.
     Exposure(exposure::Args),
     /// Run one task to its end without a conversation (for scripts); `declass` alone opens a session.
     Run {

@@ -530,6 +530,7 @@ dependencies = [
  "declass-web",
  "futures-util",
  "hex",
+ "ring",
  "rustix 0.38.44",
  "serde",
  "serde_json",

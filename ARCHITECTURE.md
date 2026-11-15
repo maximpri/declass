@@ -612,6 +612,19 @@ read through the guarded file access, copied privately into the run directory an
 its saved first content by `git diff --no-index` (which needs no repository), headers relabelled
 to workspace paths. No git tools are offered; a `git` command that fails gets a hint instead.
 
+**The exposure report** (`declass-cli::exposure`, offline, no run) walks the workspace with the
+privacy preview's no-follow walker (`privacy::walk`, with its own limits) on one thread and reads
+each directory's files through the walk's directory handle on every core, keeping only files with
+findings. `--history` (`exposure::history`) lists every (blob, path) pair in the history of every
+ref with `rev-list --all` piped into `diff-tree --stdin -r -m --root -z` through `Git::spawn`,
+keeps each blob once under its most exposed path (one the cloud model reads before one kept
+local), skips the working tree's own blobs by ids Declass computes while the walk reads the files
+(no git command reads a working-tree file, so no clean filter runs), reads sizes and then contents
+with `cat-file --batch-check` and `--batch` within blob and byte limits, and counts only values the
+working tree does not hold (compared by keyed hashes kept in memory). Paths are classified by
+their rules now, as above. `exposure::sarif` writes the report as SARIF 2.1.0 with no value and no
+content-derived hash.
+
 ### 5.8 MCP servers
 
 `crates/declass-agent/src/mcp.rs` (`Hub`) over `declass-mcp`. The CLI reads `[mcp.servers.<name>]`

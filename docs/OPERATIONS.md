@@ -64,36 +64,136 @@ endpoint trust and permitted disclosure. Retention and audit commands follow.
 
 ```sh
 declass exposure
-declass exposure --all     # list every file with findings, not the first 25
+declass exposure --all              # list every file with findings, not the first 25
 declass exposure --json
+declass exposure --sarif --output exposure.sarif   # SARIF for code scanning
+declass exposure --fail-on error    # exit 1 only for a secret the cloud model would read
+declass exposure --history          # also earlier file versions in git history
 ```
 
-`declass exposure` reads the same files as the privacy preview, on this
-machine, and runs Declass's pattern detectors for secrets and personal data
-(and your `sensitivity.custom_patterns`) over them. For each file with findings
-it reports how many values of each kind it found and what Declass does with the
-file in hybrid mode under the current path rules: read only by the local model,
-placeholders before any request, interface only or sealed. Files that path
-rules cover but where nothing was detected are counted. Detectors turned off in
-your configuration are not run, and the report names them.
+`declass exposure` reads the workspace on this machine, the files the privacy
+preview lists, and runs Declass's pattern detectors for secrets and personal
+data (and your `sensitivity.custom_patterns`) over them. For each file with
+findings it reports how many values of each kind it found, where the first
+ones are, and what Declass does with the file in hybrid mode under the current
+path rules: read only by the local model, placeholders before any request,
+interface only or sealed. Files that path rules cover but where nothing was
+detected are counted. Detectors turned off in your configuration are not run,
+and the report names them.
 
 It does not run Declass's local-model checks or compare against values a run
 has already seen, so names and paraphrased details are mostly not counted.
 Overlapping matches count as one value, so counts are a lower bound.
 
 It needs no model, API key or setup. It makes no network requests, starts no
-tool server and creates no run, audit or vault. The report holds paths and
-counts; matched values are never displayed or written. Files over 2 MiB,
-binary files (including UTF-16 text), symlinks and special files are counted
-as not read, and the excluded directories (`.git`, `node_modules`, `target`
-and the like) are named.
+tool server and creates no run, audit or vault. The report holds paths, counts
+and positions (line and column); matched values, lines of content and hashes of
+either are never displayed or written. Files over 2 MiB, binary files
+(including UTF-16 text), symlinks and special files are counted as not read,
+and the excluded directories (`.git`, `node_modules`, `target` and the like)
+are named.
 
 Detectors recognize known formats. A file with no findings can still hold
 private information, and a count is not a measure of sensitivity.
 
-Exit 0 means nothing was found. Exit 1 means files with findings are listed,
-or the command failed (for example on an invalid configuration) with an error
-message. Exit 2 means the inventory is incomplete, whatever was found.
+Large repositories are read on every core while one thread lists them, and
+memory holds the files with findings, not the whole tree. The report covers at
+most 1,000,000 entries and 48 directory levels; reaching either, an unreadable
+directory or a non-UTF8 name makes it incomplete.
+
+### Levels and exit codes
+
+Each finding has a level, from what Declass does with its file:
+
+| Level | Finding |
+| --- | --- |
+| error | A secret in a file the cloud model reads (Declass replaces it with a placeholder) |
+| warning | Personal data or a custom-pattern match in a file the cloud model reads |
+| note | Any value in a file that path rules keep from the cloud model: `sensitivity.globs`, `sensitivity.protected_paths` or `ip.sealed` |
+
+Files under `ip.interface_only` count as read: their signatures and public
+constants are shown. `--fail-on` sets the level from which findings fail:
+`note` (the default, any finding), `warning`, `error` or `never`.
+
+| Exit | Meaning |
+| --- | --- |
+| 0 | The report is complete and nothing is at or above the `--fail-on` level |
+| 1 | A finding is at or above it; or the command failed with an error message, and no report was written |
+| 2 | The report is incomplete, whatever was found; a mistyped or unknown option also exits 2 |
+
+To accept known findings, such as fake keys in test fixtures, keep those files
+local: add them to `[sensitivity] protected_paths` in `.declass/config.toml`.
+Their findings become notes, so `--fail-on warning` or `error` no longer fails
+on them. The report still lists them, and in a run only your local model reads
+them. There is no separate allowlist.
+
+The same file can waive the gate: a pull request that adds `protected_paths =
+["**"]` turns every finding into a note. When `--fail-on` gates CI, protect
+`.declass/` with code owners or branch rules, or run the report with the base
+branch's `.declass/`.
+
+`--json` prints schema 2, which adds each finding's `level` and `positions`,
+`fail_on`, `failing`, `limits` and, with `--history`, `history` to schema 1.
+
+### SARIF for code scanning
+
+`--sarif` prints the report as SARIF 2.1.0; with `--output FILE` it goes to the
+file and the text report to standard output. There is one result per file and
+kind of value, at the first value of that kind, with the count, the lines of
+the first ten and what Declass does with the file. The level is the finding's
+level above. The tool is `declass` with its version, and the run's category is
+`declass-exposure`, so it never replaces `declass extensions verify` results.
+A run holds at most 25,000 results, the most code scanning accepts: past that,
+errors are kept first, then warnings, then notes, and the log says how many
+were left out.
+
+Rule ids are stable: `exposure/secret`, `exposure/email`, `exposure/phone`,
+`exposure/card`, `exposure/national-id`, `exposure/iban`, `exposure/ip-address`,
+`exposure/account-number`, `exposure/postal-address` and
+`exposure/custom-pattern` (`exposure/name` and `exposure/protected-code` are
+defined but this report does not produce them). Each rule's help says what the
+kind is, what Declass does with such a file and how to accept a finding.
+
+A result never holds a value, a line of content, an end column (which would
+give a value's length) or a hash of any of them. Its partial fingerprint,
+`declassExposure/v1`, is a SHA-256 of its path and rule only, so it keeps its
+identity while lines move. GitHub's `upload-sarif` action adds a fingerprint
+of its own to each result with a line: a hash it computes on the runner from
+that line of the file in your checkout, which is how code scanning tracks
+alerts across commits.
+
+### Git history
+
+`--history` also reads earlier file versions: every blob in the history of
+the repository's refs that is not in the working tree, each once, under every
+path it ever had in the workspace. It reports the values they hold that the
+working tree does not, such as a key committed and removed since, by path, with
+how many earlier versions hold them and whether the file was deleted. A blob or
+value found at several paths counts at the one Declass would show most: a path
+the cloud model reads before one a path rule keeps local. Values are compared in
+memory by keyed hashes, never written; the report holds no commit or blob id.
+
+Git runs through Declass's hardened runner, as for the git tools, and only
+reads objects, refs and configuration (`rev-parse`, `rev-list`, `diff-tree`,
+`cat-file`). It never reads a file of the working tree: git would then run any
+clean filter the repository configures, even for a file that only looks
+unchanged. Declass computes the working tree's blob ids itself, while it reads
+the files, so their blobs are not read again.
+
+It reads at most 100,000 blobs and 1,024 MiB (`--history-max-blobs`,
+`--history-max-mib`); blobs over 2 MiB and binary blobs are not read. Reaching a
+limit, or a name in history that is not UTF-8, makes the report incomplete. A
+shallow clone holds only the history it fetched.
+
+Declass's git tools classify each path's history by its rules now: a path that
+is sensitive now is held locally in every revision, a sealed or interface-only
+path's earlier versions are withheld, and any other path's are scanned like
+public content, detected values replaced by placeholders. The levels follow:
+history findings for sealed and interface-only paths are notes too. The history
+lines of the report say what applies to each path. Commands cannot read `.git`.
+Objects a partial clone lacks are counted as not read, never fetched. In SARIF,
+a history result points at line 1 of the path, since an earlier version's lines
+do not apply to the file now.
 
 ## Storage and retention
 
