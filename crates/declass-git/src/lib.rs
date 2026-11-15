@@ -79,16 +79,8 @@ impl Git {
         self.run_accepting(cwd, args, env, stdin, &[0])
     }
 
-    /// [`Git::run`], treating each exit code in `ok` as success (`git diff
-    /// --no-index` exits 1 when the files differ).
-    pub fn run_accepting(
-        &self,
-        cwd: &Path,
-        args: &[&str],
-        env: &[(&str, &str)],
-        stdin: Option<&[u8]>,
-        ok: &[i32],
-    ) -> Result<Vec<u8>, GitError> {
+    /// The hardened command line every invocation starts from.
+    fn command(&self, cwd: &Path, args: &[&str], env: &[(&str, &str)]) -> Command {
         let mut cmd = Command::new(&self.binary);
         cmd.args(HARDENING)
             .args(args)
@@ -103,14 +95,49 @@ impl Git {
             .env("GIT_AUTHOR_EMAIL", "declass@localhost")
             .env("GIT_COMMITTER_NAME", "declass")
             .env("GIT_COMMITTER_EMAIL", "declass@localhost")
-            .envs(env.iter().copied())
-            .stdin(if stdin.is_some() {
-                Stdio::piped()
-            } else {
-                Stdio::null()
-            })
+            .envs(env.iter().copied());
+        cmd
+    }
+
+    /// Starts git with the hardening of [`Git::run`], standard input and
+    /// output piped and standard error discarded, for output read as it comes
+    /// (`cat-file --batch`, `rev-list --objects`). The caller closes the input,
+    /// reads the output and waits for the child.
+    pub fn spawn(
+        &self,
+        cwd: &Path,
+        args: &[&str],
+        env: &[(&str, &str)],
+    ) -> Result<std::process::Child, GitError> {
+        self.command(cwd, args, env)
+            .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|e| GitError::Failed {
+                args: args.join(" "),
+                message: e.to_string(),
+            })
+    }
+
+    /// [`Git::run`], treating each exit code in `ok` as success (`git diff
+    /// --no-index` exits 1 when the files differ).
+    pub fn run_accepting(
+        &self,
+        cwd: &Path,
+        args: &[&str],
+        env: &[(&str, &str)],
+        stdin: Option<&[u8]>,
+        ok: &[i32],
+    ) -> Result<Vec<u8>, GitError> {
+        let mut cmd = self.command(cwd, args, env);
+        cmd.stdin(if stdin.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
         let mut child = cmd.spawn().map_err(|e| GitError::Failed {
             args: args.join(" "),
             message: e.to_string(),
@@ -433,6 +460,60 @@ mod tests {
         std::fs::write(ws.join("a.txt"), "two\n").unwrap();
         git.list_files(&ws).unwrap();
         git.run(&ws, &["commit", "-qam", "x"], &[], None).unwrap();
+        assert!(!marker.exists(), "repository-controlled code ran");
+    }
+
+    #[test]
+    fn spawned_git_streams_with_the_runners_hardening() {
+        use std::io::Write;
+        let (_d, ws, git) = repo();
+        let marker = ws.join("pwned");
+        std::fs::write(
+            ws.join("evil.sh"),
+            format!("#!/bin/sh\ntouch {}\n", marker.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(
+            ws.join("evil.sh"),
+            std::os::unix::fs::PermissionsExt::from_mode(0o755),
+        )
+        .unwrap();
+        let evil = ws.join("evil.sh");
+        git.run(
+            &ws,
+            &["config", "core.fsmonitor", evil.to_str().unwrap()],
+            &[],
+            None,
+        )
+        .unwrap();
+        std::fs::write(ws.join("a.txt"), "two\n").unwrap();
+        // Read as it comes: an object id in, its type and size out.
+        let oid = git
+            .run(&ws, &["rev-parse", "HEAD:a.txt"], &[], None)
+            .unwrap();
+        let mut child = git
+            .spawn(
+                &ws,
+                &["cat-file", "--batch-check=%(objecttype) %(objectsize)"],
+                &[],
+            )
+            .unwrap();
+        child.stdin.take().unwrap().write_all(&oid).unwrap();
+        let out = child.wait_with_output().unwrap();
+        assert!(out.status.success());
+        assert_eq!(out.stdout, b"blob 4\n");
+        // The runner's environment, and no repository-chosen program.
+        let child = git
+            .spawn(&ws, &["var", "GIT_AUTHOR_IDENT"], &[("TZ", "UTC")])
+            .unwrap();
+        let out = child.wait_with_output().unwrap();
+        assert!(String::from_utf8_lossy(&out.stdout).starts_with("declass <declass@localhost>"));
+        let changed = git
+            .spawn(&ws, &["diff-files", "--name-only"], &[])
+            .unwrap()
+            .wait_with_output()
+            .unwrap();
+        assert_eq!(changed.stdout, b"a.txt\n");
         assert!(!marker.exists(), "repository-controlled code ran");
     }
 
