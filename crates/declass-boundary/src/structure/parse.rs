@@ -426,22 +426,39 @@ impl Assignment {
     }
 }
 
-/// Whether `line` (without its line break) ends with `quote` closing a
-/// value: for a double quote, one no backslash escapes.
-fn closes(line: &str, quote: char) -> bool {
-    let Some(before) = line.trim_end().strip_suffix(quote) else {
-        return false;
+/// Where the quoted value that `quote` opens at byte `open` of `text` ends,
+/// as dotenv reads it: at the first quote after it on its own line (for a
+/// double quote, one no backslash escapes), whatever follows it there;
+/// else at the first one on a later line that only spaces and a `#`
+/// comment follow. `None`: nothing closes it.
+fn closing_quote(text: &str, open: usize, quote: char) -> Option<usize> {
+    let bytes = text.as_bytes();
+    let q = quote as u8;
+    let closes = |i: usize| {
+        bytes[i] == q
+            && (quote != '"'
+                || bytes[..i].iter().rev().take_while(|&&b| b == b'\\').count() % 2 == 0)
     };
-    quote != '"' || (before.len() - before.trim_end_matches('\\').len()) % 2 == 0
+    let line_end = text[open..].find('\n').map_or(text.len(), |n| open + n);
+    if let Some(i) = (open + 1..line_end).find(|&i| closes(i)) {
+        return Some(i);
+    }
+    (line_end..bytes.len()).find(|&i| {
+        closes(i) && {
+            let rest = &text[i + 1..];
+            let after = rest[..rest.find('\n').unwrap_or(rest.len())].trim_start();
+            after.is_empty() || after.starts_with('#')
+        }
+    })
 }
 
 /// The assignments of a `KEY=value` file (`export` allowed, `#` comments
 /// skipped, a byte order mark ignored). A key is a name ([`is_env_key`]). A
-/// value that opens a quote its line does not close goes on to the first
-/// later line that ends with that quote, as dotenv reads it: the lines
-/// between (a private key, a JSON document) are part of the value, never
-/// assignments or other lines of their own. Without such a line the value
-/// ends with its own line.
+/// quoted value ends at its closing quote ([`closing_quote`]): on its own
+/// line (a comment or other text may follow), or, when its line does not
+/// close it, on a later line, as dotenv reads it. The lines between (a
+/// private key, a JSON document) are part of the value, never assignments
+/// or other lines of their own. A quote nothing closes ends with its line.
 pub fn assignments(text: &str) -> Vec<Assignment> {
     let mut lines: Vec<(usize, &str)> = Vec::new();
     let mut offset = 0;
@@ -458,7 +475,10 @@ pub fn assignments(text: &str) -> Vec<Assignment> {
         let offset = offset + (raw.len() - body.len());
         let trimmed = body.trim_start();
         let lead = body.len() - trimmed.len();
-        let rest = trimmed.strip_prefix("export ").unwrap_or(trimmed);
+        let rest = trimmed
+            .strip_prefix("export")
+            .filter(|r| r.starts_with([' ', '\t']))
+            .map_or(trimmed, str::trim_start);
         let skip = lead + (trimmed.len() - rest.len());
         let Some((key, value)) = rest.split_once('=') else {
             continue;
@@ -471,35 +491,30 @@ pub fn assignments(text: &str) -> Vec<Assignment> {
         let lead_ws = v.len() - v.trim_start().len();
         let v = v.trim_start();
         let start = vstart + lead_ws;
+        let export = rest.len() < trimmed.len();
         let opened = v.chars().next().filter(|q| *q == '"' || *q == '\'');
-        // A quote this line opens and does not close: the value goes on.
         if let Some(q) = opened
-            && !(v.len() >= 2 && closes(v, q))
-            && let Some(last) = (i..lines.len()).find(|&j| closes(lines[j].1, q))
+            && let Some(close) = closing_quote(text, start, q)
         {
-            let (last_offset, last_line) = lines[last];
-            let end = last_offset + last_line.trim_end().len();
             out.push(Assignment {
                 key: key.trim().to_owned(),
-                span: start..end,
-                value: text[start + q.len_utf8()..end - q.len_utf8()].to_owned(),
+                span: start..close + 1,
+                value: text[start + 1..close].to_owned(),
                 quote: Some(q),
-                export: rest.len() < trimmed.len(),
+                export,
             });
-            i = last + 1;
+            // A value over several lines: the lines it holds are its own.
+            while i < lines.len() && lines[i].0 <= close {
+                i += 1;
+            }
             continue;
         }
-        let quote = opened.filter(|q| v.len() >= 2 && v.ends_with(*q));
-        let inner = match quote {
-            Some(_) => &v[1..v.len() - 1],
-            None => v,
-        };
         out.push(Assignment {
             key: key.trim().to_owned(),
             span: start..start + v.len(),
-            value: inner.to_owned(),
-            quote,
-            export: rest.len() < trimmed.len(),
+            value: v.to_owned(),
+            quote: None,
+            export,
         });
     }
     out
@@ -820,6 +835,32 @@ mod tests {
         assert_eq!(&text[a[1].span.clone()], "2");
         assert!(!looks_like_env(text));
         assert!(looks_like_env("A=1\nB=2\n# x\n"));
+    }
+
+    #[test]
+    fn a_quote_closed_on_its_own_line_ends_the_value_there() {
+        // A comment or other text after the closing quote: the value ends
+        // there, and the lines after it are their own (they were taken into
+        // the value up to the next line ending in a quote).
+        for text in [
+            "A=\"x\" # c\nB=1\nC=\"y\"\nD=3\n",
+            "A='x' # c\nB=1\nC='y'\nD=3\n",
+            "A=\"x\" # c\r\nB=1\r\nC=\"y\"\r\nD=3\r\n",
+            "A=\"x\"y\nB=1\nC=\"y\"\nD=3\n",
+            "export\tA=\"x\" # c\nB=1\nC=\"y\"\nD=3\n",
+        ] {
+            let a = assignments(text);
+            let kv: Vec<(&str, &str)> = a
+                .iter()
+                .map(|a| (a.key.as_str(), a.value.as_str()))
+                .collect();
+            assert_eq!(
+                kv,
+                [("A", "x"), ("B", "1"), ("C", "y"), ("D", "3")],
+                "{text:?}"
+            );
+            assert!(!a.iter().any(|a| a.multiline(text)), "{text:?}");
+        }
     }
 
     #[test]

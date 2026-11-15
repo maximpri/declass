@@ -5,7 +5,7 @@
 use crate::journal::WriteJournal;
 use declass_boundary::audit::{AuditEvent, AuditHandle};
 use declass_boundary::model::ToolSpec;
-use declass_boundary::view::{Presenter, Source};
+use declass_boundary::view::{EditView, Presenter, Source};
 use declass_fs::{FsError, Precondition};
 use declass_git::Git;
 use declass_sandbox::{SandboxKind, Spec};
@@ -129,7 +129,8 @@ repository: the files you wrote, compared with their content before the run).",
             "edit_file",
             "Edit one file by exact text replacement. Put `path` once at the top level; each item in \
 `edits` contains only `old` and `new`. Use separate calls for different files. Each `old` must occur \
-exactly once. Edits run in order and are applied together or not at all.",
+exactly once. Edits run in order and are applied together or not at all. In a sensitive file shown with \
+placeholders (`.env`), `old` is matched against what read_file shows; other sensitive files are written whole.",
             json!({"type": "object", "properties": {
                 "path": {"type": "string"},
                 "edits": {"type": "array", "minItems": 1, "items": {"type": "object", "properties": {
@@ -532,6 +533,62 @@ fn closest_line(text: &str, needle: &str) -> String {
         .unwrap_or_default()
 }
 
+/// Applies edits to a file the frontier was shown as `view`, not as written
+/// (a sensitive `.env`-style file: its values as placeholders). Each `old`
+/// is found in the text shown, never in the file, so an edit answers no
+/// guess about what the view withholds: an anchor holding a value fails as
+/// any anchor the view does not hold fails, with the same message, whether
+/// or not the value is right. An anchor takes a placeholder, or a line
+/// shown with values withheld, whole; the edit is made at the text of the
+/// file the pieces it takes stand for. `written` gives what `new` stands
+/// for (its placeholders resolved). Returns the file's new text.
+fn apply_view_edits(
+    mut view: EditView,
+    edits: &[Value],
+    written: &dyn Fn(&str) -> EditView,
+) -> Result<String, String> {
+    for (i, e) in edits.iter().enumerate() {
+        // Numbered as the model numbers them: the first edit is edit 1.
+        let i = i + 1;
+        let old = e
+            .get("old")
+            .and_then(Value::as_str)
+            .ok_or_else(|| format!("edit {i}: missing `old`"))?;
+        let new = e
+            .get("new")
+            .and_then(Value::as_str)
+            .ok_or_else(|| format!("edit {i}: missing `new`"))?;
+        if old.is_empty() {
+            return Err(format!("edit {i}: `old` must not be empty"));
+        }
+        let shown = view.shown();
+        let at: Vec<usize> = shown.match_indices(old).map(|(s, _)| s).collect();
+        match at.as_slice() {
+            [start] => {
+                if !view.replace(*start, start + old.len(), written(new)) {
+                    return Err(format!(
+                        "edit {i}: `old` takes part of a placeholder or of a line shown with values \
+withheld; take it whole. No edits applied."
+                    ));
+                }
+            }
+            [] => {
+                return Err(format!(
+                    "edit {i}: `old` text not found in this sensitive file as read_file shows it \
+(values as placeholders); no edits applied. Copy `old` from what read_file shows."
+                ));
+            }
+            many => {
+                return Err(format!(
+                    "edit {i}: `old` text occurs {} times; include more surrounding lines. No edits applied.",
+                    many.len()
+                ));
+            }
+        }
+    }
+    Ok(view.file())
+}
+
 /// Reject ambiguous edit targets before reading a file or noting authored text.
 /// Per-edit paths are not a multi-file transaction and must never be ignored.
 fn edit_arguments(args: &Map<String, Value>) -> Result<(&str, &[Value]), String> {
@@ -571,7 +628,14 @@ fn edit_file(ctx: &mut Ctx<'_>, args: &Map<String, Value>) -> Result<String, Str
             presenter.note_authored(new);
         }
     }
-    let updated = apply_edits_with(&original, edits, &|s| presenter.detokenize(s))?;
+    // A file the frontier was not shown as written (sensitive, protected) is
+    // edited through what it was shown, or not at all.
+    let updated = match presenter.edit_view(&rel, &original) {
+        None => apply_edits_with(&original, edits, &|s| presenter.detokenize(s))?,
+        Some(view) => apply_view_edits(view?, edits, &|s| {
+            EditView::written(s, &|t| presenter.detokenize(t))
+        })?,
+    };
     // Placeholders in the new text are resolved locally (and checked against secret sinks).
     let updated = presenter.resolve_for_write(&rel, &updated)?;
     let pre = Precondition::Sha256(declass_fs::sha256_hex(&bytes));
@@ -2216,6 +2280,115 @@ mod sensitive_command_tests {
         );
         assert!(!ws.join(".git/hooks").exists() && !ws.join("sub/.GIT").exists());
         assert!(!ws.join(".declass/config.toml").exists() && !ws.join(".declass/planted").exists());
+    }
+
+    #[tokio::test]
+    async fn edits_of_sensitive_files_match_what_was_shown_never_the_file() {
+        // Anchors matched against a sensitive file's real text answered a
+        // guess per edit: `DB_PASSWORD=q` succeeded only when the password
+        // starts with `q`. They are found in the view the frontier was shown.
+        let d = tempfile::tempdir().unwrap();
+        let ws = d.path().canonicalize().unwrap().join("ws");
+        let run = d.path().canonicalize().unwrap().join("run");
+        for dir in [ws.join("data"), ws.join("src"), run.clone()] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        let env = "# db\nDB_PASSWORD=\"quartz-otter-5519\"\nLOG_LEVEL=info\n\
+                   KEY=\"-----BEGIN KEY-----\nAbCd1234Ef\n-----END KEY-----\"\n";
+        std::fs::write(ws.join(".env"), env).unwrap();
+        std::fs::write(ws.join("data/users.csv"), "id,born\n1,1987-03-14\n").unwrap();
+        std::fs::write(
+            ws.join("src/pricing.rs"),
+            "pub fn quote() -> u64 { 1_337 }\n",
+        )
+        .unwrap();
+        std::fs::write(ws.join("src/lib.rs"), "pub fn a() {}\n").unwrap();
+        let policy = Policy {
+            sensitive_globs: vec![".env*".into(), "data/**".into()],
+            secret_sinks: vec![".env*".into()],
+            interface_only: vec!["src/pricing.rs".into()],
+            detect_secrets: true,
+            detect_pii: true,
+            ..Policy::default()
+        };
+        let engine = Engine::open(&run, policy, None).unwrap();
+        engine.prime(&ws, &["src/lib.rs".into(), "src/pricing.rs".into()], "");
+        let git = Git::locate().unwrap();
+        let mut journal = WriteJournal::open(&run).unwrap();
+        let mut ctx = Ctx {
+            workspace: &ws,
+            run_dir: &run,
+            sandbox: declass_sandbox::detect().unwrap(),
+            git: &git,
+            presenter: engine.as_ref(),
+            journal: &mut journal,
+            command_timeout: Duration::from_secs(30),
+            network: &crate::egress::Network::Off,
+            checks: &[],
+            audit: None,
+            interrupted: None,
+            web: None,
+            git_tools: None,
+            lsp: None,
+        };
+        let edit = |path: &str, old: &str, new: &str| json!({"path": path, "edits": [{"old": old, "new": new}]});
+        let shown = call(&mut ctx, "read_file", json!({"path": ".env"})).await;
+        assert!(
+            shown.contains("DB_PASSWORD=⟨secret:DB_PASSWORD#1⟩"),
+            "{shown}"
+        );
+        // A right and a wrong guess get the same answer, and nothing changes.
+        let right = call(&mut ctx, "edit_file", edit(".env", "DB_PASSWORD=\"q", "x")).await;
+        let wrong = call(&mut ctx, "edit_file", edit(".env", "DB_PASSWORD=\"z", "x")).await;
+        assert_eq!(right, wrong);
+        assert!(right.contains("not found"), "{right}");
+        assert_eq!(std::fs::read_to_string(ws.join(".env")).unwrap(), env);
+        // An anchor takes a placeholder whole.
+        let cut = call(
+            &mut ctx,
+            "edit_file",
+            edit(".env", "DB_PASSWORD=⟨secret:DB_PASS", "x"),
+        )
+        .await;
+        assert!(cut.contains("take it whole"), "{cut}");
+        // What was shown edits the file: placeholders resolved, and a
+        // multi-line value removed whole with its line.
+        let ok = call(
+            &mut ctx,
+            "edit_file",
+            json!({"path": ".env", "edits": [
+                {"old": "LOG_LEVEL=info", "new": "LOG_LEVEL=debug\nPOOL=⟨secret:DB_PASSWORD#1⟩"},
+                {"old": "KEY=\"⟨secret:KEY#1⟩\"\n", "new": ""}]}),
+        )
+        .await;
+        assert!(ok.starts_with("edited .env (2 edits)"), "{ok}");
+        assert_eq!(
+            std::fs::read_to_string(ws.join(".env")).unwrap(),
+            "# db\nDB_PASSWORD=\"quartz-otter-5519\"\nLOG_LEVEL=debug\nPOOL=quartz-otter-5519\n"
+        );
+        // A data file was shown as a summary, protected source as its
+        // skeleton: each is refused before its text is compared, the same
+        // way whether the anchor is in it or not.
+        for (path, there, absent) in [
+            ("data/users.csv", "1987-03-14", "2001-01-01"),
+            ("src/pricing.rs", "1_337", "9_999"),
+        ] {
+            let hit = call(&mut ctx, "edit_file", edit(path, there, "x")).await;
+            let miss = call(&mut ctx, "edit_file", edit(path, absent, "x")).await;
+            assert_eq!(hit, miss, "{path}");
+            assert!(
+                hit.contains("write_file") || hit.contains("edit_protected"),
+                "{hit}"
+            );
+        }
+        // A public file is edited as before.
+        let public = call(
+            &mut ctx,
+            "edit_file",
+            edit("src/lib.rs", "pub fn a() {}", "pub fn b() {}"),
+        )
+        .await;
+        assert!(public.starts_with("edited src/lib.rs"), "{public}");
     }
 
     #[tokio::test]

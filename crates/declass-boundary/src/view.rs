@@ -166,6 +166,110 @@ pub struct Implemented {
     pub summary: String,
 }
 
+/// What the frontier was shown of a sensitive file it may edit, for
+/// `edit_file` ([`Presenter::edit_view`]): the file as pieces in order, each
+/// the text shown and the text of the file it stands for. Anchors are found
+/// in the text shown, never in the file, so an edit answers no guess about
+/// what the view withholds. A piece shown as written may be cut by an
+/// anchor; any other (a placeholder for a value, a line shown with values
+/// withheld) is only taken whole.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct EditView {
+    pieces: Vec<(String, String)>,
+}
+
+impl EditView {
+    /// Appends a piece: `shown` stands for `file`.
+    pub fn push(&mut self, shown: &str, file: &str) {
+        if !(shown.is_empty() && file.is_empty()) {
+            self.pieces.push((shown.to_owned(), file.to_owned()));
+        }
+    }
+
+    /// `text` as the frontier writes it: its placeholders stand for what
+    /// `resolve` gives for them (their values), the rest for itself.
+    pub fn written(text: &str, resolve: &dyn Fn(&str) -> String) -> Self {
+        let mut view = Self::default();
+        let mut rest = text;
+        for token in crate::vault::Vault::tokens_in(text) {
+            let Some(at) = rest.find(&token) else {
+                continue;
+            };
+            view.push(&rest[..at], &rest[..at]);
+            view.push(&token, &resolve(&token));
+            rest = &rest[at + token.len()..];
+        }
+        view.push(rest, rest);
+        view
+    }
+
+    /// The text the frontier was shown.
+    pub fn shown(&self) -> String {
+        self.pieces.iter().map(|(s, _)| s.as_str()).collect()
+    }
+
+    /// The text of the file.
+    pub fn file(&self) -> String {
+        self.pieces.iter().map(|(_, f)| f.as_str()).collect()
+    }
+
+    /// Replaces the shown text `start..end` (byte offsets of [`Self::shown`],
+    /// on character boundaries) by `with`, and what it stands for in the
+    /// file by what `with` stands for. Changes nothing and returns `false`
+    /// when the range would cut a piece that is not shown as written.
+    pub fn replace(&mut self, start: usize, end: usize, with: EditView) -> bool {
+        let spans: Vec<(usize, usize)> = self
+            .pieces
+            .iter()
+            .scan(0, |at, (shown, _)| {
+                let s = *at;
+                *at += shown.len();
+                Some((s, *at))
+            })
+            .collect();
+        let cuts = self
+            .pieces
+            .iter()
+            .zip(&spans)
+            .any(|((shown, file), &(s, e))| {
+                s < end && e > start && shown != file && (start > s || end < e)
+            });
+        if cuts {
+            return false;
+        }
+        let mut out = Vec::with_capacity(self.pieces.len() + with.pieces.len());
+        let mut with = Some(with.pieces);
+        for ((shown, file), (s, e)) in std::mem::take(&mut self.pieces).into_iter().zip(spans) {
+            // A piece shown as nothing is before, after or inside the range
+            // by where it stands.
+            let empty = s == e;
+            if (empty && s <= start) || (!empty && e <= start) {
+                out.push((shown, file));
+                continue;
+            }
+            if s >= end {
+                out.extend(with.take().unwrap_or_default());
+                out.push((shown, file));
+                continue;
+            }
+            if empty {
+                continue;
+            }
+            // Touched: only a piece shown as written is cut.
+            if start > s {
+                out.push((shown[..start - s].to_owned(), file[..start - s].to_owned()));
+            }
+            if end < e {
+                out.extend(with.take().unwrap_or_default());
+                out.push((shown[end - s..].to_owned(), file[end - s..].to_owned()));
+            }
+        }
+        out.extend(with.take().unwrap_or_default());
+        self.pieces = out;
+        true
+    }
+}
+
 /// A working summary the local model wrote of the older part of a
 /// conversation (context compaction), and the local seconds it took.
 #[derive(Debug, Clone, PartialEq)]
@@ -317,6 +421,14 @@ pub trait Presenter: Send + Sync {
     fn detokenize(&self, text: &str) -> String {
         text.to_owned()
     }
+    /// What `edit_file` matches its anchors against in the file at `path`,
+    /// whose content is `text`: `None` for the file as written (a public
+    /// file, as here); for a file whose content the frontier was not shown as
+    /// written, the view it was shown ([`EditView`]), or why anchors cannot
+    /// be matched in it (it was shown as a summary; it is protected source).
+    fn edit_view(&self, _path: &std::path::Path, _text: &str) -> Option<Result<EditView, String>> {
+        None
+    }
     /// `text` with every value known as sensitive replaced by its placeholder,
     /// as request records have them: for what a security event records that
     /// the frontier wrote (a command, a path) or a command produced (the names
@@ -424,5 +536,37 @@ impl Presenter for PassThrough {
             cut,
             text.len()
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::EditView;
+
+    #[test]
+    fn an_edit_view_cuts_only_what_is_shown_as_written() {
+        let mut v = EditView::default();
+        v.push("PASSWORD=", "PASSWORD=");
+        v.push("⟨secret:PASSWORD#1⟩", "\"hunter-77\"");
+        v.push("\n", "\r\n");
+        v.push("LEVEL=info", "LEVEL=info");
+        let shown = v.shown();
+        assert_eq!(shown, "PASSWORD=⟨secret:PASSWORD#1⟩\nLEVEL=info");
+        assert_eq!(v.file(), "PASSWORD=\"hunter-77\"\r\nLEVEL=info");
+        // Into a placeholder: refused, nothing changes.
+        let at = shown.find('⟨').unwrap();
+        assert!(!v.replace(at, at + '⟨'.len_utf8() + 6, EditView::default()));
+        assert_eq!(v.shown(), shown);
+        // A piece shown as written is cut anywhere.
+        let at = shown.find("info").unwrap();
+        assert!(v.replace(at, at + 4, EditView::written("debug", &|t| t.to_owned())));
+        assert_eq!(v.file(), "PASSWORD=\"hunter-77\"\r\nLEVEL=debug");
+        // Taken whole, a placeholder's text goes with it; one written in the
+        // new text stands for what it resolves to.
+        let end = v.shown().find('\n').unwrap() + 1;
+        let with = EditView::written("PASSWORD=⟨secret:PASSWORD#1⟩!\n", &|_| "zz".into());
+        assert!(v.replace(0, end, with));
+        assert_eq!(v.file(), "PASSWORD=zz!\nLEVEL=debug");
+        assert_eq!(v.shown(), "PASSWORD=⟨secret:PASSWORD#1⟩!\nLEVEL=debug");
     }
 }
