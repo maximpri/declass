@@ -35,6 +35,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+mod acp;
 mod approve;
 mod attachments;
 mod chat;
@@ -229,6 +230,21 @@ enum Cmd {
     /// nothing is at or above --fail-on; 1: a finding is (or an error, with no
     /// report written); 2: the report is incomplete.
     Exposure(exposure::Args),
+    /// Experimental: serve an editor (Zed, JetBrains IDEs, Neovim, Emacs) over
+    /// the Agent Client Protocol on standard input and output.
+    ///
+    /// The editor starts `declass acp`; run it by hand only to test. Each thread
+    /// is a session in its directory, with the same privacy boundary, sandbox,
+    /// approvals, limits and audit as `declass`; it can be continued in a
+    /// terminal with `declass --resume <id>`. Standard output carries only
+    /// protocol messages; logs go to standard error. Run `declass setup` in a
+    /// terminal first.
+    Acp {
+        /// The mode: hybrid or top-clearance; passthrough is not offered to an
+        /// editor [default: hybrid; top-clearance where clearance.required is top].
+        #[arg(long, value_enum)]
+        mode: Option<Mode>,
+    },
     /// Run one task to its end without a conversation (for scripts); `declass` alone opens a session.
     Run {
         /// The task, as text.
@@ -1625,6 +1641,7 @@ command are for a session (`declass` alone); give a command its own options afte
             login::logout(&cfg, subscription, forget).await
         }
         Cmd::Scan(args) => scan::run(&ws, args, emb).await,
+        Cmd::Acp { mode } => acp::serve(acp::AcpArgs { mode }, emb).await,
         Cmd::Run {
             objective,
             objective_file,

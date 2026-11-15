@@ -320,7 +320,9 @@ the TUI does not start sessions (it has no terminal for the child). With approva
 interactive session (a terminal on standard input) still asks before each commit when
 `git.commit = "ask"` (the default), showing the files and the message; nothing else is asked. A
 session without a terminal (the TUI's pipe) and a one-shot run have nobody to ask, so `git_commit`
-is not offered there.
+is not offered there. In an editor (`declass acp`) the operator answers in the editor's permission
+dialog, so a session there asks what an interactive session asks (see
+[Editors](#editors-agent-client-protocol)).
 
 ## Operator messages (sessions)
 
@@ -378,6 +380,30 @@ the operator's own screen, what declass already has.
 **Known limits.** A session's output without a terminal (a pipe, scripts) is unchanged line for
 line, so it is not stripped of escape sequences; a program that shows it on a terminal should. On
 the terminal, look-alike characters are shown as they are.
+
+## Editors (Agent Client Protocol)
+
+`declass acp` (experimental) makes an editor the operator's terminal: the editor sends the
+operator's messages, answers approval questions and shows what the workspace would show. It is a
+front end, not a way in: its sessions are composed by the same code as `declass` (the boundary, the
+outbound gate, the sandbox, approval, budgets, the audit log), and the editor gains no way around
+them.
+
+| Threat | What stops it |
+|---|---|
+| The editor, or a plugin in it, makes Declass skip a check | Declass never calls the client's file system or terminal methods, whatever capabilities the client advertises: reads, writes and commands are Declass's own tools, in its sandbox, with its write journal and undo. The protocol offers nothing that turns a check off: no modes, no configuration options, no remembered approvals |
+| MCP servers the editor supplies in `session/new` bypass the owner's pins, advisories and approval | They are never started; their names are logged on standard error. Servers come only from Declass's configuration, under `extensions.integrity` and `oversight` as in any session. The agent advertises no HTTP or SSE servers |
+| A file the operator @-mentions is a `.env` or a customer CSV, and the editor embeds its content in the prompt | Embedded content is never used. A `file:` URI inside the workspace becomes its workspace-relative path in the message, and the frontier reads the file with `read_file`, through the boundary, so its classification applies (tested: a key in an embedded `.env` reaches no request, in any encoding). A file outside the workspace, symbolic links resolved, is not used. Text embedded under another URI (an unsaved buffer, a rule) is treated as text the operator pasted: part of the message, sanitized with it. Blobs, images and audio are not used |
+| Standard output is the transport: a print from any crate, or a child process that inherited the descriptors, corrupts the protocol, or a child reads the editor's messages | Before anything runs, the protocol takes close-on-exec copies of standard input and output; descriptor 1 becomes standard error and descriptor 0 `/dev/null`. A `println!` lands in the log (tested: the session's closing line, printed as a terminal session prints it, is on standard error, and every line on standard output is a JSON-RPC message), and no child can reach the protocol's copies |
+| The editor shows more than the operator's terminal would | Updates follow the workspace's rules: replies, questions and a tool call's arguments with placeholders restored; a tool's result as the frontier saw it (placeholders kept); an edit's diff, except in a file the policy makes sensitive, which is named only; the boundary's descriptions of what it withheld. Never the vault, a handle's content or what the local model read |
+| A permission answer is forged or misread | Only the "allow once" option Declass offered approves. A rejection, a `cancelled` outcome, an error, an option Declass did not offer, a cancelled turn and the editor going away all deny. Each decision is an `approval` audit event, as at a terminal |
+| A cancellation arrives while Declass works or waits for an answer | It interrupts the turn as Ctrl-C does (a running command is killed, the frontier request is abandoned) and denies a pending approval; prompts read before it are answered `cancelled` without a turn |
+
+**Known limits.** The editor is part of the operator's trusted base: it sees what the operator
+sees, real values included, and it answers approvals; an editor or plugin that approves on its own
+approves for the operator, and Declass cannot tell. The workspace is the directory the editor names
+in `session/new`, as `--workspace` names it at a terminal. Declass reads files as saved on disk, so
+what the operator sees in an unsaved buffer may differ from what the frontier reads.
 
 ## Project instructions
 

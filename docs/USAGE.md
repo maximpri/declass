@@ -6,8 +6,8 @@ every security rule in detail: [SECURITY.md](../SECURITY.md). For a shorter cont
 overview and evaluation procedure, see [the security guide](SECURE_BY_DESIGN.md).
 
 [Commands](#commands) · [Goals](#goals-and-history) · [Modes](#modes-and-acceptance-checks) ·
-[Workspace](#coding-with-declass-the-workspace) · [Tools and privacy](#tools-and-privacy-controls) ·
-[Models](#models) · [Configuration](#configuration)
+[Workspace](#coding-with-declass-the-workspace) · [Editors](#use-declass-from-an-editor) ·
+[Tools and privacy](#tools-and-privacy-controls) · [Models](#models) · [Configuration](#configuration)
 
 ## Commands
 
@@ -17,6 +17,7 @@ declass "fix the failing export"   # the same, with the first message given
 declass --mode top-clearance       # configured local model only; no frontier
 declass --resume                   # continue the most recent open session (or --resume <id>)
 declass --goal "fix and verify the export" --check 'cargo test'  # keep working within budgets
+declass acp                        # experimental: an editor's agent over ACP (the editor starts it)
 declass history                    # recent sessions and runs, with resume commands
 declass history --search export    # search saved titles and conversations
 declass history <id>               # read a conversation; --json for scripts
@@ -576,6 +577,68 @@ value comes from (default, owner or project). Edits take the same path as `decla
 change that loosens privacy shows its diff and needs `y`, `p` switches edits to the project file
 (which only tightens and never takes owner-only keys), and every applied change is recorded in the
 owner's config audit log. Changes apply from the next session.
+
+## Use Declass from an editor
+
+Experimental. `declass acp` makes Declass the agent of an editor that hosts agents over the
+[Agent Client Protocol](https://agentclientprotocol.com) (ACP): Zed, JetBrains IDEs, and Neovim and
+Emacs through their ACP plugins. The editor's agent panel is then your terminal: each thread is a
+session in the thread's directory, with the same privacy boundary, sandbox, approvals, limits and
+audit as `declass` there.
+
+Set Declass up in a terminal first, with `declass setup`; the editor does not show the setup
+screen. If something is missing, the editor shows what when it starts the agent.
+
+In Zed, add Declass to `settings.json`, then choose it for a new agent thread:
+
+```json
+{
+  "agent_servers": {
+    "Declass": {
+      "command": "declass",
+      "args": ["acp"],
+      "env": {}
+    }
+  }
+}
+```
+
+Give the full path (`~/.local/bin/declass` after the installer, written out) if the editor does
+not find `declass`. An editor started from the desktop may not have your shell's environment: if
+your cloud model's key is in an environment variable, add it to `env`, or save the key with
+`declass setup` instead. `"args": ["acp", "--mode", "top-clearance"]` keeps everything on your
+machine. Other ACP clients need the same two things: the command `declass` and the argument `acp`.
+Declass speaks protocol version 1 on standard input and output; its log is standard error, which
+editors show among their logs.
+
+- **Your messages.** What you type is your message, sanitized as a typed message is. A file you
+  @-mention becomes its path in the message, never its content, even when the editor sends the
+  content along: the frontier reads the file with Declass's tools, through the boundary, so a
+  `.env` or a customer CSV is read only by the local model. Declass reads the file as saved, not
+  unsaved changes in the editor. Text the editor attaches that is not a file (a selection in an
+  unsaved buffer, a rule) counts as text you pasted. Files outside the thread's directory, images
+  and audio are not used: the agent says so, and nothing of them is sent.
+- **What you see.** Replies stream in with placeholders restored, as in the workspace. Each tool
+  call shows its arguments and its result as the frontier saw it; an edit shows its diff (a file
+  that is sensitive by policy is named, never shown). What the boundary withheld from a request
+  shows as a "privacy filtering" entry.
+- **Approvals.** What `declass` asks at a terminal (`oversight.approve`, commits under
+  `git.commit = "ask"`, files another tool runs later) the editor asks in its permission dialog,
+  with Allow once and Reject. Anything else denies: rejecting, closing the dialog, stopping the
+  turn. Declass remembers no answer.
+- **Stopping.** The editor's stop button stops the turn at once, as Ctrl-C does at a terminal;
+  the session stays open and Declass is told with your next message.
+- **Continuing.** A thread's session id is its run id: `declass --resume <id>` continues it in a
+  terminal, and `declass audit show <id>` shows what it sent. Closing the editor leaves the
+  session open. So does starting work in another thread, after which the first thread's session
+  continues only in a terminal.
+
+Not yet: reopening an earlier session from the editor; two threads working at once (a thread's
+first message is refused while another thread works); slash commands such as `/plan`, `/goal` and
+`/undo` (typed in the editor they are a message; use them at a terminal); session modes; images.
+Declass does not use the editor's own file and terminal methods: it works with its own sandboxed
+tools, write journal and undo. MCP servers the editor offers are not started: Declass starts only
+the servers in its own configuration, where they are pinned, checked and approved.
 
 ## Tools and privacy controls
 

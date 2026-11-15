@@ -671,16 +671,25 @@ lists the variables) or start a local model server, then run `declass setup` aga
 /// (`local`; without one every run probes loopback and stops when it finds
 /// none or several). `declass` then runs [`first_run`] before the session.
 pub fn needs_first_run(cfg: &Config, frontier: bool, local: bool) -> Result<bool> {
-    Ok((frontier && !frontier_ready(cfg)?) || (local && !local_chosen(cfg)?))
+    Ok(!missing(cfg, frontier, local)?.is_empty())
 }
 
-/// The owner chose a frontier and it can be used: its endpoint and model are
-/// set and its key is in the environment, or its ChatGPT plan is signed in.
-pub fn frontier_ready(cfg: &Config) -> Result<bool> {
-    if cfg.str("frontier.base_url")?.is_empty() || cfg.str("frontier.model")?.is_empty() {
-        return Ok(false);
+/// What a session that needs the frontier (`frontier`) and a local model
+/// (`local`) still lacks, in words for the operator; empty when nothing is
+/// missing (see [`needs_first_run`]).
+pub(crate) fn missing(cfg: &Config, frontier: bool, local: bool) -> Result<Vec<String>> {
+    let mut out = Vec::new();
+    if frontier {
+        if cfg.str("frontier.base_url")?.is_empty() || cfg.str("frontier.model")?.is_empty() {
+            out.push("no cloud model is chosen".to_owned());
+        } else if let Some(problem) = credential_problem(cfg)? {
+            out.push(problem);
+        }
     }
-    Ok(credential_problem(cfg)?.is_none())
+    if local && !local_chosen(cfg)? {
+        out.push("no local model is chosen".to_owned());
+    }
+    Ok(out)
 }
 
 /// What keeps the configured frontier's credential from being used, said the
@@ -923,6 +932,12 @@ mod tests {
         let cfg = Config::load(&owner, None).unwrap();
         assert!(needs_first_run(&cfg, true, false).unwrap());
         assert!(needs_first_run(&cfg, false, true).unwrap());
+        // What is missing, in words (an editor shows them: `declass acp`).
+        assert_eq!(
+            missing(&cfg, true, true).unwrap(),
+            ["no cloud model is chosen", "no local model is chosen"]
+        );
+        assert!(missing(&cfg, false, false).unwrap().is_empty());
         // A chosen frontier whose key variable no environment sets.
         std::fs::write(
             &owner,
@@ -931,6 +946,12 @@ mod tests {
         .unwrap();
         let cfg = Config::load(&owner, None).unwrap();
         assert!(needs_first_run(&cfg, true, false).unwrap());
+        let said = missing(&cfg, true, false).unwrap();
+        assert_eq!(said.len(), 1, "{said:?}");
+        assert!(
+            said[0].starts_with("DECLASS_FIRST_RUN_TEST_UNSET_KEY is not set in this environment"),
+            "{said:?}"
+        );
         // Top clearance needs no frontier key; passthrough no local model.
         std::fs::write(
             &owner,

@@ -146,7 +146,31 @@ pub fn session_oversight(
     cfg: &Config,
     ask: impl FnOnce(ApproveMode) -> Arc<dyn Approver>,
 ) -> Result<Oversight> {
-    session_oversight_at(cfg, std::io::stdin().is_terminal(), ask)
+    session_oversight_at(cfg, std::io::stdin().is_terminal(), ask).inspect(|o| {
+        if o.mode != ApproveMode::Off {
+            eprintln!(
+                "operator approval on ({}): risky actions wait for y/N here",
+                o.mode.as_str()
+            );
+        }
+    })
+}
+
+/// A session's oversight in an editor (`declass acp`): the operator answers
+/// in the editor's permission dialog, so everything an interactive session
+/// asks at a terminal is asked there, with approval on or off.
+pub(crate) fn editor_oversight(
+    cfg: &Config,
+    ask: impl FnOnce(ApproveMode) -> Arc<dyn Approver>,
+) -> Result<Oversight> {
+    session_oversight_at(cfg, true, ask).inspect(|o| {
+        if o.mode != ApproveMode::Off {
+            eprintln!(
+                "operator approval on ({}): risky actions wait for your answer in the editor",
+                o.mode.as_str()
+            );
+        }
+    })
 }
 
 /// [`session_oversight`], `tty` saying whether standard input is a terminal.
@@ -184,10 +208,6 @@ terminal, or turn approval off in the owner config: declass config set oversight
             mode.as_str()
         );
     }
-    eprintln!(
-        "operator approval on ({}): risky actions wait for y/N here",
-        mode.as_str()
-    );
     Ok(Oversight {
         mode,
         approver: Some(ask(mode)),

@@ -151,6 +151,7 @@ declass --check 'cargo test' "fix it"   # finish only when the check passes
 declass --mode local-only               # use only your local model
 declass --resume                        # continue the last session
 declass run "fix the export"            # run once without a conversation
+declass acp                             # be an editor's agent over ACP (experimental)
 declass exposure                        # show what an agent could send from this repo (offline)
 declass privacy                         # show what's sensitive and where requests go
 declass audit show <run>                # show everything a run sent to the cloud

@@ -104,7 +104,7 @@ declass-release (release tooling: the `declass-sbom` SBOM generator) links no de
 | `declass-integrity` | The extension lock file (`lock`: ToolHive's entry fields for skills and plugins, Declass's `mcpServers`), ToolHive-compatible content digests (`content`), a bounded no-follow tree and file hash (`tree`), RFC 8785 canonical JSON (`jcs`), tool-definition fingerprints (`toolset`, `declass-tool-v1`), package launchers in a command line and whether their version is pinned (`launcher`), OSV advisories and their matching by package version, content, tool digest and URL (`osv`), OpenSSH `SSHSIG` signatures and `allowed_signers` (`sshsig`, Ed25519 via `ring`), findings as text, JSON and SARIF (`report`) | Start a process, open the network, or decide what to do about a finding (the CLI does) |
 | `declass-boundary` | Classification, transformation, vault, handles, bulky offload, condensed command output (`condense`), structure views and synthetic samples of sensitive data (`structure`), IP levels, local roles, local micro-eval, outbound gate, the third-party check (`third_party`: `Outgoing`, `Checked`, `Guard`), audit | Expose a way to reach the frontier without the gate, or to make a `Checked` request without the check |
 | `declass-agent` | Loop, tools, transcript, context manager (masking, compaction), termination, disclosure ledger, operator approval (`oversight`), disclosure report, sessions (operator turns, steering, undo), sub-agents (`delegate`), the local explorer (`explore`), root/scoped instructions (`instructions`), skill authorization and filtered loading (`skills`), changes outside git (`changes`) | Construct a frontier provider (it receives `GatedFrontier`) or a local one (the explorer receives a `LocalAgent`) |
-| `declass-cli` / `declass-tui` | User interfaces over config, runs and audits; the CLI is the only place providers are built; the operator's terminal (`term`: the chat console, its line editor, Markdown rendering of streamed text, `declass run` progress); `declass-cli` is also a library whose `main_with` is the whole command line for a program that embeds Declass (§13) | Contain policy logic (they edit the registry) |
+| `declass-cli` / `declass-tui` | User interfaces over config, runs and audits; the CLI is the only place providers are built; the operator's terminal (`term`: the chat console, its line editor, Markdown rendering of streamed text, `declass run` progress); an editor's agent over the Agent Client Protocol (`declass-cli`'s `acp`, experimental, §4); `declass-cli` is also a library whose `main_with` is the whole command line for a program that embeds Declass (§13) | Contain policy logic (they edit the registry); use an editor's file system or terminals |
 | `declass-evals` | Tasks, canaries, leak proxy, judge, statistics, reports | Share code paths with the product's privacy decisions |
 | `declass-release` | CycloneDX SBOM from `cargo metadata` (offline); used by `tools/release.sh` | Be linked by the product |
 
@@ -317,6 +317,38 @@ registry screens, IP levels, data, audit, the runs view) open as an overlay; the
 terminal. `declass run` uses the same feed (`declass-cli`'s `term::watch`) on standard error: live on a
 terminal, compact lines (placeholders kept, a heartbeat) otherwise; standard output keeps the
 summary.
+
+**An editor (`declass acp`, experimental).** A third front end, beside the workspace and plain
+lines: `crates/declass-cli/src/acp.rs` serves the Agent Client Protocol (version 1: JSON-RPC 2.0, one
+message per line) on standard input and output, and the editor is the operator's terminal. A
+session invocation is the same code for every front end: `chat::converse` sets the session up and
+ends it (`prepare`, `Session::open`, `Session::end`, its servers stopped), and the manifest, the
+workspace lock and the conclusion are shared (`new_manifest`, `session_dir`, `conclude_session`).
+In between, a `chat::Front` holds the conversation: `ChatFront` a terminal's (`conduct`: the
+inbox, goals, plans, attachments), `acp::Editor` an editor's, one `Session::turn` per
+`session/prompt`.
+
+```
+editor ─stdin─▶ reader thread ─┬─ answers to Declass's requests (wire::Pending) ─▶ EditorApprover
+                               ├─ session/cancel ─▶ Flags: the turn's interrupt, steering stop
+                               └─ requests ─▶ dispatcher: initialize, session/new, session/prompt
+                                                │ (first prompt: manifest, lock, converse(Editor))
+transcript.jsonl ─Follow─┐                      ▼
+provider stream ─Ordered─┴─▶ acp::updates (the workspace's display rules) ─▶ stdout (wire::Wire)
+```
+
+`wire::take_stdio` runs before anything else: the protocol keeps close-on-exec copies of
+descriptors 0 and 1, descriptor 1 becomes standard error and descriptor 0 `/dev/null`, so a print
+from any crate, or a child process, writes to the log. One thread reads the editor's messages.
+Answers to Declass's own requests (`session/request_permission`) and `session/cancel` are handled
+on it, so they arrive while the session works or waits in an approval (`acp::EditorApprover`
+blocks on `wire::Pending`, as the terminal's approver blocks on the inbox); requests go to the
+dispatcher, which runs on the runtime's main task with the session. Prompts are numbered as they
+are read, and a cancellation covers every prompt read before it. `acp::prompt` makes a prompt's
+content blocks the operator's message: a file is named by its workspace path, never inlined.
+`acp::updates` makes the transcript's entries and the stream `session/update` notifications by the
+rules `workspace::cells` follows on the screen. A thread's session starts with its first prompt
+and its id is the run id; one session runs at a time.
 
 ## 5. Boundary internals
 
