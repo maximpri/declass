@@ -17,4 +17,4 @@ pub use ops::{
     Precondition, WriteReceipt, atomic_write, read_file, read_optional, remove_file, restore,
     sha256_hex,
 };
-pub use path::{is_reserved, normalize_relative, writable_relative};
+pub use path::{fold_name, is_reserved, is_reserved_name, normalize_relative, writable_relative};

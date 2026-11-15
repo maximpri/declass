@@ -1797,6 +1797,118 @@ mod sensitive_command_tests {
     }
 
     #[tokio::test]
+    async fn file_tools_open_paths_only_as_their_checks_name_them() {
+        // macOS's default volumes match names regardless of letter case and
+        // Unicode case folding: `.DECLASS`, `.declaſs` and `.declaß` open
+        // `.declass`, `.GIT` opens `.git`, `DATA/orders.csv` opens
+        // `data/orders.csv`. The file tools run outside the sandbox, so
+        // their own checks must see the name the file system opens.
+        let d = tempfile::tempdir().unwrap();
+        let ws = d.path().canonicalize().unwrap().join("ws");
+        let run = ws.join(".declass/runs/r1");
+        for dir in ["data", ".git", "src", "sub"] {
+            std::fs::create_dir_all(ws.join(dir)).unwrap();
+        }
+        std::fs::create_dir_all(&run).unwrap();
+        let git_config = "[core]\n\tbare = false\n";
+        std::fs::write(ws.join(".git/config"), git_config).unwrap();
+        std::fs::write(
+            ws.join("data/orders.csv"),
+            "id,born,total\n1,1987-03-14,8977066\n",
+        )
+        .unwrap();
+        std::fs::write(
+            ws.join("src/pricing.rs"),
+            "pub fn rate() -> &'static str {\n    \"tariff-Kq81-body\"\n}\n",
+        )
+        .unwrap();
+        let policy = Policy {
+            sensitive_globs: vec!["data/**".into()],
+            interface_only: vec!["src/pricing.rs".into()],
+            command_output_sensitive: true,
+            detect_pii: true,
+            ..Policy::default()
+        };
+        let engine = Engine::open(&run, policy, None).unwrap();
+        let git = Git::locate().unwrap();
+        let mut journal = WriteJournal::open(&run).unwrap();
+        let mut ctx = Ctx {
+            workspace: &ws,
+            run_dir: &run,
+            sandbox: declass_sandbox::detect().unwrap(),
+            git: &git,
+            presenter: engine.as_ref(),
+            journal: &mut journal,
+            command_timeout: Duration::from_secs(30),
+            network: &crate::egress::Network::Off,
+            checks: &[],
+            audit: None,
+            interrupted: None,
+            web: None,
+            git_tools: None,
+            lsp: None,
+        };
+        // Reading the data file leaves its raw text in a handle.
+        let shown = call(&mut ctx, "read_file", json!({"path": "data/orders.csv"})).await;
+        assert!(!shown.contains("1987-03-14"), "{shown}");
+        assert!(run.join("handles/h1").is_file());
+        let interface = call(&mut ctx, "read_file", json!({"path": "src/pricing.rs"})).await;
+        assert!(!interface.contains("tariff-Kq81-body"), "{interface}");
+        for path in [
+            ".DECLASS/runs/r1/handles/h1",
+            ".Declass/runs/r1/vault.json",
+            ".declaſs/runs/r1/handles/h1",
+            ".declaß/runs/r1/handles/h1",
+            ".GIT/config",
+            "DATA/orders.csv",
+            "Data/Orders.csv",
+            "SRC/pricing.rs",
+            "src/Pricing.rs",
+        ] {
+            let out = call(&mut ctx, "read_file", json!({"path": path})).await;
+            for leaked in ["1987-03-14", "bare = false", "tariff-Kq81-body"] {
+                assert!(!out.contains(leaked), "{path}: {out}");
+            }
+        }
+        // Writing git's configuration under another spelling would run code
+        // outside the sandbox at the operator's next `git status`
+        // (`core.fsmonitor`); a new `.GIT` in a subdirectory is a repository
+        // git finds there.
+        let planted = "[core]\n\tfsmonitor = touch pwned\n";
+        for path in [
+            ".GIT/config",
+            ".Git/hooks/pre-commit",
+            "sub/.GIT/config",
+            ".DECLASS/config.toml",
+            ".declaß/planted",
+        ] {
+            let out = call(
+                &mut ctx,
+                "write_file",
+                json!({"path": path, "content": planted}),
+            )
+            .await;
+            assert!(
+                !out.starts_with("created") && !out.starts_with("replaced"),
+                "{path}: {out}"
+            );
+        }
+        let out = call(
+            &mut ctx,
+            "edit_file",
+            json!({"path": ".GIT/config", "edits": [{"old": "[core]", "new": planted.trim_end()}]}),
+        )
+        .await;
+        assert!(!out.starts_with("edited"), "{out}");
+        assert_eq!(
+            std::fs::read_to_string(ws.join(".git/config")).unwrap(),
+            git_config
+        );
+        assert!(!ws.join(".git/hooks").exists() && !ws.join("sub/.GIT").exists());
+        assert!(!ws.join(".declass/config.toml").exists() && !ws.join(".declass/planted").exists());
+    }
+
+    #[tokio::test]
     async fn commands_cannot_read_sensitive_files_unless_their_output_stays_local() {
         let d = tempfile::tempdir().unwrap();
         let ws = d.path().canonicalize().unwrap().join("ws");

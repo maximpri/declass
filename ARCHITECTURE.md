@@ -1014,8 +1014,10 @@ git; reset behaviour defined per entry).
 ## 8. Safety primitives
 
 - **File I/O:** all workspace access goes through `PinnedParent` (`O_NOFOLLOW` walk, `openat`,
-  `renameat`, `fsync`); writes are atomic with digest preconditions and rollback; `.git` and
-  `.declass` are never writable by tools.
+  `renameat`, `fsync`); every existing component must be spelled as its folder lists it, so a
+  case-insensitive volume cannot open `.DECLASS` or `DATA/x` for a check made on that spelling;
+  writes are atomic with digest preconditions and rollback; `.git` and `.declass` are never
+  writable by tools, in any spelling a file system folds to them (`declass_fs::is_reserved_name`).
 - **Commands:** Seatbelt (macOS) or bwrap (Linux) with absolute binary paths; workspace-write with
   `.git`/`.declass` unwritable; `.declass` (the vault, handles, transcripts, audit log) unreadable to
   every command by the sandbox itself, `.git` (committed copies) to ordinary commands and checks;

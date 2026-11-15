@@ -219,6 +219,59 @@ mod tests {
     }
 
     #[test]
+    fn paths_are_opened_only_as_they_are_spelled_on_disk() {
+        // On a case-insensitive file system (macOS's default) every other
+        // spelling below opens the same entry; on a case-sensitive one it
+        // names nothing. Either way it never reads or replaces the file.
+        let d = root();
+        let p = d.path().canonicalize().unwrap();
+        std::fs::create_dir_all(p.join("data")).unwrap();
+        std::fs::create_dir_all(p.join("caf\u{e9}")).unwrap();
+        std::fs::write(p.join("data/orders.csv"), b"8977066").unwrap();
+        std::fs::write(p.join("caf\u{e9}/menu.txt"), b"8977066").unwrap();
+        for other in [
+            "DATA/orders.csv",
+            "data/Orders.CSV",
+            "cafe\u{301}/menu.txt",
+            "CAF\u{c9}/menu.txt",
+        ] {
+            let rel = Path::new(other);
+            assert!(read_file(&p, rel, 100).is_err(), "{other}");
+            assert!(
+                !matches!(read_optional(&p, rel, 100), Ok(Some(_))),
+                "{other}"
+            );
+            let _ = atomic_write(&p, rel, b"replaced", &Precondition::Any, 0o644);
+            assert!(remove_file(&p, rel).is_err() || !p.join(other).exists());
+        }
+        assert_eq!(
+            read_file(&p, Path::new("data/orders.csv"), 100).unwrap(),
+            b"8977066"
+        );
+        assert_eq!(
+            read_file(&p, Path::new("caf\u{e9}/menu.txt"), 100).unwrap(),
+            b"8977066"
+        );
+        // A new name is created as written.
+        atomic_write(
+            &p,
+            Path::new("New/File.txt"),
+            b"x",
+            &Precondition::Absent,
+            0o644,
+        )
+        .unwrap();
+        assert_eq!(read_file(&p, Path::new("New/File.txt"), 10).unwrap(), b"x");
+        let folds = p.join("NEW").exists();
+        if folds {
+            assert!(matches!(
+                read_file(&p, Path::new("new/file.txt"), 10),
+                Err(FsError::Spelling { .. })
+            ));
+        }
+    }
+
+    #[test]
     fn size_cap_and_missing_files() {
         let d = root();
         let p = d.path().canonicalize().unwrap();

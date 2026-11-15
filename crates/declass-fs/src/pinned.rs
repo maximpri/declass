@@ -3,6 +3,11 @@
 //!
 //! Every component is opened with `openat(O_NOFOLLOW)` from the workspace root,
 //! so a symlink planted anywhere on the path cannot redirect a read or write.
+//! Every existing component must also be spelled exactly as its directory
+//! lists it: a case-insensitive file system (macOS's default) opens
+//! `.DECLASS/vault.json` or `DATA/orders.csv` as `.declass/...` and
+//! `data/...`, which the callers' checks, made on the name as written, would
+//! not recognise.
 
 use crate::error::FsError;
 use rustix::fs::{AtFlags, FileType, Mode, OFlags};
@@ -41,14 +46,14 @@ impl PinnedParent {
                     return Err(FsError::Outside(rel.display().to_string()));
                 };
                 shown.push(part);
-                dir = open_child(&dir, part, &shown, create)?;
+                let child = open_child(&dir, part, &shown, create)?;
+                check_spelling(&dir, part, &shown)?;
+                dir = child;
             }
         }
-        Ok(Self {
-            dir,
-            name,
-            path: root.join(rel),
-        })
+        let path = root.join(rel);
+        check_spelling(&dir, &name, &path)?;
+        Ok(Self { dir, name, path })
     }
 
     pub fn path(&self) -> &Path {
@@ -125,6 +130,34 @@ fn open_child(parent: &File, name: &OsStr, shown: &Path, create: bool) -> Result
         }
         Err(e) => Err(classify(parent, name, shown, e)),
     }
+}
+
+/// Refuses `name` when it opens an existing entry of `parent` that the
+/// directory lists under another spelling (see the module documentation). A
+/// name that does not exist yet is created as written: nothing to check.
+fn check_spelling(parent: &File, name: &OsStr, shown: &Path) -> Result<(), FsError> {
+    use std::os::unix::ffi::OsStrExt;
+    let st = match rustix::fs::statat(parent, name, AtFlags::SYMLINK_NOFOLLOW) {
+        Ok(st) => st,
+        Err(rustix::io::Errno::NOENT) => return Ok(()),
+        Err(e) => return Err(FsError::io("inspect", shown, e)),
+    };
+    let list = |e| FsError::io("list directory", shown, e);
+    let mut listed_as = None;
+    for entry in rustix::fs::Dir::read_from(parent).map_err(list)? {
+        let entry = entry.map_err(list)?;
+        let listed = entry.file_name().to_bytes();
+        if listed == name.as_bytes() {
+            return Ok(());
+        }
+        if entry.ino() == st.st_ino {
+            listed_as = Some(String::from_utf8_lossy(listed).into_owned());
+        }
+    }
+    Err(FsError::Spelling {
+        path: shown.display().to_string(),
+        on_disk: listed_as.unwrap_or_else(|| "a name its directory does not list".into()),
+    })
 }
 
 fn classify(parent: &File, name: &OsStr, shown: &Path, e: rustix::io::Errno) -> FsError {

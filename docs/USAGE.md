@@ -634,7 +634,9 @@ earlier version with `sandbox.network = true` or `false` still works: it reads a
 workspace. A hard-coded `/tmp/file` or home-directory write can be denied. Use `list_files`,
 `search` and `read_file` for file discovery and reads; commands cannot inspect `.declass` or `.git`.
 On macOS a command cannot rename or remove a file it may not read, or a folder that holds one; it
-can still create and write files there.
+can still create and write files there. Give the file tools paths as they are spelled on disk:
+macOS ignores letter case in names, and a path spelled otherwise (`Src/Main.rs` for
+`src/main.rs`) is refused with the spelling on disk.
 Skills cannot grant access to a browser daemon, its saved profile or host sockets.
 
 Start a preview server and run its client check inside the **same command**. Declass stops all

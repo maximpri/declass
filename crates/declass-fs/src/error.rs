@@ -14,6 +14,12 @@ pub enum FsError {
     NotAFile(String),
     #[error("{0} already exists")]
     Exists(String),
+    /// The file system matched a name to an entry spelled otherwise (letter
+    /// case, Unicode case folding or normalization).
+    #[error(
+        "{path} is not spelled as it is on disk ({on_disk}); paths must name files exactly as they are spelled"
+    )]
+    Spelling { path: String, on_disk: String },
     #[error("{path} changed since it was read (expected {expected}, found {actual})")]
     Precondition {
         path: String,

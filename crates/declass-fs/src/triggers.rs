@@ -231,11 +231,16 @@ fn matches(pattern: &str, rel: &str) -> bool {
     }
 }
 
-/// The trigger `rel` (relative to the workspace) is, if any.
+/// The trigger `rel` (relative to the workspace) is, if any. Names are
+/// compared folded ([`crate::fold_name`]): on a case-insensitive file system
+/// a new `.VSCODE/tasks.json` is what the editor opens as
+/// `.vscode/tasks.json`.
 pub fn classify(rel: &Path) -> Option<&'static Trigger> {
-    let rel = rel.to_str()?;
+    let rel = crate::fold_name(rel.to_str()?);
     let rel = rel.trim_start_matches("./");
-    TRIGGERS.iter().find(|t| matches(t.pattern, rel))
+    TRIGGERS
+        .iter()
+        .find(|t| matches(&crate::fold_name(t.pattern), rel))
 }
 
 #[cfg(test)]
@@ -281,12 +286,31 @@ mod tests {
             "src/main.rs",
             "README.md",
             ".vscode/extensions.json",
-            "docs/agents.md",
+            "docs/agents-guide.md",
             "my.pth.txt",
             ".pth",
             "vscode/tasks.json",
         ] {
             assert_eq!(tier(path), None, "{path}");
+        }
+    }
+
+    #[test]
+    fn other_spellings_of_a_trigger_are_the_trigger() {
+        // On macOS's default volumes these open the files the other tools
+        // read: a new `.VSCODE/tasks.json` is the editor's tasks file.
+        for path in [
+            ".VSCODE/tasks.json",
+            ".VSCode/settings.json",
+            "docs/agents.md",
+            "SRC/Claude.md",
+            ".DevContainer/devcontainer.json",
+            ".mcp.JSON",
+        ] {
+            assert_eq!(tier(path), Some(Tier::Autorun), "{path}");
+        }
+        for path in [".HUSKY/pre-commit", ".GitHub/workflows/ci.yml", "makefile"] {
+            assert_eq!(tier(path), Some(Tier::OnUse), "{path}");
         }
     }
 }
