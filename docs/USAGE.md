@@ -718,13 +718,15 @@ earlier version with `sandbox.network = true` or `false` still works: it reads a
 workspace. A hard-coded `/tmp/file` or home-directory write can be denied. Use `list_files`,
 `search` and `read_file` for file discovery and reads; commands cannot inspect `.declass` or `.git`
 (nor the repository's history in a linked worktree, a subdirectory of a repository, or a clone
-that borrows another repository's objects). On macOS a command cannot rename, remove or change
-the mode of a file it may not read (sensitive data, protected source, `.git`), rename or remove a
-folder that holds one, or move the workspace or its scratch directory; it can still create and
-write files there. So these now fail part-way: `rm -rf config` removes the files it may read and
-stops at the folder; `mv dir other` fails when `dir` holds such a file; rotating `*.log` files,
-`rm -rf logs` and `rm -rf data` (under the default `data/**` rule) fail. Remove or move those
-files with the file tools, or run the command yourself outside Declass. A server a command
+that borrows another repository's objects). A command cannot rename or remove a file it may not
+read (sensitive data, protected source, `.git`), rename or remove a folder that holds one, or move
+the workspace or its scratch directory (on macOS it cannot change their mode either); it can
+still create and write files there. So these now fail part-way: `rm -rf config` removes the files
+it may read and stops at the folder; `mv dir other` fails when `dir` holds such a file; rotating
+`*.log` files, `rm -rf logs` and `rm -rf data` (under the default `data/**` rule) fail. On Linux
+such a folder is a mount point while the command runs, so moving a file into or out of it is a
+copy: `mv` does it, a program that renames directly gets "Invalid cross-device link". Remove or
+move those files with the file tools, or run the command yourself outside Declass. A server a command
 starts in the background (`npm run dev &`) is stopped when that command ends: see below. The
 file tools take a path in any letter case or Unicode form macOS would open (`Src/Main.rs` for
 `src/main.rs`) and use the name as it is on disk.

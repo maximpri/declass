@@ -1122,16 +1122,18 @@ git; reset behaviour defined per entry).
   command `TMPDIR` outside the workspace (a sub-agent's commands can write nothing else: the
   workspace is read-only to them, `Spec.read_only`), a separate one for `sensitive_data` commands that no
   other sandboxed process (command, check, MCP server) can read (`tools::hidden_from_processes`), where
-  their cargo builds go too (`CARGO_TARGET_DIR`); sensitive and protected paths unreadable (deny-read), and under
-  Seatbelt, whose rules name paths, not movable (a denied path, the folders above it and the
-  workspace and scratch directory themselves cannot be renamed or removed; run state is denied
-  wherever it is), except for
+  their cargo builds go too (`CARGO_TARGET_DIR`); sensitive and protected paths unreadable (deny-read), and,
+  as the rules name paths, not movable (a denied path, the folders above it and the
+  workspace and scratch directory themselves cannot be renamed or removed: Seatbelt refuses it,
+  under bubblewrap each is a mount point; run state is denied wherever it is), except for
   `sensitive_data` commands (whose placeholders are resolved locally), and protected source readable by the host's checks; credential
   stores in the home directory unreadable to every command; network only through the egress proxy
   by default (§5.6b), none for `sensitive_data` commands and checks that read protected source;
   tmpfs `/run`; restricted service lookup; process-tree and process-group kill when a command ends,
   on timeout, on interrupt or when its call is dropped, before the leader is reaped.
-  On Linux: denied paths covered by mode-000 stand-ins, no capabilities, a seccomp filter against
+  On Linux: denied paths covered by mode-000 stand-ins (one under a folder that cannot be
+  searched, at that folder: modes are not mediated), the folders above them in the workspace and
+  scratch directory mounted on themselves, no capabilities, a seccomp filter against
   Unix sockets unless the network is unrestricted, and `.git`/`.declass` entries a command created removed when
   it ends. A sandbox that cannot start refuses the command.
 - **Git:** one helper; environment cleared; fsmonitor, hooks, filters and user/system config

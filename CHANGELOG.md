@@ -59,11 +59,14 @@ Each was demonstrated by a test that fails without its fix; [SECURITY.md](SECURI
 details.
 
 - **A command could move a file it may not read, and read it under another name**
-  (DECLASS-2026-041, macOS). Seatbelt names paths, so `mv .env x` or moving a folder above a
-  denied file, or the workspace itself, put it out of reach of every rule. Denied paths, the
-  folders above them, the workspace and its scratch directory can no longer be renamed, removed
-  or have their permissions changed by a sandboxed process; a folder Declass cannot list is
-  denied whole, and every sensitive file is denied by name.
+  (DECLASS-2026-041). Seatbelt names paths, so `mv .env x` or moving a folder above a
+  denied file, or the workspace itself, put it out of reach of every rule. Under bubblewrap a
+  folder above a denied file could be renamed too: the file stayed unreadable to that command,
+  but the next one read it at its new path; and with that folder made unsearchable
+  (`chmod 600`), no stand-in covered the file at all. Denied paths, the folders above them, the
+  workspace and its scratch directory can no longer be renamed or removed by a sandboxed process
+  (on Linux each is a mount point), nor, on macOS, have their permissions changed; a folder
+  Declass cannot list or search is denied whole, and every sensitive file is denied by name.
 - **The file tools opened other spellings of a path** (DECLASS-2026-042, macOS). `.DECLASS/...`,
   `DATA/orders.csv` under a `data/**` rule or `.GIT/config` reached run state, sensitive data or
   git's configuration past the checks. Every path is resolved to its spelling on disk before any
@@ -138,10 +141,11 @@ details.
 
 ### Upgrading
 
-- On macOS, commands can no longer rename, remove or change the permissions of a file Declass
-  denies them, a folder that holds one, the workspace or its scratch directory: `rm -rf data`,
-  `mv config settings` and rotating denied logs fail part-way. Use the file tools, or run them
-  yourself outside Declass. [Details](docs/USAGE.md#command-networking-and-troubleshooting)
+- Commands can no longer rename or remove a file Declass denies them, a folder that holds one,
+  the workspace or its scratch directory, nor, on macOS, change their permissions: `rm -rf data`,
+  `mv config settings` and rotating denied logs fail part-way. On Linux, moving a file into or out
+  of such a folder copies it. Use the file tools, or run them yourself outside Declass.
+  [Details](docs/USAGE.md#command-networking-and-troubleshooting)
 - A server a command starts in the background (`npm run dev &`) stops when that command ends.
 - A config file a secret is written into is sensitive from then on: commands that read it need
   `sensitive_data`, and `git_commit` refuses it.

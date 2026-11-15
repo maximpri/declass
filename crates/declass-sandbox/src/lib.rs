@@ -711,7 +711,9 @@ fn push_bind(a: &mut Vec<OsString>, op: &str, src: &Path, dest: &Path) {
 /// workspace and the scratch directory are mounted writable; every existing `.git` (`reserved`, at any
 /// depth) is mounted back read-only and every existing `.declass` is covered by a
 /// `stubs` stand-in (run state is never readable); every existing path in
-/// `spec.deny_read` is covered by a `stubs` stand-in. Paths are resolved
+/// `spec.deny_read` is covered by a `stubs` stand-in ([`stand_in_targets`]),
+/// and every folder above one in the workspace or the scratch directory is
+/// mounted on itself ([`pinned_folders`]). Paths are resolved
 /// first, so a symlink is covered at its target. A denied path that does not
 /// exist yet is skipped: there is nothing to read, and a mount point would
 /// create it in the workspace. `.git` and `.declass` entries a command creates
@@ -756,6 +758,20 @@ pub fn bwrap_args(spec: &Spec, reserved: &[Reserved], stubs: &DenyStubs) -> Vec<
         "--bind"
     };
     push_bind(&mut a, workspace_bind, &spec.workspace, &spec.workspace);
+    // Before the mounts placed inside it, which would otherwise be hidden.
+    push_bind(&mut a, "--bind", &spec.scratch, &spec.scratch);
+    let writable = writable_roots(spec);
+    let targets = stand_in_targets(&spec.deny_read, &writable);
+    let scratch = spec.scratch.canonicalize().unwrap_or(spec.scratch.clone());
+    for folder in pinned_folders(&targets, &writable) {
+        // Mounted as what holds it is: a read-only workspace stays read-only.
+        let op = if folder.starts_with(&scratch) {
+            "--bind"
+        } else {
+            workspace_bind
+        };
+        push_bind(&mut a, op, &folder, &folder);
+    }
     for r in reserved {
         if let Ok(target) = r.path.canonicalize() {
             // Run state is unreadable, not only read-only.
@@ -767,7 +783,7 @@ pub fn bwrap_args(spec: &Spec, reserved: &[Reserved], stubs: &DenyStubs) -> Vec<
             push_bind(&mut a, "--ro-bind", source, &target);
         }
     }
-    for target in &stand_in_targets(&spec.deny_read) {
+    for target in &targets {
         let stub = if target.is_dir() {
             &stubs.dir
         } else {
@@ -775,7 +791,6 @@ pub fn bwrap_args(spec: &Spec, reserved: &[Reserved], stubs: &DenyStubs) -> Vec<
         };
         push_bind(&mut a, "--ro-bind", stub, target);
     }
-    push_bind(&mut a, "--bind", &spec.scratch, &spec.scratch);
     if let Network::Proxy(ProxyRoute::Bridge { helper, .. }) = &spec.network
         && let Some(program) = helper.first()
     {
@@ -795,13 +810,53 @@ pub fn bwrap_args(spec: &Spec, reserved: &[Reserved], stubs: &DenyStubs) -> Vec<
     a
 }
 
+/// Where a command may rename and change modes: the workspace and the
+/// scratch directory, as given and resolved.
+fn writable_roots(spec: &Spec) -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    for p in [&spec.workspace, &spec.scratch] {
+        for r in [p.clone(), p.canonicalize().unwrap_or(p.clone())] {
+            if !roots.contains(&r) {
+                roots.push(r);
+            }
+        }
+    }
+    roots
+}
+
 /// The paths `deny` covers with stand-ins, resolved, each once, and none
 /// inside another: a path under a denied folder is out of reach already, and
 /// bubblewrap cannot make a mount point inside a read-only stand-in (a
 /// sensitive file in a denied folder, a linked worktree's git folder inside
 /// a hidden `.git`), so it would refuse to start.
-fn stand_in_targets(deny: &[PathBuf]) -> Vec<PathBuf> {
-    let resolved: Vec<PathBuf> = deny.iter().filter_map(|p| p.canonicalize().ok()).collect();
+///
+/// A path that does not exist is skipped. One in `writable` (the workspace
+/// or the scratch directory) that cannot be resolved for another reason is
+/// covered at the deepest folder above it that can: a folder above it that
+/// cannot be searched (mode `600`, which a command may set, as modes are not
+/// mediated) leaves its path unresolvable, and uncovered, a later command
+/// could set the mode back and read it. Elsewhere such a path is skipped: no
+/// command can change a mode there (the root is mounted read-only), so what
+/// stops Declass from resolving it stops the command too.
+fn stand_in_targets(deny: &[PathBuf], writable: &[PathBuf]) -> Vec<PathBuf> {
+    let resolved: Vec<PathBuf> = deny
+        .iter()
+        .filter_map(|p| match p.canonicalize() {
+            Ok(t) => Some(t),
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) =>
+            {
+                None
+            }
+            Err(_) if writable.iter().any(|w| p.starts_with(w)) => {
+                p.ancestors().skip(1).find_map(|a| a.canonicalize().ok())
+            }
+            Err(_) => None,
+        })
+        .collect();
     let mut out: Vec<PathBuf> = Vec::new();
     for t in &resolved {
         let covered = resolved.iter().any(|o| o != t && t.starts_with(o));
@@ -809,6 +864,27 @@ fn stand_in_targets(deny: &[PathBuf]) -> Vec<PathBuf> {
             out.push(t.clone());
         }
     }
+    out
+}
+
+/// The folders above `targets` inside `writable` (not those roots, which are
+/// mount points already), parents first. Each is mounted on itself: a mount
+/// point cannot be renamed or removed (`EBUSY`), so a stand-in stays where the
+/// next command's deny list names it. Without this a command renamed a folder
+/// above one (`mv config c` for `config/secrets/key.pem`); the stand-in moved
+/// with it, but the next command's deny list named the old path, and it read
+/// the file at the new one. Files may still be created, written and removed
+/// in these folders; moving one between such a folder and another crosses
+/// mounts (`mv` copies it; `rename` alone fails with `EXDEV`).
+fn pinned_folders(targets: &[PathBuf], writable: &[PathBuf]) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = targets
+        .iter()
+        .flat_map(|t| t.ancestors().skip(1))
+        .filter(|a| writable.iter().any(|w| a.starts_with(w) && a != w))
+        .map(Path::to_path_buf)
+        .collect();
+    out.sort();
+    out.dedup();
     out
 }
 
@@ -1211,6 +1287,26 @@ fn make_fifo(_path: &Path) -> Result<(), SandboxError> {
     ))
 }
 
+/// Why a sandboxed process did not start. bubblewrap that cannot be started
+/// means no sandbox, unless the folder the process starts in cannot be
+/// entered: under bubblewrap a command can change a folder's mode (`chmod
+/// 000 "$PWD"`), and every later command is refused until it is restored.
+fn start_error(
+    kind: SandboxKind,
+    bwrap: &Path,
+    program: &str,
+    cwd: &Path,
+    e: std::io::Error,
+) -> SandboxError {
+    match kind {
+        SandboxKind::Bubblewrap => match rustix::fs::access(cwd, rustix::fs::Access::EXEC_OK) {
+            Err(denied) => SandboxError::Spawn(format!("cannot enter {}: {denied}", cwd.display())),
+            Ok(()) => SandboxError::Unavailable(format!("cannot start {}: {e}", bwrap.display())),
+        },
+        SandboxKind::Seatbelt => SandboxError::Spawn(format!("{program}: {e}")),
+    }
+}
+
 async fn run_with(
     kind: SandboxKind,
     bwrap: &Path,
@@ -1235,12 +1331,7 @@ async fn run_with(
     };
     let spec = &resolved;
     let started = Instant::now();
-    let mut child = spawned.map_err(|e| match kind {
-        SandboxKind::Bubblewrap => {
-            SandboxError::Unavailable(format!("cannot start {}: {e}", bwrap.display()))
-        }
-        SandboxKind::Seatbelt => SandboxError::Spawn(format!("{program}: {e}")),
-    })?;
+    let mut child = spawned.map_err(|e| start_error(kind, bwrap, &program, cwd, e))?;
     let pid = child.id();
     // Declared after `child`, so dropped first: a future dropped while the
     // command runs (a cancelled call) still sweeps its tree and group before
@@ -1451,10 +1542,7 @@ pub async fn spawn(
         } = prepared;
         (spawned, spec, reserved, marker, fifo, pipe)
     };
-    let mut child = spawned.map_err(|e| match kind {
-        SandboxKind::Bubblewrap => SandboxError::Unavailable(format!("cannot start {BWRAP}: {e}")),
-        SandboxKind::Seatbelt => SandboxError::Spawn(format!("{program}: {e}")),
-    })?;
+    let mut child = spawned.map_err(|e| start_error(kind, Path::new(BWRAP), &program, cwd, e))?;
     let stdin = match pipe {
         Some(p) => Some(p),
         None => child
@@ -1900,7 +1988,10 @@ mod tests {
     async fn denied_paths_cannot_be_moved_to_where_no_rule_names_them() {
         // Seatbelt's rules name paths and are checked at each access: moving
         // a denied file, or a directory above one, used to give its content
-        // a path no rule named, and the command read it there.
+        // a path no rule named, and the command read it there. Under
+        // bubblewrap a stand-in moved with a folder above it, so that command
+        // could not read it, but the next command's deny list named the old
+        // path, and it read the file at the new one.
         let (_d, ws) = setup();
         for dir in ["data/nested", "config/secrets", "vendor/dep/.git", "src"] {
             std::fs::create_dir_all(ws.join(dir)).unwrap();
@@ -1937,19 +2028,45 @@ mod tests {
         for secret in ["Qx7p", "8977066", "PRIVATE-4471", "7730"] {
             assert!(!all.contains(secret), "{secret} readable: {all}");
         }
-        // Seatbelt keeps them in place; under bubblewrap a stand-in follows
-        // its folder when that moves, so the content stays out of reach there.
-        if cfg!(target_os = "macos") {
-            for (rel, text) in secrets {
-                assert_eq!(
-                    std::fs::read_to_string(ws.join(rel)).unwrap(),
-                    text,
-                    "{rel}"
-                );
+        // Both keep them in place, so the next command's deny list still
+        // names them: Seatbelt refuses `file-write-unlink` on a denied path
+        // and every folder above it, and under bubblewrap each is a mount
+        // point (a stand-in, or a folder above one mounted on itself).
+        for (rel, text) in secrets {
+            assert_eq!(
+                std::fs::read_to_string(ws.join(rel)).unwrap(),
+                text,
+                "{rel}"
+            );
+        }
+        // Nor is their content anywhere else. (Under bubblewrap, moving a
+        // folder out of one mounted on itself crosses mounts, so `mv` falls
+        // back to copying it: it creates the folder, and cannot read what
+        // the stand-ins cover.)
+        let mut stack = vec![ws.clone()];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+                let path = entry.path();
+                match entry.file_type() {
+                    Ok(t) if t.is_dir() => stack.push(path),
+                    Ok(t) if t.is_file() => {
+                        let content = std::fs::read_to_string(&path).unwrap_or_default();
+                        for (rel, text) in secrets {
+                            assert!(
+                                path == ws.join(rel) || !content.contains(text),
+                                "{rel} copied to {}: {all}",
+                                path.display()
+                            );
+                        }
+                    }
+                    _ => {}
+                }
             }
         }
-        // Other files may still be moved and, under Seatbelt, files created in
-        // a denied directory (bubblewrap covers it with an unwritable stand-in).
+        // Other files may still be moved out of those folders (under
+        // bubblewrap across mounts, so `mv` copies them) and, under Seatbelt,
+        // files created in a denied directory (bubblewrap covers it with an
+        // unwritable stand-in).
         assert!(all.contains("port = 1"), "{all}");
         if cfg!(target_os = "macos") {
             assert!(all.contains("created-in-denied-dir"), "{all}");
@@ -2026,8 +2143,97 @@ mod tests {
         ]
         .map(|p| r.join(p));
         assert_eq!(
-            stand_in_targets(&deny),
+            stand_in_targets(&deny, &[r.join("ws")]),
             vec![r.join("ws/data"), r.join("main/.git"), r.join("ws/.env")]
+        );
+    }
+
+    #[test]
+    fn denied_paths_are_covered_where_no_command_can_reach_around_them() {
+        // A denied path under a folder that cannot be searched (mode 600) did
+        // not resolve and was skipped: under bubblewrap a command could set
+        // the mode back and read it. In the workspace it is covered at that
+        // folder; elsewhere no command can change a mode. The folders above
+        // each stand-in in the workspace are mounted on themselves, so none
+        // can be renamed.
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().unwrap();
+        let r = d.path().canonicalize().unwrap();
+        let files = [
+            "ws/config/secrets/key.pem",
+            "ws/locked/inner/x.csv",
+            "outside/locked/inner/x.csv",
+            "ws/a/b/c/d.csv",
+        ];
+        for f in files {
+            let f = r.join(f);
+            std::fs::create_dir_all(f.parent().unwrap()).unwrap();
+            std::fs::write(f, "x").unwrap();
+        }
+        let mode = |p: &str, m: u32| {
+            std::fs::set_permissions(r.join(p), std::fs::Permissions::from_mode(m)).unwrap();
+        };
+        let writable = [r.join("ws")];
+        mode("ws/locked", 0o600);
+        mode("outside/locked", 0o600);
+        let targets = stand_in_targets(&files.map(|f| r.join(f)), &writable);
+        mode("ws/locked", 0o755);
+        mode("outside/locked", 0o755);
+        // Root searches any folder: every path resolves.
+        let root = rustix::process::geteuid().is_root();
+        let expected: &[&str] = if root {
+            &files
+        } else {
+            &["ws/config/secrets/key.pem", "ws/locked", "ws/a/b/c/d.csv"]
+        };
+        assert_eq!(
+            targets,
+            expected.iter().map(|p| r.join(p)).collect::<Vec<_>>()
+        );
+        let mut pinned = vec![
+            "ws/a",
+            "ws/a/b",
+            "ws/a/b/c",
+            "ws/config",
+            "ws/config/secrets",
+        ];
+        if root {
+            pinned.extend(["ws/locked", "ws/locked/inner"]);
+        }
+        assert_eq!(
+            pinned_folders(&targets, &writable),
+            pinned.iter().map(|p| r.join(p)).collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_denied_path_under_a_folder_that_cannot_be_searched_stays_denied() {
+        // Under bubblewrap, modes are not mediated: a command made a folder
+        // above a denied file listable but not searchable (`chmod 600
+        // config`), the file's path no longer resolved, so no stand-in
+        // covered it, and the next command set the mode back and read it.
+        use std::os::unix::fs::PermissionsExt;
+        let (_d, ws) = setup();
+        std::fs::create_dir_all(ws.join("config/secrets")).unwrap();
+        std::fs::write(ws.join("config/secrets/key.pem"), "PRIVATE-4471\n").unwrap();
+        let mut s = spec(&ws);
+        s.deny_read = vec![ws.join("config/secrets/key.pem")];
+        let mode = |m: u32| {
+            std::fs::set_permissions(ws.join("config"), std::fs::Permissions::from_mode(m))
+                .unwrap();
+        };
+        mode(0o600);
+        let o = sh_with(
+            &s,
+            "chmod 755 config; cat config/secrets/key.pem; od -c config/secrets/key.pem; echo done",
+        )
+        .await;
+        mode(0o755);
+        let all = text(&o);
+        assert!(all.contains("done"), "{all}");
+        assert!(
+            !all.contains("PRIVATE-4471") && !all.contains("P   R   I"),
+            "readable: {all}"
         );
     }
 
@@ -2703,14 +2909,22 @@ mod bwrap_args_tests {
             readable_home_secrets: Vec::new(),
             read_only: false,
         };
-        for dir in ["ws/.git", "ws/vendor/dep/.git", "ws/.declass", "ws/data"] {
+        for dir in [
+            "ws/.git",
+            "ws/vendor/dep/.git",
+            "ws/.declass",
+            "ws/data",
+            "ws/config/secrets",
+        ] {
             std::fs::create_dir_all(root.join(dir)).unwrap();
         }
         std::fs::write(root.join("ws/.env"), "x").unwrap();
+        std::fs::write(root.join("ws/config/secrets/key.pem"), "x").unwrap();
         s.deny_read = vec![
             root.join("ws/data"),
             root.join("ws/.env"),
             root.join("ws/absent"),
+            root.join("ws/config/secrets/key.pem"),
         ];
         let stubs = DenyStubs::ensure(&root).unwrap();
         let reserved = reserved_entries(&s.workspace);
@@ -2735,6 +2949,23 @@ mod bwrap_args_tests {
         assert!(!joined.contains("absent"));
         assert!(!joined.contains("--share-net"));
         assert!(joined.contains(&format!("--bind {ws} {ws}")));
+        // The folders above a stand-in cannot be renamed: each is a mount
+        // point, made before the stand-in inside it.
+        let at = |needle: String| {
+            joined
+                .find(&needle)
+                .unwrap_or_else(|| panic!("{needle} missing: {joined}"))
+        };
+        let stand_in = at(format!(
+            "--ro-bind {} {ws}/config/secrets/key.pem",
+            stubs.file.display()
+        ));
+        for folder in ["config", "config/secrets"] {
+            assert!(at(format!("--bind {ws}/{folder} {ws}/{folder}")) < stand_in);
+        }
+        // Not the workspace itself (a mount point already) nor what holds no stand-in.
+        assert_eq!(joined.matches(&format!("--bind {ws} ")).count(), 1);
+        assert!(!joined.contains(&format!("{ws}/vendor {ws}/vendor")));
 
         // Read-only: the workspace is mounted read-only; scratch stays writable.
         s.read_only = true;
@@ -2747,6 +2978,9 @@ mod bwrap_args_tests {
         assert!(!joined.contains(&format!("--bind {ws} {ws}")), "{joined}");
         let scratch = s.scratch.display();
         assert!(joined.contains(&format!("--bind {scratch} {scratch}")));
+        // A folder above a stand-in stays as read-only as the rest.
+        assert!(joined.contains(&format!("--ro-bind {ws}/config {ws}/config")));
+        assert!(!joined.contains(&format!("--bind {ws}/config {ws}/config")));
     }
 }
 

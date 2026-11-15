@@ -2016,17 +2016,24 @@ mod sensitive_command_tests {
         }
     }
 
-    /// One command in a fresh run (engine primed on `files`), as an ordinary command.
-    async fn in_new_run(ws: &Path, run: &str, files: &[String], command: &str) -> String {
+    /// `commands` one after another in a fresh run (engine primed on
+    /// `files`, with `globs` sensitive), as ordinary commands.
+    async fn in_run(
+        ws: &Path,
+        run: &str,
+        (files, globs): (&[&str], &[&str]),
+        commands: &[&str],
+    ) -> Vec<String> {
         let run = ws.join(format!(".declass/runs/{run}"));
         std::fs::create_dir_all(&run).unwrap();
         let policy = Policy {
-            sensitive_globs: vec!["*.pem".into()],
+            sensitive_globs: globs.iter().map(|g| (*g).to_owned()).collect(),
             command_output_sensitive: true,
             ..Policy::default()
         };
         let engine = Engine::open(&run, policy, None).unwrap();
-        engine.prime(ws, files, "");
+        let files: Vec<String> = files.iter().map(|f| (*f).to_owned()).collect();
+        engine.prime(ws, &files, "");
         let git = Git::locate().unwrap();
         let mut journal = WriteJournal::open(&run).unwrap();
         let mut ctx = Ctx {
@@ -2045,46 +2052,105 @@ mod sensitive_command_tests {
             git_tools: None,
             lsp: None,
         };
-        call(&mut ctx, "run_command", json!({ "command": command })).await
+        let mut out = Vec::new();
+        for command in commands {
+            out.push(call(&mut ctx, "run_command", json!({ "command": command })).await);
+        }
+        out
     }
 
     #[tokio::test]
     async fn a_folder_made_unreadable_keeps_what_it_holds_denied() {
         // A folder above a denied file made unreadable (`chmod 000 config`)
         // hid the file from the next run's walk, so no rule named it there.
+        // Under bubblewrap, which does not mediate modes, a folder made
+        // listable but not searchable (`chmod 600 config`) left the file's
+        // path unresolvable, so no stand-in covered it, and the next command
+        // set the mode back and read it.
         use std::os::unix::fs::PermissionsExt;
         let d = tempfile::tempdir().unwrap();
         let ws = d.path().canonicalize().unwrap().join("ws");
         std::fs::create_dir_all(ws.join("config/secrets")).unwrap();
         std::fs::write(ws.join("config/secrets/key.pem"), "PRIVATE-4471\n").unwrap();
-        let files = vec!["config/secrets/key.pem".to_owned()];
+        let rules: (&[&str], &[&str]) = (&["config/secrets/key.pem"], &["*.pem"]);
         let mode = |p: &Path, m: u32| {
             std::fs::set_permissions(p, std::fs::Permissions::from_mode(m)).unwrap();
         };
-        let of = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
-        // Run 1: the command may not change those folders' modes.
-        in_new_run(
+        let of = |p: &Path| std::fs::symlink_metadata(p).unwrap().permissions().mode() & 0o777;
+        let read = "chmod 755 config; cat config/secrets/key.pem; echo done";
+        // Run 1 changes those folders' modes, then reads in the same run.
+        let out = in_run(
             &ws,
             "r1",
-            &files,
-            "chmod 000 config; chmod 000 \"$PWD\"; echo done",
+            rules,
+            &["chmod 000 config; chmod 000 \"$PWD\"; echo done", read],
         )
         .await;
-        assert!(of(&ws.join("config")) != 0 && of(&ws) != 0);
-        // Run 2, with the folder unreadable all the same (changed outside).
-        mode(&ws.join("config"), 0o000);
-        let out = in_new_run(
-            &ws,
-            "r2",
-            &files,
-            "chmod 755 config; cat config/secrets/key.pem; echo done",
-        )
-        .await;
+        // Read (the workspace first: it holds the folder), then restored.
+        let ws_mode = of(&ws);
+        mode(&ws, 0o755);
+        let config_mode = of(&ws.join("config"));
         mode(&ws.join("config"), 0o755);
-        assert!(
-            out.contains("done") && !out.contains("PRIVATE-4471"),
-            "{out}"
-        );
+        assert!(!out[1].contains("PRIVATE-4471"), "{}", out[1]);
+        if cfg!(target_os = "macos") {
+            // Seatbelt refuses the changes.
+            assert!(config_mode != 0 && ws_mode != 0);
+            assert!(out[1].contains("done"), "{}", out[1]);
+        } else {
+            // bubblewrap does not mediate modes. The workspace could not be
+            // entered, so the next command was refused (fail closed), as
+            // every one is until its mode is restored.
+            assert!(config_mode == 0 && ws_mode == 0);
+            assert!(
+                !out[1].contains("done") && out[1].contains("Permission denied"),
+                "{}",
+                out[1]
+            );
+        }
+        // Later runs, with the folder unreadable or unsearchable all the same
+        // (changed outside).
+        for (run, m) in [("r2", 0o000), ("r3", 0o600)] {
+            mode(&ws.join("config"), m);
+            let out = in_run(&ws, run, rules, &[read]).await.remove(0);
+            mode(&ws.join("config"), 0o755);
+            assert!(
+                out.contains("done") && !out.contains("PRIVATE-4471"),
+                "{m:o}: {out}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_folder_moved_keeps_what_it_holds_denied() {
+        // Under bubblewrap a command renamed a folder above a denied path
+        // (`mv app a2` for `app/data/**`); the stand-in moved with it, so that
+        // command could not read the file, but the next command's deny list
+        // named the old path, and it read the file at the new one.
+        let d = tempfile::tempdir().unwrap();
+        let ws = d.path().canonicalize().unwrap().join("ws");
+        let row = format!("id,total\n1,{BALANCE}\n");
+        let files = ["app/data/orders.csv", "config/secrets/key.pem"];
+        for f in files {
+            std::fs::create_dir_all(ws.join(f).parent().unwrap()).unwrap();
+            std::fs::write(ws.join(f), &row).unwrap();
+        }
+        let out = in_run(
+            &ws,
+            "r1",
+            (&files, &["app/data/**", "config/secrets/*.pem"]),
+            &[
+                "mv app a2; mv config c2; mv config/secrets s2; echo moved",
+                "od -c a2/data/orders.csv c2/secrets/key.pem s2/key.pem \
+                 app/data/orders.csv config/secrets/key.pem; echo done",
+            ],
+        )
+        .await;
+        assert!(out[1].contains("done"), "{}", out[1]);
+        assert!(!out[1].contains("  8   9   7"), "{}", out[1]);
+        // Still where the rules name them.
+        for f in files {
+            assert_eq!(std::fs::read_to_string(ws.join(f)).unwrap(), row, "{f}");
+        }
     }
 
     #[tokio::test]
