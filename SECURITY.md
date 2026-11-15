@@ -1069,7 +1069,7 @@ channel in; a commit is a side effect that outlives the run.
 | A key committed long ago and removed since (history often holds such keys) | Each file's diff is presented on its own and scanned like public content; detected secrets become placeholders |
 | Author emails and names; secrets in commit messages | Log lines, commit messages and blame are scanned; an email is PII and becomes a placeholder (names in public text are shown, as elsewhere) |
 | Protected source leaks through its history | Sealed paths never appear (dropped from file lists, diffs, log by path, blame, show by path); interface-only paths' diffs and old content are withheld with a note |
-| A hostile repository runs code through git | The `declass-git` runner only: absolute git binary, cleared environment, no global or system config, hooks off (`core.hooksPath=/dev/null`), no fsmonitor, no external diff, textconv or filter programs, no signing; revisions starting with `-` are refused and passed after `--end-of-options` |
+| A hostile repository runs code through git | The `declass-git` runner only: absolute git binary, cleared environment, no global or system config, hooks off (`core.hooksPath=/dev/null`), no fsmonitor, no external diff or textconv programs, no signing; revisions starting with `-` are refused and passed after `--end-of-options`. Clean filters named in the repository's own `.git/config` still run when a git tool compares or stages working-tree files (`diff`, `git_status`, a commit), as they would for the operator's git; filters from global or system configuration do not, and commands cannot write `.git` |
 | A commit publishes sensitive data | Only files the run or session wrote (write journal); never sensitive, derived, hidden or protected paths, ignored files or paths with a `filter` attribute (LFS); the message is refused with a placeholder or anything the boundary would replace (a vault value, a detected secret or PII, copied sensitive text) |
 | A commit rewrites or publishes history | Plumbing only: no push, no reset, no checkout or branch switch, no amend; HEAD moves by compare-and-swap (a HEAD that moved meanwhile is left alone); other staged work is left as it is |
 | Commits without the operator knowing | `git.commit = "ask"` (default): each commit waits for approval showing the message and paths, in an interactive session inline even with `oversight.approve = "off"`; `git_commit` is not offered where nobody can be asked (a one-shot run or a session without a terminal, with approval off); `allow` needs a confirmed owner change or an owner default; a project can only tighten (`allow` → `ask` → `off`). Every commit is a `git_commit` audit event (hash, paths; never the message) |
@@ -1475,6 +1475,11 @@ the next `declass resume` ends the run and calls it then.
   `sensitive_data` command's text with its placeholders resolved (to a server or process running
   meanwhile), a server's arguments. Type sensitive values in a session rather than on the command
   line. Under bubblewrap a process sees only its own PID namespace.
+- A repository's own `.git/config` can name programs that git runs as clean filters when the git
+  tools compare or stage working-tree files, outside the sandbox, as running git there would.
+  Commands cannot change `.git`, so only whoever made the repository can set one: opening an
+  archive that includes its `.git` directory trusts what that configuration runs. `declass
+  exposure --history` runs no git command that reads the working tree.
 - Detectors cannot recognize every possible secret format; canaries and the audit log exist to
   measure what gets through. The detection corpus shows that each imported rule matches its own
   format, not that the formats are complete.
