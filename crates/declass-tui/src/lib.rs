@@ -45,7 +45,8 @@ pub type Doctor = Box<dyn Fn(bool) -> Vec<DoctorLine> + Send>;
 /// holds no provider code); tests supply fakes. Nothing here runs unless the
 /// user asks for it on a screen.
 pub struct Services {
-    /// `declass doctor`, offline or with `--online` (connection, context window).
+    /// `declass doctor`, offline or with `--online` (listings, context windows,
+    /// and the cache and vision checks' short built-in prompts to each model).
     pub doctor: Doctor,
     /// Loopback discovery of local servers (preset ports; never a model call).
     pub detect: Arc<dyn Fn() -> Vec<LocalServer> + Send + Sync>,

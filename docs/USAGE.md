@@ -555,8 +555,9 @@ before; `--quiet` turns the progress off.
 **Settings, inside the workspace.** F2 or `/settings` (or `/models`, `/sensitivity`, `/ip`,
 `/limits`, `/data`, `/audit`, `/runs` for one screen) opens seven screens over the conversation;
 Esc (or `q`) comes back. Models (frontier and local settings, with `declass doctor` offline; `o` adds
-the online checks of connection and context window; `l` looks for local servers on loopback (the
-preset ports, as bootstrap does) and `[` `]` `u` point the local role at one; `c` runs the
+the checks of `declass doctor --online`: connection, context window, and the short built-in prompts
+of the cache and vision checks; `l` looks for local servers on loopback (the preset ports, as
+bootstrap does) and `[` `]` `u` point the local role at one; `c` runs the
 cache-reuse probe, two identical short requests to the local model, only when pressed), Sensitivity
 (globs, detectors, custom detector patterns, raw-output commands, secret sinks, bulky thresholds;
 `t` tests a path — sensitive or not and which pattern matched — and `s` tests sample text, showing

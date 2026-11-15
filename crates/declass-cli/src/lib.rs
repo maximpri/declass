@@ -309,10 +309,14 @@ enum Cmd {
     /// Check configuration, endpoints, sandbox, git, disk and audit logs; print
     /// pass/warn/fail with a fix for each. Exit code: 0 pass, 1 warn, 2 fail.
     Doctor {
-        /// Also contact the configured servers (model listings and context
-        /// windows only; never a model call). Without it doctor uses no network.
+        /// Also contact the configured servers: their model listings and
+        /// context windows, two identical short built-in prompts to each model
+        /// for the cache check and two generated images for the vision check
+        /// (nothing from the workspace; a paid model bills them). Without it
+        /// doctor uses no network.
         #[arg(long)]
         online: bool,
+        /// Print the checks as JSON.
         #[arg(long)]
         json: bool,
     },

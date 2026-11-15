@@ -226,7 +226,9 @@ fn models_screen_runs_doctor_offline_and_online_on_request() {
     key(&mut app, KeyCode::Char('o'));
     let out = render(&mut app);
     assert!(out.contains("fake check, online=true"), "{out}");
-    assert!(out.contains("never a model call"), "{out}");
+    // Online checks send the models short prompts: the screen never says otherwise.
+    assert!(!out.contains("never a model call"), "{out}");
+    assert!(out.contains("cache and vision prompts"), "{out}");
 }
 
 #[test]

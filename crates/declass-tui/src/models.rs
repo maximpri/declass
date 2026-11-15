@@ -149,7 +149,7 @@ fn draw_doctor(f: &mut Frame, app: &App, area: Rect) {
                 }
             }
             let mode = if *online {
-                "online: connection, context window; never a model call"
+                "online: listings, context windows, cache and vision prompts"
             } else {
                 "offline: no network; o checks the servers"
             };
