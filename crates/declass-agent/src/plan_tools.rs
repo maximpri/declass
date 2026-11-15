@@ -97,6 +97,13 @@ fn stopped(ctx: &Ctx<'_>) -> bool {
     ctx.interrupted.is_some_and(|i| i.load(Ordering::SeqCst))
 }
 
+/// Why a check did not run: the run was interrupted or its time ran out.
+const STOPPED: &str = "verification interrupted or session time exhausted";
+
+fn past(deadline: Option<tokio::time::Instant>) -> bool {
+    deadline.is_some_and(|d| tokio::time::Instant::now() >= d)
+}
+
 pub(crate) async fn call(
     ctx: &mut Ctx<'_>,
     oversight: &crate::oversight::Oversight,
@@ -227,28 +234,39 @@ async fn verify_step(
     }
     let mut shown = Vec::new();
     for check in &step.checks {
-        if stopped(ctx) || deadline.is_some_and(|d| tokio::time::Instant::now() >= d) {
-            return Err("verification interrupted or session time exhausted".into());
+        // An interrupt or the deadline stops the batch at the check it finds
+        // due. When an earlier check was recorded, its evidence shows where;
+        // otherwise this one is recorded as not run (and not put to the
+        // operator), so a stopped verification always leaves host evidence,
+        // however long the plan's own writes took: they wait for the disk,
+        // and a slow one can spend a short deadline before any check starts.
+        let due = stopped(ctx) || past(deadline);
+        if due && !shown.is_empty() {
+            return Err(STOPPED.into());
         }
         let ticket = store.begin_verification(revision, step_id, &check.id)?;
-        let args = json!({"command":ticket.command,"sensitive_data":false});
-        let approval = crate::oversight::review(
-            oversight,
-            "run_command",
-            args.as_object().expect("object"),
-            ctx.presenter,
-            ctx.audit,
-        );
-        let result = match approval {
-            Ok(()) if !stopped(ctx) && deadline.is_none_or(|d| tokio::time::Instant::now() < d) => {
-                let timeout = deadline.map_or(ctx.command_timeout, |d| {
-                    ctx.command_timeout
-                        .min(d.saturating_duration_since(tokio::time::Instant::now()))
-                });
-                crate::tools::sandboxed(ctx, &ticket.command, timeout, Access::Ordinary).await
+        let result = if due {
+            Err(STOPPED.into())
+        } else {
+            let args = json!({"command":ticket.command,"sensitive_data":false});
+            let approval = crate::oversight::review(
+                oversight,
+                "run_command",
+                args.as_object().expect("object"),
+                ctx.presenter,
+                ctx.audit,
+            );
+            match approval {
+                Ok(()) if !stopped(ctx) && !past(deadline) => {
+                    let timeout = deadline.map_or(ctx.command_timeout, |d| {
+                        ctx.command_timeout
+                            .min(d.saturating_duration_since(tokio::time::Instant::now()))
+                    });
+                    crate::tools::sandboxed(ctx, &ticket.command, timeout, Access::Ordinary).await
+                }
+                Ok(()) => Err(STOPPED.into()),
+                Err(e) => Err(e),
             }
-            Ok(()) => Err("verification interrupted or session time exhausted".into()),
-            Err(e) => Err(e),
         };
         let (exit, timed_out, output) = match result {
             Ok(o) => (o.exit_code, o.timed_out, crate::tools::render_output(&o)),
@@ -291,6 +309,9 @@ async fn verify_step(
         ));
         if interrupted {
             return Err("verification interrupted; evidence is not a pass".into());
+        }
+        if due {
+            return Err(STOPPED.into());
         }
     }
     Ok(shown.join("\n"))
@@ -679,6 +700,56 @@ mod tests {
             std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
             0o600
         );
+    }
+    #[tokio::test]
+    async fn a_verification_stopped_before_its_first_check_still_leaves_evidence() {
+        // The plan's own writes wait for the disk: on a slow one (a Linux VM's
+        // overlay file system takes 25-100 ms per sync) they spent a short
+        // deadline before the first check began, and the batch stopped
+        // without a record. An interrupt raised by then is the same case.
+        use std::sync::atomic::AtomicBool;
+        for interrupt in [false, true] {
+            let f = Fixture::new();
+            let (_, revision, step) = f.plan(&["printf ran > ran", "printf late > late"], true);
+            let p = declass_boundary::view::PassThrough { max_bytes: 4096 };
+            let mut journal = WriteJournal::open(&f.run).unwrap();
+            let flag = AtomicBool::new(true);
+            let mut ctx = f.ctx(&mut journal, &p);
+            let deadline = if interrupt {
+                ctx.interrupted = Some(&flag);
+                None
+            } else {
+                Some(tokio::time::Instant::now())
+            };
+            // A check that will not run is not put to the operator.
+            let oversight = Oversight {
+                mode: ApproveMode::All,
+                ..Oversight::default()
+            };
+            let args = json!({"revision":revision,"step_id":step});
+            let result = call(
+                &mut ctx,
+                &oversight,
+                false,
+                "verify_plan_step",
+                args.as_object().unwrap(),
+                deadline,
+            )
+            .await;
+            assert!(matches!(result, Outcome::Error(_)), "{result:?}");
+            assert!(!f.ws.join("ran").exists() && !f.ws.join("late").exists());
+            let store = Store::load(&f.run).unwrap();
+            let evidence = &store.snapshot().execution.as_ref().unwrap().evidence;
+            assert_eq!(evidence.len(), 1, "{interrupt}");
+            assert_eq!(evidence[0].status, VerificationStatus::Failed);
+            assert!(!evidence[0].timed_out && evidence[0].interrupted == interrupt);
+            let output =
+                std::fs::read(f.run.join(evidence[0].output_path.as_ref().unwrap())).unwrap();
+            assert_eq!(
+                String::from_utf8_lossy(&output),
+                format!("could not run check: {STOPPED}")
+            );
+        }
     }
     #[tokio::test]
     async fn unchecked_completion_is_explicit_and_does_not_require_manual_acceptance() {

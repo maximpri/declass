@@ -142,8 +142,10 @@ A step can be **Completed — unverified** when it has no automated check. **Che
 passed** means Declass actually ran the saved checks and recorded their outcomes.
 Before completing a plan, Declass reruns required plan checks and the session's
 configured acceptance checks, then applies its configured security-review gate.
-Failed, timed-out, or interrupted checks do not pass. Check history records when
-results were observed; later work can make earlier results stale.
+Failed, timed-out, or interrupted checks do not pass; a verification the session's
+time or an interrupt stops before its first check starts records that check as not
+run. Check history records when results were observed; later work can make earlier
+results stale.
 
 Planning survives `declass --resume`. Restarting an unfinished plan restores it for
 review without automatically continuing. Use `/plan resume rN` when ready.

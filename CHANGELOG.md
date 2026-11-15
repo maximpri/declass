@@ -134,6 +134,9 @@ details.
 - The workspace's Changes view showed the content of a sensitive file that the cloud model named
   under another spelling (`./data/...`, or `.ENV` on macOS). It is named only, as are files
   derived from sensitive data and protected source.
+- A plan verification that the session's time or an interrupt stopped before its first check
+  started left no evidence: on a slow disk the plan's own writes can spend a short deadline. That
+  check is now recorded as not run.
 - `declass config set` shows how to quote a text value (`'"gpt-6"'`). Stale and missing help is
   filled in (session limits are requests and time, not dollars). Report paths show quotes as
   written. `declass exposure` in an empty directory says there was nothing to read.
