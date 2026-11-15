@@ -152,6 +152,9 @@ details.
   `mv config settings` and rotating denied logs fail part-way. On Linux, moving a file into or out
   of such a folder copies it. Use the file tools, or run them yourself outside Declass.
   [Details](docs/USAGE.md#command-networking-and-troubleshooting)
+- `sensitive_data` commands and checks may still read and write such files in place, but not
+  replace them by renaming: `sed -i` on `.env` in a `sensitive_data` command now fails ("Device or
+  resource busy" on Linux, "Operation not permitted" on macOS). Write the file in place instead.
 - A server a command starts in the background (`npm run dev &`) stops when that command ends.
 - A config file a secret is written into is sensitive from then on: commands that read it need
   `sensitive_data`, and `git_commit` refuses it.
