@@ -860,7 +860,7 @@ fn the_workspace_on_a_terminal() {
     wait_for("Hello from the workspace.");
     wait_for("│ Say hello.");
     wait_for("read  src/lib.rs");
-    // `session <id> (Passthrough)` is printed on standard error by the
+    // `session <id> (passthrough)` is printed on standard error by the
     // session's setup: it lands in the conversation, not over the screen.
     wait_for("│ session ");
     wait_for(" of 1500 requests");
@@ -904,6 +904,72 @@ fn the_workspace_on_a_terminal() {
     assert!(main.contains("left open"), "{main}");
     assert!(!main.contains("Message declass"), "{main}");
     assert_eq!(f.requests(), 3);
+}
+
+/// On a terminal, a first message with no cloud model to send it to is
+/// refused in the conversation and the workspace stays open: nothing is
+/// probed or recorded, and the operator leaves as usual.
+#[test]
+fn a_message_without_a_usable_cloud_model_keeps_the_workspace_open() {
+    let e = env();
+    let declass = env!("CARGO_BIN_EXE_declass");
+    // An endpoint on the command line, but no model for it.
+    let inner = format!(
+        "stty rows 44 cols 100; exec '{declass}' --workspace '{}' --mode passthrough --no-privacy \
+--frontier-url 'http://127.0.0.1:9/v1'",
+        e.ws.display()
+    );
+    let mut c = if cfg!(target_os = "macos") {
+        let mut c = Command::new("script");
+        c.args(["-q", "/dev/null", "sh", "-c", &inner]);
+        c
+    } else {
+        let mut c = Command::new("script");
+        c.args(["-q", "-e", "-c", &inner, "/dev/null"]);
+        c
+    };
+    c.env("DECLASS_CONFIG_HOME", &e.home)
+        .env("TERM", "xterm-256color")
+        .env_remove("NO_COLOR")
+        .env_remove("DECLASS_LOCAL_PORTS")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = c.spawn().unwrap();
+    let screen = Arc::new(Mutex::new(vt100::Parser::new(44, 100, 0)));
+    let mut out = child.stdout.take().unwrap();
+    let feed = screen.clone();
+    std::thread::spawn(move || {
+        let mut buf = [0u8; 4096];
+        while let Ok(n) = out.read(&mut buf) {
+            if n == 0 {
+                break;
+            }
+            feed.lock().unwrap().process(&buf[..n]);
+        }
+    });
+    let shown = || screen.lock().unwrap().screen().contents();
+    let wait_for = |what: &str| {
+        let t = Instant::now();
+        while t.elapsed() < Duration::from_secs(30) {
+            if shown().contains(what) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        panic!("the screen never showed {what:?}:\n{}", shown());
+    };
+    let mut keys = child.stdin.take().unwrap();
+    wait_for(" Message declass ");
+    keys.write_all(b"Fix the export.\r").unwrap();
+    wait_for("no cloud model is set up");
+    // Still open, the message in view, and nothing recorded.
+    wait_for(" Message declass ");
+    wait_for("Fix the export.");
+    assert!(!e.ws.join(".declass/runs").exists(), "{}", shown());
+    keys.write_all(b"/quit\r").unwrap();
+    let status = child.wait().unwrap();
+    assert!(status.success(), "{status:?}\n{}", shown());
 }
 
 /// The workspace against the real frontier (`ZAI_API_KEY`), in hybrid mode

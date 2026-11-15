@@ -1161,11 +1161,15 @@ async fn local(c: &Config, online: bool) -> Vec<Check> {
                     "local endpoint",
                     Status::Warn,
                     format!(
-                        "not configured (default {url}); `declass run` will look for a server on loopback ports {:?} and ask before choosing among several",
-                        backends::loopback_ports()
+                        "not set up; `declass run` looks for a server on 127.0.0.1 port(s) {} and uses it for that run when it lists exactly one model",
+                        crate::setup::bootstrap_ports()
+                            .iter()
+                            .map(u16::to_string)
+                            .collect::<Vec<_>>()
+                            .join(", ")
                     ),
                 )
-                .fix("declass config preset <name> --model <id> --confirm   (`declass config preset` lists them)"),
+                .fix("declass setup   (or declass config preset <name> --model <id> --confirm)"),
             );
             true
         }
@@ -1242,9 +1246,12 @@ async fn local(c: &Config, online: bool) -> Vec<Check> {
         return out;
     }
     if unconfigured {
-        let found =
-            backends::discover_loopback(&backends::loopback_ports(), Duration::from_millis(1500))
-                .await;
+        // The ports a run would look at (`DECLASS_LOCAL_PORTS` changes them).
+        let found = backends::discover_loopback(
+            &crate::setup::bootstrap_ports(),
+            Duration::from_millis(1500),
+        )
+        .await;
         let names: Vec<String> = found
             .iter()
             .map(|s| {
@@ -1262,7 +1269,7 @@ async fn local(c: &Config, online: bool) -> Vec<Check> {
                 Status::Fail,
                 "no local server answered on the loopback preset ports",
             )
-            .fix("start one (Ollama, LM Studio, llama.cpp, vLLM, oMLX, mlx_lm.server), then `declass config preset <name>`")
+            .fix("start one (Ollama, LM Studio, llama.cpp, vLLM, oMLX, mlx_lm.server), then `declass setup`")
         } else {
             check(
                 "local server",

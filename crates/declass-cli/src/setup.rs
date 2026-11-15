@@ -561,7 +561,7 @@ pub async fn auto(cfg: &mut Config, options: AutoOptions) -> Result<i32> {
         let serving: Vec<_> = servers.iter().filter(|s| !s.models.is_empty()).collect();
         if serving.is_empty() {
             eprintln!(
-                "local: no model server found on loopback; start Ollama, LM Studio, llama.cpp, vLLM, oMLX, MLX, Jan, GPT4All, KoboldCpp, LocalAI or LiteLLM, then rerun setup"
+                "local: no model server found on loopback; start one ({SERVERS}), then rerun setup"
             );
         } else {
             let choices: Vec<(String, &Server, &str)> = serving
@@ -617,6 +617,16 @@ pub async fn auto(cfg: &mut Config, options: AutoOptions) -> Result<i32> {
         }
     }
     if changes.is_empty() {
+        // Nothing found and nothing configured is not a setup that succeeded.
+        let frontier = !crate::overrides::top_clearance_required(cfg)?;
+        if needs_first_run(cfg, frontier, cfg.bool("local.enabled")?)? {
+            eprintln!(
+                "Declass is not set up yet: export a provider's API key (`declass config preset` \
+lists the variables) or start a local model server, then run `declass setup` again; in a terminal, \
+`declass setup` also takes a pasted key or a server's address"
+            );
+            return Ok(1);
+        }
         eprintln!(
             "no settings to change; `declass doctor --online` checks the current configuration"
         );
@@ -664,22 +674,68 @@ pub fn frontier_ready(cfg: &Config) -> Result<bool> {
     if cfg.str("frontier.base_url")?.is_empty() || cfg.str("frontier.model")?.is_empty() {
         return Ok(false);
     }
+    Ok(credential_problem(cfg)?.is_none())
+}
+
+/// What keeps the configured frontier's credential from being used, said the
+/// way the operator fixes it: the ChatGPT plan is not signed in, the key
+/// `declass setup` saved is gone, or the key variable is not set here.
+fn credential_problem(cfg: &Config) -> Result<Option<String>> {
     if crate::chatgpt_plan(cfg)? {
-        return Ok(crate::plan_signed_in());
+        return Ok((!crate::plan_signed_in()).then(|| {
+            "the cloud model is paid for with your ChatGPT plan, and Declass is not signed in to \
+it: run `declass login chatgpt`"
+                .to_owned()
+        }));
     }
     if cfg.bool("frontier.api_key_saved")? {
-        return Ok(crate::saved_key_path("frontier")
-            .metadata()
-            .is_ok_and(|m| m.len() > 0));
+        let path = crate::saved_key_path("frontier");
+        return Ok((!path.metadata().is_ok_and(|m| m.len() > 0)).then(|| {
+            format!(
+                "the cloud model's key that `declass setup` saved is missing ({}): run `declass setup` to give it again",
+                path.display()
+            )
+        }));
     }
     let key_env = cfg.str("frontier.api_key_env")?;
-    Ok(key_env.is_empty() || key_present(&key_env))
+    Ok((!key_env.is_empty() && !key_present(&key_env)).then(|| {
+        format!(
+            "{key_env} is not set in this environment, and the cloud model's requests need it: \
+export it (Declass keeps only the variable's name), or run `declass setup` to give the key"
+        )
+    }))
+}
+
+/// Refuses a new run or session in a mode with a frontier when none can be
+/// used, before anything is probed or recorded: no cloud model is set up, or
+/// its credential is missing. `url` and `model` are the command line's
+/// `--frontier-url` and `--frontier-model`; an endpoint given there is used
+/// with whatever credential the first request finds.
+pub fn require_frontier(cfg: &Config, url: Option<&str>, model: Option<&str>) -> Result<()> {
+    let url = url.map_or_else(|| cfg.str("frontier.base_url"), |u| Ok(u.to_owned()))?;
+    let model = model.map_or_else(|| cfg.str("frontier.model"), |m| Ok(m.to_owned()))?;
+    anyhow::ensure!(
+        !url.is_empty() && !model.is_empty(),
+        "{}; `--mode local-only` uses only your local model",
+        crate::NO_FRONTIER
+    );
+    if url != cfg.str("frontier.base_url")? {
+        return Ok(());
+    }
+    match credential_problem(cfg)? {
+        Some(problem) => anyhow::bail!(problem),
+        None => Ok(()),
+    }
 }
 
 /// The owner chose a local model (there is no default).
 pub fn local_chosen(cfg: &Config) -> Result<bool> {
     Ok(!cfg.str("local.base_url")?.is_empty() && !cfg.str("local.model")?.is_empty())
 }
+
+/// The local servers setup and bootstrap look for, as advice names them.
+const SERVERS: &str =
+    "Ollama, LM Studio, llama.cpp, vLLM, oMLX, MLX, Jan, GPT4All, KoboldCpp, LocalAI or LiteLLM";
 
 /// The host port of the local SearXNG the `searxng` preset sets up.
 pub const SEARXNG_PORT: u16 = 8888;
@@ -829,8 +885,8 @@ pub async fn bootstrap(cfg: &Config) -> Result<Option<Bootstrap>, i32> {
         }
         Pick::Nothing => {
             eprintln!(
-                "\nno local model server answered. Start one (Ollama, LM Studio, llama.cpp, vLLM, oMLX, mlx_lm.server), \
-or point Declass at yours:\n  declass config preset            # list backends and their default ports\n  \
+                "\nno local model server answered. Start one ({SERVERS}), then choose its model with \
+`declass setup`, or point Declass at yours:\n  declass config preset            # list backends and their default ports\n  \
 declass config preset <name> --model <id> --confirm\n  declass config set local.base_url '\"http://127.0.0.1:<port>/v1\"' --confirm"
             );
             Err(2)

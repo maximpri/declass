@@ -2,8 +2,8 @@
 //! `declass doctor`, `declass config preset` and the no-config bootstrap through the
 //! binary, against a scripted loopback server. No test calls a real model: the
 //! scripted servers answer model listings and, for the online cache check, a
-//! canned stream; the one run that starts stops at the missing frontier key
-//! before any request.
+//! canned stream; the runs that start stop at a refused endpoint before any
+//! request, and a run without a usable frontier is refused before it starts.
 
 use declass_boundary::audit::{AuditEvent, AuditLog, Verification, run_anchors, verify};
 use declass_provider::mock_http::MockServer;
@@ -541,6 +541,9 @@ fn a_preset_goes_through_the_audited_loosening_path() {
 #[test]
 fn bootstrap_asks_when_the_choice_is_ambiguous_or_empty() {
     let e = env();
+    // A cloud model is set up (a closed loopback port); a local model is not.
+    let frontier = "[frontier]\nbase_url = \"http://127.0.0.1:9/v1\"\nmodel = \"m\"\n";
+    owner_config(&e, frontier);
     let two = MockServer::start(&[("GET /v1/models", 200, r#"{"data":[{"id":"a"},{"id":"b"}]}"#)]);
     let port = two.port.to_string();
     let o = declass_with(&e, &["run", "task"], &[("DECLASS_LOCAL_PORTS", &port)]);
@@ -557,8 +560,9 @@ fn bootstrap_asks_when_the_choice_is_ambiguous_or_empty() {
     ] {
         assert!(out.contains(shown), "{shown}: {out}");
     }
-    assert!(
-        !e.home.join("config.toml").exists(),
+    assert_eq!(
+        std::fs::read_to_string(e.home.join("config.toml")).unwrap(),
+        frontier,
         "bootstrap wrote config"
     );
     assert!(!e.ws.join(".declass").exists(), "a run started");
@@ -572,9 +576,13 @@ fn bootstrap_asks_when_the_choice_is_ambiguous_or_empty() {
     let o = declass_with(&e, &["run", "task"], &[("DECLASS_LOCAL_PORTS", &closed)]);
     assert_eq!(o.status.code(), Some(2));
     assert!(text(&o).contains("declass config preset"), "{}", text(&o));
+    assert!(text(&o).contains("`declass setup`"), "{}", text(&o));
 
     // A configured endpoint is used as configured: no probing.
-    owner_config(&e, "[local]\nbase_url = \"http://192.0.2.1:9/v1\"\n");
+    owner_config(
+        &e,
+        &format!("{frontier}[local]\nbase_url = \"http://192.0.2.1:9/v1\"\n"),
+    );
     let o = declass_with(&e, &["run", "task"], &[("DECLASS_LOCAL_PORTS", &port)]);
     assert!(
         !text(&o).contains("looking for a local server"),
@@ -584,12 +592,90 @@ fn bootstrap_asks_when_the_choice_is_ambiguous_or_empty() {
 }
 
 #[test]
+fn without_a_usable_cloud_model_nothing_is_probed_or_recorded() {
+    let e = env();
+    // Where bootstrap would find a local server.
+    let trap = MockServer::start(&[("GET /v1/models", 200, r#"{"data":[{"id":"solo"}]}"#)]);
+    let port = trap.port.to_string();
+    let vars = [("DECLASS_LOCAL_PORTS", port.as_str())];
+    // A fresh install: one message says what to do, for a run and a session
+    // without a terminal alike.
+    for args in [&["run", "task"][..], &["task"]] {
+        let o = declass_with(&e, args, &vars);
+        let out = text(&o);
+        assert_eq!(o.status.code(), Some(1), "{out}");
+        assert!(
+            out.contains("no cloud model is set up: run `declass setup`"),
+            "{out}"
+        );
+        assert!(out.contains("`--mode local-only`"), "{out}");
+        assert!(!out.contains("looking for a local server"), "{out}");
+    }
+    // A cloud model whose key variable this environment does not set.
+    owner_config(
+        &e,
+        "[frontier]\nbase_url = \"http://127.0.0.1:9/v1\"\nmodel = \"m\"\napi_key_env = \"DECLASS_TEST_UNSET_FRONTIER_KEY\"\n",
+    );
+    let o = declass_with(&e, &["run", "task"], &vars);
+    assert_eq!(o.status.code(), Some(1), "{}", text(&o));
+    assert!(
+        text(&o).contains("DECLASS_TEST_UNSET_FRONTIER_KEY is not set in this environment"),
+        "{}",
+        text(&o)
+    );
+    assert!(trap.seen().is_empty(), "{:?}", trap.seen());
+    assert!(!e.ws.join(".declass").exists(), "a run was recorded");
+}
+
+#[test]
+fn a_setup_that_finds_nothing_says_so_and_fails() {
+    let e = env();
+    let closed = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
+        .to_string();
+    // No provider key in the environment (an empty variable is none), no local server.
+    let mut vars = vec![("DECLASS_LOCAL_PORTS", closed.as_str())];
+    for key in [
+        "ANTHROPIC_API_KEY",
+        "OPENAI_API_KEY",
+        "GEMINI_API_KEY",
+        "OPENROUTER_API_KEY",
+        "DEEPSEEK_API_KEY",
+        "XAI_API_KEY",
+        "MISTRAL_API_KEY",
+        "GROQ_API_KEY",
+        "CEREBRAS_API_KEY",
+        "TOGETHER_API_KEY",
+        "FIREWORKS_API_KEY",
+        "DASHSCOPE_API_KEY",
+    ] {
+        vars.push((key, ""));
+    }
+    let o = declass_with(&e, &["setup", "--yes"], &vars);
+    assert_eq!(o.status.code(), Some(1), "{}", text(&o));
+    assert!(
+        text(&o).contains("Declass is not set up yet"),
+        "{}",
+        text(&o)
+    );
+    assert!(!text(&o).contains("no settings to change"), "{}", text(&o));
+    assert!(!e.home.join("config.toml").exists());
+}
+
+#[test]
 fn bootstrap_uses_a_single_server_for_this_run_only() {
     let e = env();
     let one = MockServer::start(&[("GET /v1/models", 200, r#"{"data":[{"id":"solo"}]}"#)]);
-    // The frontier is a closed loopback port and has no key: the run fails
+    // The frontier's address has a query string, which no model endpoint may
+    // have: the run stops when it builds the frontier, after bootstrap and
     // before any request.
-    owner_config(&e, "[frontier]\nbase_url = \"http://127.0.0.1:9/v1\"\n");
+    owner_config(
+        &e,
+        "[frontier]\nbase_url = \"http://127.0.0.1:9/v1?refused\"\nmodel = \"m\"\n",
+    );
     let port = one.port.to_string();
     let o = declass_with(&e, &["run", "task"], &[("DECLASS_LOCAL_PORTS", &port)]);
     let out = text(&o);
@@ -598,6 +684,12 @@ fn bootstrap_uses_a_single_server_for_this_run_only() {
             "using solo at {} for this run only",
             one.base_url()
         )),
+        "{out}"
+    );
+    // Stopped for that reason, and only there.
+    assert!(!o.status.success(), "{out}");
+    assert!(
+        out.contains("model endpoint must be HTTP(S), without URL credentials, query or fragment"),
         "{out}"
     );
     let owner = std::fs::read_to_string(e.home.join("config.toml")).unwrap();

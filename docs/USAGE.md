@@ -981,8 +981,10 @@ offer (saying so, and recording it in the run). With several, or none, it prints
 does that, through the same `--confirm` and audit path as any endpoint change.
 
 **Setup screen.** Declass has no default models: `frontier.*` and `local.*` start empty, and a
-run without them stops with "no cloud model is set up". The first `declass` in a terminal opens the
-setup screen (so does `declass setup` without options): it lists the cloud providers, marking those
+run or session without a cloud model stops with "no cloud model is set up" before it looks for a
+local server or records anything (so does one whose key variable is not set, naming it). The first
+`declass` in a terminal opens the setup screen (so does `declass setup` without options): it lists
+the cloud providers, marking those
 whose API key is in your environment and offering a ChatGPT plan sign-in in the browser, then the
 models on servers it finds on this machine, or a server at an address you type (a non-loopback host
 and plain HTTP are each confirmed separately before it is contacted). Where a key is asked for,

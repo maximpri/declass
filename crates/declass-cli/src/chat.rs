@@ -1090,6 +1090,25 @@ Add --no-privacy to confirm, or use --mode hybrid."
                     screen.line(&declass_tui::term::safe(&format!("{error:#}")));
                     continue;
                 }
+                // A frontier that cannot be used is said once there is work
+                // for it, before a local server is probed or the session is
+                // recorded (commands such as /privacy need none). At a
+                // terminal the session stays open, its message in view;
+                // without one nobody can answer, so it ends with the error
+                // and a failing exit code.
+                if mode != Mode::TopClearance
+                    && let Err(error) = crate::setup::require_frontier(
+                        &cfg,
+                        args.frontier_url.as_deref(),
+                        args.frontier_model.as_deref(),
+                    )
+                {
+                    if !tty {
+                        return Err(error);
+                    }
+                    screen.line(&declass_tui::term::safe(&format!("{error:#}")));
+                    continue;
+                }
                 // Setting up prints freely.
                 screen.hide();
                 // With the local model off nothing is probed for one.
@@ -1145,7 +1164,7 @@ Add --no-privacy to confirm, or use --mode hybrid."
                 false,
             );
         }
-        eprintln!("session {} ({:?})", manifest.run_id, manifest.mode);
+        eprintln!("session {} ({})", manifest.run_id, manifest.mode.as_str());
         let lock = declass_fs::lock::WorkspaceLock::acquire(&ws)?;
         let run_dir = ws.join(".declass/runs").join(&manifest.run_id);
         declass_fs::private::ensure_private_dir(&run_dir)?;

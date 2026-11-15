@@ -1624,19 +1624,24 @@ Add --no-privacy to confirm, or use --mode hybrid."
             approve::require_terminal(&cfg)?;
             let attached = images::from_args(&image, &image_public)?;
             images::precheck(&ws, &cfg, mode, &attached)?;
+            let with_local = mode != Mode::Passthrough && local_enabled(&cfg, mode)?;
+            // A frontier that cannot be used is said before a local server is
+            // probed or the run is recorded.
+            if mode != Mode::TopClearance {
+                setup::require_frontier(&cfg, frontier_url.as_deref(), frontier_model.as_deref())?;
+            }
             // With the local model off nothing is probed for one.
-            let local = match mode {
-                Mode::Hybrid | Mode::TopClearance if local_enabled(&cfg, mode)? => {
-                    match setup::bootstrap(&cfg).await {
-                        Ok(found) => found.map(|b| LocalOverride {
-                            base_url: b.base_url,
-                            model: b.model,
-                            api_key_env: b.api_key_env,
-                        }),
-                        Err(code) => return Ok(code),
-                    }
+            let local = if with_local {
+                match setup::bootstrap(&cfg).await {
+                    Ok(found) => found.map(|b| LocalOverride {
+                        base_url: b.base_url,
+                        model: b.model,
+                        api_key_env: b.api_key_env,
+                    }),
+                    Err(code) => return Ok(code),
                 }
-                _ => None,
+            } else {
+                None
             };
             let manifest = RunManifest {
                 run_id: new_run_id(),
@@ -1652,7 +1657,7 @@ Add --no-privacy to confirm, or use --mode hybrid."
                 files: Vec::new(),
             };
             overrides::check(&cfg, &manifest)?;
-            eprintln!("run {} ({:?})", manifest.run_id, manifest.mode);
+            eprintln!("run {} ({})", manifest.run_id, manifest.mode.as_str());
             execute(ws, manifest, false, quiet, emb).await
         }
         Cmd::Resume { run_id, quiet } => {
