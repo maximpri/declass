@@ -1897,6 +1897,17 @@ mod sensitive_command_tests {
         }
     }
 
+    /// A temporary folder sandboxed commands can see. bubblewrap gives every
+    /// command an empty `/tmp`, so what is kept under it is out of every
+    /// command's reach, whatever the command may read.
+    fn visible_tempdir() -> tempfile::TempDir {
+        if cfg!(target_os = "linux") {
+            tempfile::tempdir_in("/var/tmp").unwrap()
+        } else {
+            tempfile::tempdir().unwrap()
+        }
+    }
+
     #[tokio::test]
     async fn commands_cannot_read_history_kept_outside_the_workspace() {
         // The workspace is the folder declass was started in. In a linked
@@ -1904,7 +1915,9 @@ mod sensitive_command_tests {
         // clone that borrows another repository's objects (`--shared`), or
         // under a `.git` link, the history holding committed copies of its
         // files is outside it, where no walk of the workspace finds it.
-        let d = tempfile::tempdir().unwrap();
+        // Under `/tmp` on Linux the history would be out of every command's
+        // reach (the control below fails there), and the deny list untested.
+        let d = visible_tempdir();
         let root = d.path().canonicalize().unwrap();
         let (main, other) = (root.join("main"), root.join("other"));
         std::fs::create_dir_all(main.join("app/data")).unwrap();
