@@ -767,16 +767,13 @@ pub fn bwrap_args(spec: &Spec, reserved: &[Reserved], stubs: &DenyStubs) -> Vec<
             push_bind(&mut a, "--ro-bind", source, &target);
         }
     }
-    for p in &spec.deny_read {
-        let Ok(target) = p.canonicalize() else {
-            continue;
-        };
+    for target in &stand_in_targets(&spec.deny_read) {
         let stub = if target.is_dir() {
             &stubs.dir
         } else {
             &stubs.file
         };
-        push_bind(&mut a, "--ro-bind", stub, &target);
+        push_bind(&mut a, "--ro-bind", stub, target);
     }
     push_bind(&mut a, "--bind", &spec.scratch, &spec.scratch);
     if let Network::Proxy(ProxyRoute::Bridge { helper, .. }) = &spec.network
@@ -796,6 +793,23 @@ pub fn bwrap_args(spec: &Spec, reserved: &[Reserved], stubs: &DenyStubs) -> Vec<
         a.push(OsString::from("--share-net"));
     }
     a
+}
+
+/// The paths `deny` covers with stand-ins, resolved, each once, and none
+/// inside another: a path under a denied folder is out of reach already, and
+/// bubblewrap cannot make a mount point inside a read-only stand-in (a
+/// sensitive file in a denied folder, a linked worktree's git folder inside
+/// a hidden `.git`), so it would refuse to start.
+fn stand_in_targets(deny: &[PathBuf]) -> Vec<PathBuf> {
+    let resolved: Vec<PathBuf> = deny.iter().filter_map(|p| p.canonicalize().ok()).collect();
+    let mut out: Vec<PathBuf> = Vec::new();
+    for t in &resolved {
+        let covered = resolved.iter().any(|o| o != t && t.starts_with(o));
+        if !covered && !out.contains(t) {
+            out.push(t.clone());
+        }
+    }
+    out
 }
 
 /// The seccomp filter bubblewrap installs unless the network is unrestricted
@@ -1923,12 +1937,16 @@ mod tests {
         for secret in ["Qx7p", "8977066", "PRIVATE-4471", "7730"] {
             assert!(!all.contains(secret), "{secret} readable: {all}");
         }
-        for (rel, text) in secrets {
-            assert_eq!(
-                std::fs::read_to_string(ws.join(rel)).unwrap(),
-                text,
-                "{rel}"
-            );
+        // Seatbelt keeps them in place; under bubblewrap a stand-in follows
+        // its folder when that moves, so the content stays out of reach there.
+        if cfg!(target_os = "macos") {
+            for (rel, text) in secrets {
+                assert_eq!(
+                    std::fs::read_to_string(ws.join(rel)).unwrap(),
+                    text,
+                    "{rel}"
+                );
+            }
         }
         // Other files may still be moved and, under Seatbelt, files created in
         // a denied directory (bubblewrap covers it with an unwritable stand-in).
@@ -1974,11 +1992,43 @@ mod tests {
                 let mode = std::fs::metadata(ws.join(".env")).unwrap().permissions();
                 assert_ne!(mode.mode() & 0o777, 0, "a denied file's mode changed");
             }
-            assert!(ws.join(".declass/runs/r1/vault.json").is_file(), "{all}");
-            assert!(s.scratch.is_dir() && !ws.join("s").exists(), "{all}");
+            // Seatbelt refuses the moves; under bubblewrap the mount points
+            // refuse or keep their stand-ins, and only reading is asserted.
+            if cfg!(target_os = "macos") {
+                assert!(ws.join(".declass/runs/r1/vault.json").is_file(), "{all}");
+                assert!(s.scratch.is_dir() && !ws.join("s").exists(), "{all}");
+            }
             // A folder above nothing denied may move; run state stays unreadable there.
             let _ = std::fs::rename(s.scratch.join("s"), ws.join("sub"));
         }
+    }
+
+    #[test]
+    fn stand_ins_are_never_placed_inside_another() {
+        // A sensitive file in a denied folder, a linked worktree's git folder
+        // in a hidden `.git`: bubblewrap refused to start with both covered.
+        let d = tempfile::tempdir().unwrap();
+        let r = d.path().canonicalize().unwrap();
+        for p in ["ws/data", "main/.git/worktrees/wt"] {
+            std::fs::create_dir_all(r.join(p)).unwrap();
+        }
+        for f in ["ws/data/customers.csv", "ws/.env"] {
+            std::fs::write(r.join(f), "x").unwrap();
+        }
+        let deny = [
+            "ws/data/customers.csv",
+            "ws/data",
+            "main/.git/worktrees/wt",
+            "main/.git",
+            "ws/.env",
+            "ws/.env",
+            "missing",
+        ]
+        .map(|p| r.join(p));
+        assert_eq!(
+            stand_in_targets(&deny),
+            vec![r.join("ws/data"), r.join("main/.git"), r.join("ws/.env")]
+        );
     }
 
     #[tokio::test]
