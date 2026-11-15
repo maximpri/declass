@@ -396,7 +396,8 @@ everything said and done so far.
   Local questions show the handle, source path when available, every question and the filtered
   answer, with a redaction count. Reads show requested line ranges; long commands remain visible
   in full. The journal also shows every
-  edit with its diff (a sensitive file is named, never shown), what the boundary withheld (`◦`), and
+  edit with its diff (a sensitive or protected file is named, never shown, however the path is
+  spelled), what the boundary withheld (`◦`), and
   how each turn ended (`✓ done`, a question, a stop). While declass works a line under the conversation
   shows the turn's time, its frontier requests so far and what runs now. It follows new output; PgUp/PgDn or the
   mouse wheel scroll back (it stays put and shows how many rows are below; Ctrl-End on empty input returns).
@@ -624,9 +625,14 @@ standard error, which editors show among their logs.
   directory or missing from it, links, images and audio. The agent says what it did not use, and
   nothing of it is sent.
 - **What you see.** Replies stream in with placeholders restored, as in the workspace. Each tool
-  call shows its arguments and its result as the frontier saw it; an edit shows its diff (a file
-  that is sensitive by policy is named, never shown). What the boundary withheld from a request
-  shows as a "privacy filtering" entry.
+  call shows its arguments and its result as the frontier saw it; an edit shows its diff. A file
+  Declass keeps from the cloud model (sensitive by policy or derived from sensitive data, or
+  protected source) is named, never shown, however the path is spelled, and the editor is not
+  given its place to open. What the boundary withheld from a request shows as a "privacy
+  filtering" entry. What a terminal session tells you on its log is in the thread too: files
+  Declass could not index or found to hold real data, extensions that differ from their pins, and
+  after a turn the files it changed that another tool runs later (a command's are not asked
+  about), to review before that tool runs.
 - **Approvals.** What `declass` asks at a terminal (`oversight.approve`, commits under
   `git.commit = "ask"`, files another tool runs later) the editor asks in its permission dialog,
   with Allow once and Reject. Anything else denies: rejecting, closing the dialog, stopping the

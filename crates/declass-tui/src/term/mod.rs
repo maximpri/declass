@@ -11,6 +11,7 @@
 
 pub mod editor;
 pub mod feed;
+pub mod held;
 pub mod markdown;
 pub mod stream;
 pub mod words;

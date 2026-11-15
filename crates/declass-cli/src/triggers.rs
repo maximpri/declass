@@ -22,8 +22,13 @@ pub(crate) struct Changed {
 
 /// The files the run whose audit log is `log` changed, by path.
 pub(crate) fn changed_in(log: &Path) -> Vec<Changed> {
+    changed(read(log).unwrap_or_default())
+}
+
+/// The files the events among `lines` changed, by path.
+fn changed(lines: impl IntoIterator<Item = Line>) -> Vec<Changed> {
     let mut by_path = BTreeMap::new();
-    for line in read(log).unwrap_or_default() {
+    for line in lines {
         if let Line::Event(e) = line
             && let AuditEvent::TriggerWritten {
                 path,
@@ -49,15 +54,31 @@ pub(crate) fn changed_in(log: &Path) -> Vec<Changed> {
 
 /// The lines to show when a run ends (none when it changed no such file).
 pub(crate) fn report(log: &Path) -> Vec<String> {
-    let changed = changed_in(log);
+    lines(&changed_in(log), "This run")
+}
+
+/// How far the run's audit log `log` goes now, for [`report_since`].
+pub(crate) fn mark(log: &Path) -> usize {
+    read(log).map_or(0, |lines| lines.len())
+}
+
+/// The lines telling the operator of the files the events of `log` after
+/// `mark` changed, `what` having changed them ("This turn": an editor's
+/// thread is told after each turn).
+pub(crate) fn report_since(log: &Path, mark: usize, what: &str) -> Vec<String> {
+    let after = read(log).unwrap_or_default().into_iter().skip(mark);
+    lines(&changed(after), what)
+}
+
+fn lines(changed: &[Changed], what: &str) -> Vec<String> {
     if changed.is_empty() {
         return Vec::new();
     }
     let mut lines = vec![format!(
-        "This run changed {} file(s) that another tool runs later; review them before it does:",
+        "{what} changed {} file(s) that another tool runs later; review them before it does:",
         changed.len()
     )];
-    for c in &changed {
+    for c in changed {
         lines.push(format!(
             "  {}{}  ({}; written by {})",
             c.path,

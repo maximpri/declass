@@ -986,8 +986,13 @@ impl Front for Editor {
             self.session.clone(),
             open.ws.to_path_buf(),
             open.shown.clone(),
-            crate::policy(open.cfg)?,
+            open.held.clone(),
         )));
+        // What the session's start told the operator on standard error (an
+        // editor keeps that in its log): in the thread as well.
+        for notice in open.notices {
+            lock(&updates).paragraph(&format!("**Declass:** {notice}"));
+        }
         *lock(&self.flags.steering) = Some(session.steering());
         let mut next = self.first.take();
         loop {
@@ -1069,12 +1074,22 @@ impl Editor {
         if message.is_empty() {
             return Ok(StopReason::EndTurn);
         }
+        let log = crate::audit_log_path(open.ws, &open.manifest.run_id);
+        let mark = crate::triggers::mark(&log);
         let end = self
             .turn(session, open, updates, &message, prompt.number)
             .await;
         let cancelled = self.flags.cancelled(prompt.number);
         let mut shown = lock(updates);
         shown.end(&end, cancelled);
+        // Files another tool runs later that this turn changed: a command's
+        // writes are not asked about, so this is the operator's notice (a
+        // terminal session lists them when it ends, on standard error).
+        let changed = crate::triggers::report_since(&log, mark, "This turn");
+        if let Some((head, files)) = changed.split_first() {
+            let files: Vec<String> = files.iter().map(|f| format!("- {}", f.trim())).collect();
+            shown.paragraph(&format!("**Declass:** {head}\n\n{}", files.join("\n")));
+        }
         if let Some(which) = session.spent() {
             shown.paragraph(&format!(
                 "The session limit {which} is reached; no further turn can start. Raise it, then \

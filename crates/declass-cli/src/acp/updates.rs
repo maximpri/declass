@@ -4,10 +4,13 @@
 //! the rules the workspace follows on the operator's screen
 //! (`declass_tui::workspace::cells`): declass's text and a tool call's
 //! arguments with placeholders restored; a tool's result as the frontier saw
-//! it (placeholders kept); an edit with its diff, except in a file the policy
-//! makes sensitive, which is named only; what the boundary withheld, and how
-//! the turn ended. Nothing else reaches the editor: not the vault, not a
-//! handle's content, not what the local model read.
+//! it (placeholders kept); an edit with its diff, except in a file the
+//! boundary holds back (`declass_tui::term::held`: sensitive by policy or
+//! derived from sensitive data, or protected source, judged on the path as
+//! the tools open it), which is named only and whose place is not sent;
+//! what the boundary withheld, and how the turn ended. Nothing else reaches
+//! the editor: not the vault, not a handle's content, not what the local
+//! model read.
 
 use super::schema::{
     Content, Location, SessionNotification, SessionUpdate, ToolCall, ToolCallUpdate, ToolContent,
@@ -20,10 +23,10 @@ use declass_agent::questions::QuestionOptions;
 use declass_agent::transcript::Entry;
 use declass_boundary::live::StreamEvent;
 use declass_boundary::model::{Item, ToolCall as Call};
-use declass_boundary::policy::Policy;
 use declass_boundary::vault::OPEN;
 use declass_boundary::view::ViewClass;
 use declass_tui::term::feed::Restore;
+use declass_tui::term::held::Held;
 use declass_tui::term::safe;
 use declass_tui::term::stream::{Detok, FieldReader};
 use declass_tui::term::words::{describe_end, progress};
@@ -169,9 +172,14 @@ struct Block {
 
 #[derive(Default)]
 struct Stream {
-    /// The current response's tool calls; `reply` and `ask_operator` are read
-    /// out of their arguments as they arrive.
-    calls: HashMap<usize, Option<FieldReader>>,
+    /// The current response's tool calls by index: each one's name, and for
+    /// `reply` and `ask_operator` what is read out of their arguments as
+    /// they arrive.
+    calls: HashMap<usize, (String, Option<FieldReader>)>,
+    /// A reply streaming after the response's own text, held while it only
+    /// repeats that text (some models write their answer both ways): the
+    /// call's index and what it said so far.
+    echo: Option<(usize, String)>,
     block: Option<Block>,
     /// The last block of the turn, restored, to compare with how it ended.
     last: Option<String>,
@@ -191,7 +199,8 @@ pub(crate) struct Updates {
     session: String,
     ws: PathBuf,
     restore: Restore,
-    policy: Policy,
+    /// Files named only, never shown or located (the session's boundary).
+    held: Held,
     cards: VecDeque<Card>,
     stream: Stream,
     notes: VecDeque<String>,
@@ -204,14 +213,14 @@ impl Updates {
         session: String,
         ws: PathBuf,
         restore: Restore,
-        policy: Policy,
+        held: Held,
     ) -> Self {
         Self {
             wire,
             session,
             ws,
             restore,
-            policy,
+            held,
             cards: VecDeque::new(),
             stream: Stream::default(),
             notes: VecDeque::new(),
@@ -261,6 +270,7 @@ impl Updates {
                     self.paragraph("*(the response was cut off; it starts again)*");
                 }
                 self.stream.calls.clear();
+                self.stream.echo = None;
                 self.stream.response_text = false;
                 self.stream.shown = false;
             }
@@ -272,24 +282,81 @@ impl Updates {
                     "ask_operator" => Some("question"),
                     _ => None,
                 };
-                self.stream.calls.insert(index, field.map(FieldReader::new));
+                self.stream
+                    .calls
+                    .insert(index, (name.to_owned(), field.map(FieldReader::new)));
             }
             StreamEvent::Arguments { index, delta } => {
                 let text = self
                     .stream
                     .calls
                     .get_mut(&index)
-                    .and_then(Option::as_mut)
+                    .and_then(|(_, r)| r.as_mut())
                     .map(|r| r.push(delta));
                 if let Some(text) = text {
                     self.show(Source::Call(index), &text);
                 }
             }
-            StreamEvent::End => self.close_block(),
+            StreamEvent::End => {
+                self.close_block();
+                self.close_echo();
+            }
         }
     }
 
     fn show(&mut self, source: Source, text: &str) {
+        if self
+            .stream
+            .block
+            .as_ref()
+            .is_some_and(|b| b.source != source)
+        {
+            self.close_block();
+        }
+        if let Source::Call(i) = source
+            && self.stream.block.is_none()
+            && self.stream.response_text
+            && self
+                .stream
+                .calls
+                .get(&i)
+                .is_some_and(|(name, _)| name == "reply")
+        {
+            // A reply after the response's own text: held while it only
+            // repeats it.
+            let held = match &mut self.stream.echo {
+                Some((j, held)) if *j == i => held,
+                other => &mut other.insert((i, String::new())).1,
+            };
+            held.push_str(text);
+            let said = (self.restore)(held);
+            if starts_alike(self.stream.last.as_deref().unwrap_or(""), &said) {
+                return;
+            }
+            // It says more: shown, from its start.
+            let (_, held) = self.stream.echo.take().expect("held above");
+            self.show_now(source, &held);
+            return;
+        }
+        self.show_now(source, text);
+    }
+
+    /// A held reply that ended: dropped when it says what the response's text
+    /// said (the same words, as the turn's end compares them), else shown
+    /// whole, a reply that says only the first of those words too.
+    fn close_echo(&mut self) {
+        let Some((i, held)) = self.stream.echo.take() else {
+            return;
+        };
+        let shown = self.stream.last.as_deref().unwrap_or("");
+        if same(shown, &(self.restore)(&held)) {
+            return;
+        }
+        self.show_now(Source::Call(i), &held);
+        self.close_block();
+    }
+
+    fn show_now(&mut self, source: Source, text: &str) {
         if self
             .stream
             .block
@@ -344,6 +411,7 @@ impl Updates {
                     text, tool_calls, ..
                 },
             } => {
+                self.close_echo();
                 let streamed = std::mem::take(&mut self.stream.response_text);
                 let narrates = tool_calls.iter().any(|c| !to_operator(&c.name));
                 if !streamed && narrates && !text.trim().is_empty() {
@@ -530,6 +598,8 @@ impl Updates {
         {
             card.lines.push(format!("Question: {}", bounded(q)));
         }
+        // A file's place lets an editor that follows the agent open it: never
+        // one the boundary holds back.
         let mut locations = Vec::new();
         if matches!(
             c.name.as_str(),
@@ -538,6 +608,7 @@ impl Updates {
             .arguments
             .get("path")
             .and_then(Value::as_str)
+            .filter(|p| !(self.held)(p))
             .and_then(|p| self.located(p))
         {
             let line = c.arguments.get("start_line").and_then(Value::as_u64);
@@ -546,8 +617,8 @@ impl Updates {
         self.announce(card, kind(&c.name), locations);
     }
 
-    /// A write or an edit: its diff with placeholders restored, or for a
-    /// file the policy makes sensitive only its name.
+    /// A write or an edit: its diff with placeholders restored and its
+    /// place, or for a file the boundary holds back only its name.
     fn edit(&self, c: &Call) -> (Card, Vec<Location>) {
         let raw = c
             .arguments
@@ -565,6 +636,10 @@ impl Updates {
                 .to_owned(),
             ToolStatus::Pending,
         );
+        if (self.held)(raw) {
+            card.tags.push("sensitive: content not shown".into());
+            return (card, Vec::new());
+        }
         let located = self.located(raw);
         let locations = located
             .iter()
@@ -573,10 +648,6 @@ impl Updates {
                 line: None,
             })
             .collect();
-        if self.policy.is_sensitive_path(Path::new(&path)) {
-            card.tags.push("sensitive: content not shown".into());
-            return (card, locations);
-        }
         let restore = |t: &str| safe(&(self.restore)(t));
         let (mut added, mut removed) = (0, 0);
         let mut pairs: Vec<(Option<String>, String)> = Vec::new();
@@ -830,6 +901,7 @@ impl Updates {
     /// editor's own).
     pub(crate) fn end(&mut self, end: &TurnEnd, cancelled: bool) {
         self.close_block();
+        self.close_echo();
         let streamed = self.stream.last.take();
         let open: Vec<String> = self
             .cards
@@ -974,6 +1046,13 @@ fn same(a: &str, b: &str) -> bool {
     a.split_whitespace().eq(b.split_whitespace())
 }
 
+/// Whether `said` (still arriving, perhaps mid-word) is so far how `shown`
+/// starts, spacing aside.
+fn starts_alike(shown: &str, said: &str) -> bool {
+    let squash = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+    squash(shown).starts_with(&squash(said))
+}
+
 /// What `full` says after `start`, if it starts with it.
 fn after<'a>(full: &'a str, start: &str) -> Option<&'a str> {
     full.trim_start().strip_prefix(start.trim())
@@ -983,6 +1062,7 @@ fn after<'a>(full: &'a str, start: &str) -> Option<&'a str> {
 mod tests {
     use super::*;
     use declass_agent::Terminal;
+    use declass_boundary::policy::Policy;
     use serde_json::json;
     use std::io::Write;
     use std::sync::Mutex;
@@ -1001,15 +1081,25 @@ mod tests {
         }
     }
 
+    /// Updates for the workspace `/w`, where `.env*` is held (as written:
+    /// how a path is resolved is `declass_tui::term::held`'s, tested there
+    /// and in `a_sensitive_file_under_another_spelling_is_named_only`).
     fn updates() -> (Updates, Arc<Mutex<Vec<u8>>>) {
-        let out = Arc::new(Mutex::new(Vec::new()));
-        let wire = Arc::new(Wire::new(Sink(out.clone())));
-        let restore: Restore = Arc::new(|t: &str| t.replace(TOKEN, VALUE));
         let policy = Policy {
             sensitive_globs: vec![".env*".into()],
             ..Policy::default()
         };
-        let u = Updates::new(wire, "s1".into(), PathBuf::from("/w"), restore, policy);
+        updates_in(
+            PathBuf::from("/w"),
+            Arc::new(move |p: &str| policy.is_sensitive_path(Path::new(p))),
+        )
+    }
+
+    fn updates_in(ws: PathBuf, held: Held) -> (Updates, Arc<Mutex<Vec<u8>>>) {
+        let out = Arc::new(Mutex::new(Vec::new()));
+        let wire = Arc::new(Wire::new(Sink(out.clone())));
+        let restore: Restore = Arc::new(|t: &str| t.replace(TOKEN, VALUE));
+        let u = Updates::new(wire, "s1".into(), ws, restore, held);
         (u, out)
     }
 
@@ -1176,6 +1266,155 @@ mod tests {
         // The whole command as written: the placeholder kept.
         let body = card["content"][0]["content"]["text"].as_str().unwrap();
         assert!(body.contains(TOKEN) && !body.contains(VALUE), "{body}");
+    }
+
+    /// A sensitive file the frontier names under another spelling the file
+    /// tools accept (`./`, letter case where the file system ignores it, or
+    /// folded where it does not) is named only: neither its content with the
+    /// values restored nor its place reaches the editor.
+    #[test]
+    fn a_sensitive_file_under_another_spelling_is_named_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path().canonicalize().unwrap();
+        std::fs::create_dir_all(ws.join("data")).unwrap();
+        std::fs::write(ws.join("data/customers.csv"), "").unwrap();
+        std::fs::write(ws.join(".env"), "").unwrap();
+        let policy = Policy {
+            sensitive_globs: vec![".env*".into(), "data/**".into()],
+            ..Policy::default()
+        };
+        let held = declass_tui::term::held::held(ws.clone(), move |p| policy.is_sensitive_path(p));
+        let (mut u, out) = updates_in(ws, held);
+        u.entry(&assistant(
+            "",
+            vec![
+                call(
+                    "c1",
+                    "write_file",
+                    json!({"path": "./data/customers.csv", "content": format!("id,email\n1,{TOKEN}\n")}),
+                ),
+                call(
+                    "c2",
+                    "write_file",
+                    json!({"path": ".ENV", "content": format!("KEY={TOKEN}\n")}),
+                ),
+                call(
+                    "c3",
+                    "edit_file",
+                    json!({"path": "DATA/customers.csv", "edits": [{"old": "1,x", "new": format!("1,{TOKEN}")}]}),
+                ),
+                call(
+                    "c4",
+                    "write_file",
+                    json!({"path": "data/customers.csv", "content": format!("1,{TOKEN}\n")}),
+                ),
+                call("c5", "read_file", json!({"path": "./data/customers.csv"})),
+            ],
+        ));
+        let sent = sent(&out);
+        for up in &sent {
+            assert!(
+                !up.to_string().contains(VALUE),
+                "restored values of a sensitive file reached the editor: {up}"
+            );
+            assert!(up.get("locations").is_none(), "{up}");
+        }
+        let cards: Vec<&Value> = sent
+            .iter()
+            .filter(|u| u["sessionUpdate"] == "tool_call")
+            .collect();
+        assert_eq!(cards.len(), 5, "{sent:?}");
+        for up in &cards[..4] {
+            assert!(
+                up["title"]
+                    .as_str()
+                    .unwrap()
+                    .ends_with("sensitive: content not shown"),
+                "{up}"
+            );
+            assert!(up.get("content").is_none(), "{up}");
+        }
+    }
+
+    /// A model that writes its answer as text and again as a `reply` call:
+    /// the reply is held while it only repeats the text, and dropped, as the
+    /// workspace drops it.
+    #[test]
+    fn a_reply_that_repeats_the_text_is_shown_once() {
+        let (mut u, out) = updates();
+        u.begin();
+        u.stream(StreamEvent::Attempt(1));
+        u.stream(StreamEvent::Text("The tests pass now."));
+        u.stream(StreamEvent::Call {
+            index: 0,
+            name: "reply",
+        });
+        for piece in ["{\"message\": \"The tests ", "pass now.\"}"] {
+            u.stream(StreamEvent::Arguments {
+                index: 0,
+                delta: piece,
+            });
+        }
+        u.stream(StreamEvent::End);
+        u.end(
+            &TurnEnd::Replied {
+                message: "The tests pass now.".into(),
+            },
+            false,
+        );
+        let all = message(&out);
+        assert_eq!(all.matches("The tests pass now.").count(), 1, "{all:?}");
+        // A reply that says more than the text is shown, from its start.
+        let (mut u, out) = updates();
+        u.begin();
+        u.stream(StreamEvent::Attempt(1));
+        u.stream(StreamEvent::Text("Done."));
+        u.stream(StreamEvent::Call {
+            index: 0,
+            name: "reply",
+        });
+        for piece in ["{\"message\": \"Done", ". The tests pass now.\"}"] {
+            u.stream(StreamEvent::Arguments {
+                index: 0,
+                delta: piece,
+            });
+        }
+        u.stream(StreamEvent::End);
+        u.end(
+            &TurnEnd::Replied {
+                message: "Done. The tests pass now.".into(),
+            },
+            false,
+        );
+        let all = message(&out);
+        assert_eq!(
+            all.matches("Done. The tests pass now.").count(),
+            1,
+            "{all:?}"
+        );
+    }
+
+    /// An editor that follows the agent opens what it is sent the place of:
+    /// never a file the boundary holds back, which the workspace never shows.
+    #[test]
+    fn sensitive_files_get_no_locations() {
+        let (mut u, out) = updates();
+        u.entry(&assistant(
+            "",
+            vec![
+                call("c1", "read_file", json!({"path": ".env"})),
+                call(
+                    "c2",
+                    "write_file",
+                    json!({"path": ".env.local", "content": format!("K={TOKEN}")}),
+                ),
+                call("c3", "read_file", json!({"path": "src/a.rs"})),
+            ],
+        ));
+        let sent = sent(&out);
+        assert!(sent[0].get("locations").is_none(), "{}", sent[0]);
+        assert!(sent[1].get("locations").is_none(), "{}", sent[1]);
+        assert_eq!(sent[2]["locations"], json!([{"path": "/w/src/a.rs"}]));
     }
 
     #[test]

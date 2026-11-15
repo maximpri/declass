@@ -31,6 +31,7 @@ mod view;
 
 use crate::term::editor::{Editor, Outcome};
 use crate::term::feed::{Feed, Restore, Streamed};
+use crate::term::held::Held;
 use crate::term::{colour, safe};
 use declass_agent::TurnEnd;
 use declass_agent::transcript::Entry;
@@ -157,12 +158,13 @@ enum Msg {
     Status(Status),
     Planning(bool),
     /// The session's workspace, run directory, audit log and policy, for
-    /// the side panel.
+    /// the side panel, and which files the conversation names only.
     Attach {
         ws: PathBuf,
         run_dir: PathBuf,
         audit: PathBuf,
         policy: Box<declass_boundary::policy::Policy>,
+        held: Held,
         history: Vec<Entry>,
     },
     /// A line another part of the process printed.
@@ -310,13 +312,16 @@ impl Workspace {
     }
 
     /// The session is open: the side panel follows its run directory (the
-    /// files it changes) under `policy` (which files are held locally).
+    /// files it changes) under `policy` (which files are held locally), and
+    /// the conversation names the files `held` holds, never shows them
+    /// (`crate::term::held`, the session's boundary).
     pub fn attach(
         &self,
         ws: PathBuf,
         run_dir: PathBuf,
         audit: PathBuf,
         policy: declass_boundary::policy::Policy,
+        held: Held,
     ) {
         // Snapshot while the session is idle, before it starts publishing live
         // entries. Reading on the UI thread can race with queued live messages
@@ -327,6 +332,7 @@ impl Workspace {
             run_dir,
             audit,
             policy: Box::new(policy),
+            held,
             history,
         });
     }
@@ -960,12 +966,10 @@ impl State {
                 run_dir,
                 audit,
                 policy,
+                held,
                 history,
             } => {
-                let held_policy = (*policy).clone();
-                self.cells.set_held(Arc::new(move |p: &str| {
-                    held_policy.is_sensitive_path(std::path::Path::new(p))
-                }));
+                self.cells.set_held(held);
                 self.ws = Some(ws.clone());
                 self.cells.set_run_dir(run_dir.clone());
                 self.panel.attach(ws, run_dir, audit, *policy, &history);
@@ -1933,6 +1937,66 @@ mod tests {
             "{out}"
         );
         assert!(!out.contains("sk_live"), "{out}");
+    }
+
+    #[test]
+    fn a_sensitive_file_under_another_spelling_is_named_never_shown() {
+        // The workspace's predicate is the session's boundary on the path as
+        // the tools open it: `./`, letter case where the file system ignores
+        // it, the other Unicode form, a file derived from sensitive data.
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path().canonicalize().unwrap();
+        std::fs::create_dir_all(ws.join("data")).unwrap();
+        std::fs::write(ws.join("data/customers.csv"), "").unwrap();
+        std::fs::write(ws.join(".env"), "").unwrap();
+        let policy = declass_boundary::policy::Policy {
+            sensitive_globs: vec![".env*".into(), "data/**".into()],
+            ..Default::default()
+        };
+        let (mut s, _, _) = state();
+        s.message(Msg::Attach {
+            ws: ws.clone(),
+            run_dir: ws.join(".declass/runs/r1"),
+            audit: ws.join(".declass/audit/r1.jsonl"),
+            policy: Box::new(policy.clone()),
+            held: crate::term::held::held(ws.clone(), move |p| {
+                policy.is_sensitive_path(p) || p == std::path::Path::new("out/report.txt")
+            }),
+            history: Vec::new(),
+        });
+        let value = "teodora.vance@quillmere.example";
+        let calls = [
+            ("./data/customers.csv", "write_file"),
+            (".ENV", "write_file"),
+            ("DATA/customers.csv", "edit_file"),
+            ("./out/report.txt", "write_file"),
+            ("src/notes.md", "write_file"),
+        ];
+        s.message(Msg::Entry(Box::new(Entry::Item {
+            item: Item::Assistant {
+                text: String::new(),
+                reasoning: None,
+                replay: None,
+                tool_calls: calls
+                    .iter()
+                    .enumerate()
+                    .map(|(i, (path, tool))| {
+                        let args = if *tool == "edit_file" {
+                            serde_json::json!({"path": path,
+                                "edits": [{"old": "1,x", "new": format!("1,{value}")}]})
+                        } else {
+                            serde_json::json!({"path": path, "content": format!("1,{value}\n")})
+                        };
+                        call(&format!("c{i}"), tool, args)
+                    })
+                    .collect(),
+            },
+        })));
+        let out = screen(&mut s, 120, 60);
+        // (A long title wraps after "not".)
+        assert_eq!(out.matches("sensitive: content not").count(), 4, "{out}");
+        // Only the public file's content is shown.
+        assert_eq!(out.matches(value).count(), 1, "{out}");
     }
 
     #[test]

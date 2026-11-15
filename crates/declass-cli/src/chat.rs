@@ -44,6 +44,7 @@ use declass_agent::transcript::Entry;
 use declass_agent::{ApproveMode, Approver, RunStats, Session, Terminal, TurnEnd};
 use declass_boundary::audit::AuditHandle;
 use declass_boundary::view::{PassThrough, Presenter};
+use declass_tui::term::held::{self, Held};
 use declass_tui::workspace::{Hooks, Mode as Live, Status, Workspace};
 use futures_util::FutureExt;
 use futures_util::future::Either;
@@ -1582,6 +1583,11 @@ pub(crate) struct Open<'s> {
     pub audit: &'s AuditHandle,
     /// Restores placeholders for the operator, as every operator view does.
     pub shown: &'s Arc<dyn Fn(&str) -> String + Send + Sync>,
+    /// The files every operator view names and never shows (the session's
+    /// boundary, on paths as the tools open them).
+    pub held: &'s Held,
+    /// What the session's start told the operator on standard error.
+    pub notices: &'s [String],
 }
 
 /// A session's front end: it holds the conversation of the open session
@@ -1626,6 +1632,7 @@ pub(crate) async fn converse<F: Front>(
         engine,
         frontier,
         run_cfg,
+        notices,
     } = prepare(
         ws, manifest, cfg, oversight, run_dir, limits, audit, hooks, planning,
     )
@@ -1656,6 +1663,21 @@ pub(crate) async fn converse<F: Front>(
         }
         None => Arc::new(|t: &str| t.to_owned()),
     };
+    // Without the boundary (pass-through), the policy alone.
+    let held = match &engine {
+        Some(e) => {
+            let e = e.clone();
+            held::held(ws.to_path_buf(), move |p| {
+                held::holds_back(e.as_ref() as &dyn Presenter, p)
+            })
+        }
+        None => {
+            let policy = crate::policy(cfg)?;
+            held::held(ws.to_path_buf(), move |p| {
+                policy.is_sensitive_path(p) || policy.ip_level(p).is_some()
+            })
+        }
+    };
     let open = Open {
         ws,
         manifest,
@@ -1667,6 +1689,8 @@ pub(crate) async fn converse<F: Front>(
         presenter,
         audit: frontier.audit(),
         shown: &shown,
+        held: &held,
+        notices: &notices,
     };
     let (closed, switch) = front.hold(&mut session, &open).await?;
     let (terminal, mut stats) = session.end(closed);
@@ -1753,6 +1777,7 @@ impl Front for ChatFront<'_> {
                 open.run_dir.to_path_buf(),
                 audit_log_path(open.ws, &open.manifest.run_id),
                 crate::policy(open.cfg)?,
+                open.held.clone(),
             );
         }
         let (closed, switch) = conduct(

@@ -11,6 +11,7 @@
 //! an edit of a sensitive file named only, never its content.
 //! Everything from outside declass passes `term::safe` before it is stored.
 
+use crate::term::held::Held;
 use crate::term::markdown::Markdown;
 use crate::term::stream::{Detok, FieldReader};
 use crate::term::{Span as TSpan, safe};
@@ -160,8 +161,9 @@ pub(super) struct Cells {
     by_child: HashMap<String, usize>,
     restore: Restore,
     colour: bool,
-    /// Whether a workspace path is held locally (sensitive by policy).
-    held: Arc<dyn Fn(&str) -> bool + Send + Sync>,
+    /// Whether a path the frontier wrote names a file whose content is
+    /// held locally (`crate::term::held`).
+    held: Held,
     run_dir: Option<std::path::PathBuf>,
     filtering: super::privacy::FilterHistory,
     calls: HashMap<usize, (String, Option<FieldReader>)>,
@@ -201,7 +203,7 @@ impl Cells {
         self.restore = restore;
     }
 
-    pub(super) fn set_held(&mut self, held: Arc<dyn Fn(&str) -> bool + Send + Sync>) {
+    pub(super) fn set_held(&mut self, held: Held) {
         self.held = held;
     }
 
@@ -786,17 +788,18 @@ impl Cells {
 
     /// A write or an edit, with what it changes (a sensitive file is named).
     fn edit_cell(&self, c: &ToolCall) -> Cell {
-        let path = c
+        let raw = c
             .arguments
             .get("path")
             .and_then(|v| v.as_str())
-            .map(safe)
             .unwrap_or_default();
+        let path = safe(raw);
         let write = c.name == "write_file";
         let mut cell = Cell::new(Kind::Edit, if write { "write" } else { "edit" });
         cell.state = State::Live;
         cell.detail = path.clone();
-        if (self.held)(&path) {
+        // Judged as the frontier wrote it, as the tools open it.
+        if (self.held)(raw) {
             cell.tags.push("sensitive: content not shown".into());
             return cell;
         }

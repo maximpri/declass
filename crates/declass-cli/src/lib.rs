@@ -1004,10 +1004,10 @@ async fn start(
 
 /// Sensitive and protected files the security engine could not read at run
 /// start: named, so a file it cannot index is never skipped unseen.
-pub(crate) fn note_unindexed(engine: &Engine) {
+pub(crate) fn note_unindexed(engine: &Engine) -> Option<String> {
     let unread = engine.unindexed();
     if unread.is_empty() {
-        return;
+        return None;
     }
     let shown: Vec<String> = unread
         .iter()
@@ -1015,7 +1015,7 @@ pub(crate) fn note_unindexed(engine: &Engine) {
         .map(|(path, why)| format!("{path} ({why})"))
         .collect();
     let more = unread.len().saturating_sub(shown.len());
-    eprintln!(
+    Some(format!(
         "warning: {} sensitive or protected file(s) could not be indexed: {}{}\n  values from them are not replaced elsewhere until one is read; commands are denied them by name",
         unread.len(),
         term::safe(&shown.join("; ")),
@@ -1024,21 +1024,21 @@ pub(crate) fn note_unindexed(engine: &Engine) {
         } else {
             String::new()
         }
-    );
+    ))
 }
 
 /// Public files the local model found to hold real data (held as sensitive
 /// from now on): named, with the setting that would make it explicit.
-pub(crate) fn note_classified(engine: &Engine) {
+pub(crate) fn note_classified(engine: &Engine) -> Option<String> {
     let found = engine.classified_sensitive();
     if found.is_empty() {
-        return;
+        return None;
     }
-    eprintln!(
+    Some(format!(
         "local model: {} public file(s) hold real data and are now held as sensitive: {}\n  to make that explicit, add them to sensitivity.globs in .declass/config.toml",
         found.len(),
         term::safe(&found.join(", "))
-    );
+    ))
 }
 
 /// What a run or a session works with.
@@ -1048,6 +1048,11 @@ struct Prepared {
     engine: Option<Arc<Engine>>,
     frontier: GatedFrontier,
     run_cfg: RunConfig,
+    /// What the run's start told the operator on standard error (files the
+    /// engine could not index or found to hold real data, extensions that
+    /// differ from their pins), for a front end whose operator does not see
+    /// standard error (an editor).
+    notices: Vec<String>,
 }
 
 /// Opens the engine, the providers and the audit log, records the start
@@ -1126,12 +1131,18 @@ async fn prepare(
             local
         }
     };
+    let mut notices = Vec::new();
     if let Some(e) = &engine {
         let files = git.list_files(ws).unwrap_or_default();
         let primed = e.prime(ws, &files, &manifest.objective);
         eprintln!("security engine: indexed {primed} sensitive file(s)");
-        note_unindexed(e);
-        note_classified(e);
+        for notice in [note_unindexed(e), note_classified(e)]
+            .into_iter()
+            .flatten()
+        {
+            eprintln!("{notice}");
+            notices.push(notice);
+        }
     }
     let frontier = gated(ws, &manifest.run_id, driver, engine.as_ref(), hooks)?;
     // A full disk is waited out from the first event (see `declass_agent::host`).
@@ -1281,7 +1292,9 @@ async fn prepare(
     };
     if let Some(gate) = &gate {
         for line in gate.finish()? {
-            eprintln!("{}", declass_tui::term::safe(&line));
+            let line = declass_tui::term::safe(&line);
+            eprintln!("{line}");
+            notices.push(line);
         }
     }
     Ok(Prepared {
@@ -1289,6 +1302,7 @@ async fn prepare(
         engine,
         frontier,
         run_cfg,
+        notices,
     })
 }
 

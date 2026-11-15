@@ -1012,6 +1012,56 @@ fn a_question_in_one_thread_leaves_the_editor_answered_and_a_cancelled_thread_re
 }
 
 #[test]
+fn security_notices_reach_the_thread_not_only_the_log() {
+    use std::os::unix::fs::PermissionsExt;
+    let e = env();
+    let f = Frontier::start();
+    configured(&e, &f, false);
+    // A sensitive file the engine cannot read at the session's start.
+    std::fs::create_dir_all(e.ws.join("secrets")).unwrap();
+    let locked = e.ws.join("secrets/locked.key");
+    std::fs::write(&locked, "KEY=unread\n").unwrap();
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let mut editor = Editor::start(&e);
+    let id = editor.request("initialize", json!({"protocolVersion": 1}));
+    assert_eq!(editor.answer(id)["result"]["protocolVersion"], 1);
+    let session = editor.new_session(&e.ws);
+    // A command writes a file another tool runs later (not asked about).
+    f.script(vec![
+        Step::Call(
+            "run_command",
+            json!({"command": "printf 'export A=1\\n' > .envrc"}),
+        ),
+        reply("Done."),
+    ]);
+    let id = editor.prompt(&session, "Set up direnv.");
+    assert_eq!(editor.answer(id)["result"]["stopReason"], "end_turn");
+    // A turn that writes none says nothing of them.
+    f.script(vec![reply("Still done.")]);
+    let id = editor.prompt(&session, "Anything else?");
+    assert_eq!(editor.answer(id)["result"]["stopReason"], "end_turn");
+    let text = said(&editor.messages());
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let (code, lines, log) = editor.finish();
+    assert_eq!(code, 0, "{log}");
+    all_json_rpc(&lines);
+    // Both notices are in the thread (and still in the log).
+    assert!(
+        text.contains("could not be indexed: secrets/locked.key"),
+        "{text}"
+    );
+    assert!(
+        text.contains(
+            "This turn changed 1 file(s) that another tool runs later; review them before it does"
+        ) && text.contains(".envrc")
+            && text.contains("written by a command"),
+        "{text}"
+    );
+    assert_eq!(text.matches("This turn changed").count(), 1, "{text}");
+    assert!(log.contains("could not be indexed"), "{log}");
+}
+
+#[test]
 fn the_editor_going_away_mid_turn_stops_the_command_and_leaves_the_session_open() {
     let e = env();
     let f = Frontier::start();
