@@ -2423,17 +2423,27 @@ impl Presenter for Engine {
                 // own run state holds raw handles, the vault (every
                 // placeholder's real value) and transcripts. Commands get
                 // their TMPDIR outside the workspace.
-                if name == ".git" || name == ".declass" {
+                if declass_fs::is_reserved_name(name) {
                     out.push(abs);
                     return false;
                 }
                 return !scan_skipped(rel);
+            }
+            // A `.git` file (a submodule, a nested worktree) names history
+            // kept elsewhere.
+            if declass_fs::is_reserved_name(name) {
+                out.extend(declass_fs::gitdir::named_by(&abs));
+                return false;
             }
             if self.is_sensitive(rel) {
                 out.push(abs);
             }
             false
         });
+        // The repository the workspace is in may keep its history outside
+        // it: above it (the workspace is a subdirectory) or in the main
+        // repository of a linked worktree.
+        out.extend(declass_fs::gitdir::history_dirs(workspace));
         // Derived files the walk does not reach: written into build output or
         // dependencies (`target/`, `node_modules/`) by a sensitive command.
         out.extend(

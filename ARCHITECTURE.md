@@ -90,7 +90,7 @@ declass-release (release tooling: the `declass-sbom` SBOM generator) links no de
 |---|---|---|
 | `declass-review` | Bounded syntax rules, same-file context, host/guard inventory and before/after comparison shared by the auditor and repository scanner ([scope and measurements](docs/evidence/reviews/security-auditor-2026-09-30.md)) | Perform I/O, execute source, contact a model, or turn a model opinion into a blocking decision |
 | `declass-provider` | Chat Completions (Responses and Anthropic Messages *planned*, M6), streaming assembly (and a read-only tap on it, `live`), retry, credentials, local-endpoint trust, context probes, `Usage`; images (`image`: decode, scale and re-encode PNG/JPEG/GIF/WebP, each dialect's wire form, digest redaction for audit, the vision probe) | Know about tools, policy or the boundary |
-| `declass-fs` | `PinnedParent` handle-relative I/O, atomic durable writes, private (0600) files, workspace lock, `.declass` path registry | Open a workspace path by string after validation |
+| `declass-fs` | `PinnedParent` handle-relative I/O (paths opened only as spelled on disk), atomic durable writes, private (0600) files, workspace lock, `.declass` path registry, where a workspace's git history is kept (`gitdir`) | Open a workspace path by string after validation |
 | `declass-governor` | Memory limits for a process tree: follows the tree from its root (id plus start time), reads the physical footprint, stops a process above the per-process limit, the largest above the tree limit or under critical machine pressure, and every member left when the watch ends; the configured limits (`set_limits`) | Signal a process outside the tree it watches |
 | `declass-sandbox` | Seatbelt/bwrap profiles (write and deny-read lists; `effective_deny_read` adds the credential stores and the paths registered with `deny_to_every_process` to every process), a test-only escape probe (`declass-probe`, `tests/containment.rs`), network modes (`Network`: off, the egress proxy's route, all) and the bubblewrap bridge to the proxy (`bridge`), the list of credential stores in the home directory (`HOME_SECRETS`), env allowlist, output cap with spill file, process-tree capture and kill | Decide what a command is allowed to mean (no refusal logic) |
 | `declass-egress` | The egress proxy commands reach package registries through: `CONNECT` and plain-HTTP `GET`/`HEAD`, host allowlist (`Hosts`), its own name resolution with the web tools' address classes, the TLS server-name check, each plain request and tunnel host checked by the run's guard, one route per command, one event per connection | Look inside a TLS tunnel, or decide which command gets network |
@@ -1020,7 +1020,9 @@ git; reset behaviour defined per entry).
   writable by tools, in any spelling a file system folds to them (`declass_fs::is_reserved_name`).
 - **Commands:** Seatbelt (macOS) or bwrap (Linux) with absolute binary paths; workspace-write with
   `.git`/`.declass` unwritable; `.declass` (the vault, handles, transcripts, audit log) unreadable to
-  every command by the sandbox itself, `.git` (committed copies) to ordinary commands and checks;
+  every command by the sandbox itself, `.git` (committed copies) to ordinary commands and checks,
+  wherever the repository keeps it (`declass_fs::gitdir`: a folder above the workspace, the main
+  repository of a linked worktree, a `.git` file's target);
   command `TMPDIR` outside the workspace (a sub-agent's commands can write nothing else: the
   workspace is read-only to them, `Spec.read_only`), a separate one for `sensitive_data` commands that no
   other sandboxed process (command, check, MCP server) can read (`tools::hidden_from_processes`), where

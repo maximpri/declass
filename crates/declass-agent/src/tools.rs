@@ -1797,6 +1797,83 @@ mod sensitive_command_tests {
     }
 
     #[tokio::test]
+    async fn commands_cannot_read_history_kept_outside_the_workspace() {
+        // The workspace is the folder declass was started in. In a linked
+        // worktree (`git worktree add`), or a subdirectory of a repository,
+        // the git directory holding committed copies of its files is outside
+        // it, where no walk of the workspace finds it.
+        let d = tempfile::tempdir().unwrap();
+        let root = d.path().canonicalize().unwrap();
+        let main = root.join("main");
+        std::fs::create_dir_all(main.join("app/data")).unwrap();
+        std::fs::create_dir_all(main.join("data")).unwrap();
+        let row = format!("id,total\n1,{BALANCE}\n");
+        std::fs::write(main.join("data/orders.csv"), &row).unwrap();
+        std::fs::write(main.join("app/data/orders.csv"), &row).unwrap();
+        std::fs::write(main.join("README.md"), "public\n").unwrap();
+        let git = |dir: &Path, args: &[&str]| {
+            let ok = std::process::Command::new("/usr/bin/git")
+                .args(["-c", "user.name=t", "-c", "user.email=t@t.test"])
+                .args(args)
+                .current_dir(dir)
+                .status()
+                .unwrap()
+                .success();
+            assert!(ok, "git {args:?}");
+        };
+        git(&main, &["init", "-q"]);
+        git(&main, &["add", "-A"]);
+        git(&main, &["commit", "-qm", "start"]);
+        let worktree = root.join("wt");
+        git(
+            &main,
+            &["worktree", "add", "-q", worktree.to_str().unwrap()],
+        );
+        for (ws, committed) in [
+            (worktree.clone(), "data/orders.csv"),
+            (main.join("app"), "app/data/orders.csv"),
+        ] {
+            let run = ws.join(".declass/runs/r1");
+            std::fs::create_dir_all(&run).unwrap();
+            let policy = Policy {
+                sensitive_globs: vec!["data/**".into()],
+                command_output_sensitive: true,
+                detect_pii: true,
+                ..Policy::default()
+            };
+            let engine = Engine::open(&run, policy, None).unwrap();
+            let git_bin = Git::locate().unwrap();
+            let mut journal = WriteJournal::open(&run).unwrap();
+            let mut ctx = Ctx {
+                workspace: &ws,
+                run_dir: &run,
+                sandbox: declass_sandbox::detect().unwrap(),
+                git: &git_bin,
+                presenter: engine.as_ref(),
+                journal: &mut journal,
+                command_timeout: Duration::from_secs(30),
+                network: &crate::egress::Network::Off,
+                checks: &[],
+                audit: None,
+                interrupted: None,
+                web: None,
+                git_tools: None,
+                lsp: None,
+            };
+            let out = call(
+                &mut ctx,
+                "run_command",
+                json!({"command": format!(
+                    "git show HEAD:{committed} | od -c; git log -p | od -c | head -40; echo done"
+                )}),
+            )
+            .await;
+            assert!(out.contains("done"), "{}: {out}", ws.display());
+            assert!(!out.contains("  8   9   7"), "{}: {out}", ws.display());
+        }
+    }
+
+    #[tokio::test]
     async fn file_tools_open_paths_only_as_their_checks_name_them() {
         // macOS's default volumes match names regardless of letter case and
         // Unicode case folding: `.DECLASS`, `.declaſs` and `.declaß` open

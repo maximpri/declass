@@ -3,6 +3,7 @@
 
 pub mod error;
 pub mod fault;
+pub mod gitdir;
 pub mod host;
 pub mod lock;
 pub mod ops;
