@@ -336,6 +336,7 @@ async fn connect(
                     setup.run_dir,
                 ),
                 readable_home_secrets: cfg.read_home_secrets.clone(),
+                pin_readable: Vec::new(),
                 read_only: false,
             };
             let mut argv: Vec<String> = std::iter::once(command.clone())

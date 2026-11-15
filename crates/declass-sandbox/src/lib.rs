@@ -320,6 +320,14 @@ pub struct Spec {
     /// this process may read after all: the owner's exceptions for one
     /// server. Empty for every command.
     pub readable_home_secrets: Vec<String>,
+    /// Paths this process may read but another process may not (what a
+    /// `sensitive_data` command reads and the next ordinary command is denied;
+    /// protected source a check reads). Under bubblewrap each is mounted on
+    /// itself, and so is every folder above it in the workspace or the scratch
+    /// directory, so none can be renamed or removed (`EBUSY`): the next
+    /// command's deny list names them where they were. Seatbelt refuses such
+    /// renames for every process, and ignores this list.
+    pub pin_readable: Vec<PathBuf>,
     /// The workspace is read-only as well: the command may write only its
     /// scratch directory (the commands of read-only sub-agents).
     pub read_only: bool,
@@ -444,18 +452,28 @@ pub fn seatbelt_profile(spec: &Spec, host_ports: Option<&[u16]>) -> Result<Strin
     // still be created and written in those folders.
     let mut fixed =
         std::collections::BTreeSet::from([spec.workspace.clone(), spec.scratch.clone()]);
-    for p in &spec.deny_read {
+    // `pin_readable` is held in place the same way, but stays readable.
+    let held = spec
+        .deny_read
+        .iter()
+        .map(|p| (p, true))
+        .chain(spec.pin_readable.iter().map(|p| (p, false)));
+    for (p, denied) in held {
         // A denied symlink is denied at its target too, so the content is not
         // readable under the target's own path.
         let target = p.canonicalize().ok().filter(|t| t != p);
         for p in std::iter::once(p).chain(target.as_ref()) {
             let q = quote(p)?;
-            let filter = if p.is_dir() {
+            // What may be read stays free to rewrite inside a folder; the
+            // folder itself, as under bubblewrap, stays where it is.
+            let filter = if denied && p.is_dir() {
                 format!("(subpath {q})")
             } else {
                 format!("(literal {q})")
             };
-            rules.push(format!("(deny file-read* {filter})"));
+            if denied {
+                rules.push(format!("(deny file-read* {filter})"));
+            }
             // Nor may its mode or flags change: a denied file made
             // unreadable to Declass itself would go unindexed at run start.
             rules.push(format!(
@@ -713,12 +731,23 @@ fn push_bind(a: &mut Vec<OsString>, op: &str, src: &Path, dest: &Path) {
 /// `stubs` stand-in (run state is never readable); every existing path in
 /// `spec.deny_read` is covered by a `stubs` stand-in ([`stand_in_targets`]),
 /// and every folder above one in the workspace or the scratch directory is
-/// mounted on itself ([`pinned_folders`]). Paths are resolved
-/// first, so a symlink is covered at its target. A denied path that does not
+/// mounted on itself ([`pinned_folders`]); so are `spec.pin_readable` (paths
+/// this process may read, another may not) and the folders above them. Paths
+/// are resolved first, so a symlink is covered at its target. A denied path that does not
 /// exist yet is skipped: there is nothing to read, and a mount point would
 /// create it in the workspace. `.git` and `.declass` entries a command creates
 /// cannot be prevented by mounts; [`run_until`] removes them afterwards.
-pub fn bwrap_args(spec: &Spec, reserved: &[Reserved], stubs: &DenyStubs) -> Vec<OsString> {
+///
+/// Refused, so that no command runs with less covered than asked: a stand-in
+/// that would hide the workspace, the scratch directory or `cwd`, a denied
+/// path in the workspace that cannot be covered at all, and more than
+/// [`MAX_COVER_MOUNTS`] mounts to keep denied paths in place.
+pub fn bwrap_args(
+    spec: &Spec,
+    reserved: &[Reserved],
+    stubs: &DenyStubs,
+    cwd: &Path,
+) -> Result<Vec<OsString>, SandboxError> {
     let mut a: Vec<OsString> = [
         "--die-with-parent",
         "--new-session",
@@ -761,16 +790,39 @@ pub fn bwrap_args(spec: &Spec, reserved: &[Reserved], stubs: &DenyStubs) -> Vec<
     // Before the mounts placed inside it, which would otherwise be hidden.
     push_bind(&mut a, "--bind", &spec.scratch, &spec.scratch);
     let writable = writable_roots(spec);
-    let targets = stand_in_targets(&spec.deny_read, &writable);
+    let targets = stand_in_targets(&spec.deny_read, &writable)?;
+    refuse_hiding(&targets, spec, cwd)?;
+    // Readable but denied to others: mounted on itself, not covered. Not
+    // those a stand-in already hides, nor any outside the writable roots (the
+    // root is read-only: nothing there can be renamed).
+    let kept: Vec<PathBuf> = stand_in_targets(&spec.pin_readable, &writable)?
+        .into_iter()
+        .filter(|k| {
+            !targets.iter().any(|t| k.starts_with(t))
+                && writable.iter().any(|w| k.starts_with(w) && k != w)
+        })
+        .collect();
+    let all: Vec<PathBuf> = targets.iter().chain(&kept).cloned().collect();
+    let mut mounts = pinned_folders(&all, &writable);
+    mounts.extend(kept.iter().cloned());
+    mounts.sort();
+    mounts.dedup();
+    if mounts.len() + targets.len() > MAX_COVER_MOUNTS {
+        return Err(SandboxError::Spawn(format!(
+            "{} denied paths need {} mounts to stay where the deny rules name them, more than the {MAX_COVER_MOUNTS} allowed; the command was not run",
+            all.len(),
+            mounts.len() + targets.len(),
+        )));
+    }
     let scratch = spec.scratch.canonicalize().unwrap_or(spec.scratch.clone());
-    for folder in pinned_folders(&targets, &writable) {
+    for folder in &mounts {
         // Mounted as what holds it is: a read-only workspace stays read-only.
         let op = if folder.starts_with(&scratch) {
             "--bind"
         } else {
             workspace_bind
         };
-        push_bind(&mut a, op, &folder, &folder);
+        push_bind(&mut a, op, folder, folder);
     }
     for r in reserved {
         if let Ok(target) = r.path.canonicalize() {
@@ -807,7 +859,36 @@ pub fn bwrap_args(spec: &Spec, reserved: &[Reserved], stubs: &DenyStubs) -> Vec<
     if share_net {
         a.push(OsString::from("--share-net"));
     }
-    a
+    Ok(a)
+}
+
+/// Most mounts a command's denied paths may need (stand-ins, kept paths and
+/// the folders above them): beyond it the argument list grows past what the
+/// kernel takes, and the command is refused instead of covering less.
+const MAX_COVER_MOUNTS: usize = 2048;
+
+/// Refuses a stand-in over the workspace, the scratch directory or `cwd`, or
+/// over a folder above one: it would hide them without a word.
+fn refuse_hiding(targets: &[PathBuf], spec: &Spec, cwd: &Path) -> Result<(), SandboxError> {
+    let cwd = cwd.to_path_buf();
+    for (what, p) in [
+        ("the workspace", &spec.workspace),
+        ("the scratch directory", &spec.scratch),
+        ("the working directory", &cwd),
+    ] {
+        let resolved = p.canonicalize().unwrap_or_else(|_| p.clone());
+        if let Some(t) = targets
+            .iter()
+            .find(|t| resolved.starts_with(t) || p.starts_with(t))
+        {
+            return Err(SandboxError::Spawn(format!(
+                "{} is denied, and {what} ({}) is inside it; the command was not run",
+                t.display(),
+                p.display(),
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Where a command may rename and change modes: the workspace and the
@@ -832,36 +913,76 @@ fn writable_roots(spec: &Spec) -> Vec<PathBuf> {
 ///
 /// A path that does not exist is skipped. One in `writable` (the workspace
 /// or the scratch directory) that cannot be resolved for another reason is
-/// covered at the deepest folder above it that can: a folder above it that
-/// cannot be searched (mode `600`, which a command may set, as modes are not
-/// mediated) leaves its path unresolvable, and uncovered, a later command
-/// could set the mode back and read it. Elsewhere such a path is skipped: no
-/// command can change a mode there (the root is mounted read-only), so what
-/// stops Declass from resolving it stops the command too.
-fn stand_in_targets(deny: &[PathBuf], writable: &[PathBuf]) -> Vec<PathBuf> {
-    let resolved: Vec<PathBuf> = deny
-        .iter()
-        .filter_map(|p| match p.canonicalize() {
-            Ok(t) => Some(t),
+/// covered at the deepest folder above it that can, but never at or above the
+/// writable root itself: a folder above it that cannot be searched (mode
+/// `600`, which a command may set, as modes are not mediated) leaves its path
+/// unresolvable, and uncovered, a later command could set the mode back and
+/// read it. Whether it is "in `writable`" is decided on the path as it resolves
+/// (through `..` and symbolic links as far as they do), not as spelled. A
+/// path in `writable` that only the root could cover is an error (the
+/// command is refused), except a symbolic-link loop, which nothing can read.
+/// Elsewhere such a path is skipped: no command can change a mode there (the
+/// root is mounted read-only), so what stops Declass from resolving it stops
+/// the command too.
+fn stand_in_targets(deny: &[PathBuf], writable: &[PathBuf]) -> Result<Vec<PathBuf>, SandboxError> {
+    let mut resolved: Vec<PathBuf> = Vec::new();
+    for p in deny {
+        match p.canonicalize() {
+            Ok(t) => resolved.push(t),
             Err(e)
                 if matches!(
                     e.kind(),
                     std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
-                ) =>
-            {
-                None
+                ) => {}
+            Err(e) if e.raw_os_error() == Some(rustix::io::Errno::LOOP.raw_os_error()) => {}
+            Err(e) => {
+                let Some((base, rest)) = resolvable_ancestor(p) else {
+                    continue;
+                };
+                let located = locate(&base, &rest);
+                if !writable.iter().any(|w| located.starts_with(w)) {
+                    continue;
+                }
+                if writable.iter().any(|w| base.starts_with(w) && base != *w) {
+                    resolved.push(base);
+                } else {
+                    return Err(SandboxError::Spawn(format!(
+                        "cannot cover {} ({e}) without covering the workspace or scratch directory; the command was not run",
+                        p.display()
+                    )));
+                }
             }
-            Err(_) if writable.iter().any(|w| p.starts_with(w)) => {
-                p.ancestors().skip(1).find_map(|a| a.canonicalize().ok())
-            }
-            Err(_) => None,
-        })
-        .collect();
+        }
+    }
     let mut out: Vec<PathBuf> = Vec::new();
     for t in &resolved {
         let covered = resolved.iter().any(|o| o != t && t.starts_with(o));
         if !covered && !out.contains(t) {
             out.push(t.clone());
+        }
+    }
+    Ok(out)
+}
+
+/// The deepest folder above `p` that resolves, resolved, and the components
+/// of `p` below it.
+fn resolvable_ancestor(p: &Path) -> Option<(PathBuf, PathBuf)> {
+    p.ancestors().skip(1).find_map(|a| {
+        let base = a.canonicalize().ok()?;
+        Some((base, p.strip_prefix(a).ok()?.to_path_buf()))
+    })
+}
+
+/// `rest` below `base`, with `.` and `..` applied.
+fn locate(base: &Path, rest: &Path) -> PathBuf {
+    let mut out = base.to_path_buf();
+    for c in rest.components() {
+        match c {
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            std::path::Component::Normal(n) => out.push(n),
+            _ => {}
         }
     }
     out
@@ -875,14 +996,24 @@ fn stand_in_targets(deny: &[PathBuf], writable: &[PathBuf]) -> Vec<PathBuf> {
 /// with it, but the next command's deny list named the old path, and it read
 /// the file at the new one. Files may still be created, written and removed
 /// in these folders; moving one between such a folder and another crosses
-/// mounts (`mv` copies it; `rename` alone fails with `EXDEV`).
+/// mounts (`mv` copies it; `rename` alone fails with `EXDEV`). The walk up from
+/// a target stops at the first folder that is a target itself, which is
+/// mounted, and has its own folders pinned.
 fn pinned_folders(targets: &[PathBuf], writable: &[PathBuf]) -> Vec<PathBuf> {
-    let mut out: Vec<PathBuf> = targets
-        .iter()
-        .flat_map(|t| t.ancestors().skip(1))
-        .filter(|a| writable.iter().any(|w| a.starts_with(w) && a != w))
-        .map(Path::to_path_buf)
-        .collect();
+    let mut out: Vec<PathBuf> = Vec::new();
+    for t in targets {
+        for a in t.ancestors().skip(1) {
+            // The roots are mount points already; above them nothing is ours.
+            if !writable.iter().any(|w| a.starts_with(w) && a != w) {
+                break;
+            }
+            // A target is mounted, and its own folders pinned, on its own.
+            if targets.iter().any(|o| o == a) {
+                break;
+            }
+            out.push(a.to_path_buf());
+        }
+    }
     out.sort();
     out.dedup();
     out
@@ -1172,7 +1303,7 @@ fn prepare(
                 std::process::id(),
             ));
             let mut c = tokio::process::Command::new(bwrap);
-            c.args(bwrap_args(spec, &reserved, &stubs));
+            c.args(bwrap_args(spec, &reserved, &stubs, cwd)?);
             match (&spec.network, &bridge) {
                 (Network::All, _) => {
                     if server_input {
@@ -1827,6 +1958,7 @@ mod tests {
             extra_env: vec![],
             deny_read: Vec::new(),
             readable_home_secrets: Vec::new(),
+            pin_readable: Vec::new(),
             read_only: false,
         }
     }
@@ -2120,6 +2252,146 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn what_a_command_may_read_stays_where_the_next_command_s_rules_name_it() {
+        // A `sensitive_data` command (or a check reading protected source)
+        // has no deny list, so nothing kept `.env`, or a folder above
+        // `data/x.csv`, where the next ordinary command's rules name them:
+        // it renamed them, and that command read both at the new paths.
+        let (_d, ws) = setup();
+        std::fs::create_dir_all(ws.join("app/data")).unwrap();
+        std::fs::write(ws.join(".env"), "TOKEN=Qx7pL2mN9vR4\n").unwrap();
+        std::fs::write(ws.join("app/data/x.csv"), "id,balance\n1,8977066\n").unwrap();
+        let mut sensitive = spec(&ws);
+        sensitive.pin_readable = vec![ws.join(".env"), ws.join("app/data")];
+        let o = sh_with(
+            &sensitive,
+            "mv .env e2; mv app a2; mv app/data d2; cat .env app/data/x.csv; \
+             echo more >> .env; echo new > app/created; echo done",
+        )
+        .await;
+        let all = text(&o);
+        // It still reads and writes what it was given...
+        assert!(all.contains("done"), "{all}");
+        assert!(all.contains("Qx7p") && all.contains("8977066"), "{all}");
+        assert!(
+            std::fs::read_to_string(ws.join(".env"))
+                .unwrap()
+                .ends_with("more\n")
+        );
+        assert!(ws.join("app/created").is_file(), "{all}");
+        // ...but nothing moved.
+        for gone in ["e2", "a2", "d2"] {
+            assert!(!ws.join(gone).exists(), "{gone} exists: {all}");
+        }
+        // So the next ordinary command's rules still cover both.
+        let mut ordinary = spec(&ws);
+        ordinary.deny_read = vec![ws.join(".env"), ws.join("app/data")];
+        let o = sh_with(
+            &ordinary,
+            "cat .env app/data/x.csv e2 a2/data/x.csv d2/x.csv; echo done",
+        )
+        .await;
+        let all = text(&o);
+        assert!(all.contains("done"), "{all}");
+        for secret in ["Qx7p", "8977066"] {
+            assert!(!all.contains(secret), "{secret} readable: {all}");
+        }
+    }
+
+    #[test]
+    fn a_stand_in_that_would_hide_the_workspace_or_the_working_directory_is_refused() {
+        let (d, ws) = setup();
+        let root = d.path().canonicalize().unwrap();
+        let stubs = DenyStubs::ensure(&root).unwrap();
+        std::fs::create_dir_all(ws.join("sub")).unwrap();
+        let mut s = spec(&ws);
+        std::fs::create_dir_all(&s.scratch).unwrap();
+        let args = |s: &Spec, cwd: &Path| bwrap_args(s, &[], &stubs, cwd);
+        assert!(args(&s, &ws).is_ok());
+        for target in [root.clone(), ws.clone()] {
+            s.deny_read = vec![target];
+            let e = args(&s, &ws).unwrap_err().to_string();
+            assert!(e.contains("the workspace"), "{e}");
+        }
+        // The scratch directory alone, or only the folder the command starts in.
+        s.deny_read = vec![s.scratch.clone()];
+        let e = args(&s, &ws).unwrap_err().to_string();
+        assert!(e.contains("the scratch directory"), "{e}");
+        s.deny_read = vec![ws.join("sub")];
+        let e = args(&s, &ws.join("sub")).unwrap_err().to_string();
+        assert!(e.contains("the working directory"), "{e}");
+        assert!(args(&s, &ws).is_ok());
+    }
+
+    #[test]
+    fn covering_stops_at_the_writable_root() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().unwrap();
+        let r = d.path().canonicalize().unwrap();
+        std::fs::create_dir_all(r.join("ws/locked/inner")).unwrap();
+        std::fs::create_dir_all(r.join("outside/locked/inner")).unwrap();
+        std::fs::write(r.join("ws/locked/inner/x.csv"), "x").unwrap();
+        std::fs::write(r.join("outside/locked/inner/x.csv"), "x").unwrap();
+        // A link that loops resolves to nothing and is unreadable: it must
+        // not be covered at the workspace above it.
+        std::os::unix::fs::symlink("loop", r.join("ws/loop")).unwrap();
+        let writable = [r.join("ws")];
+        let mode = |p: &str, m: u32| {
+            std::fs::set_permissions(r.join(p), std::fs::Permissions::from_mode(m)).unwrap();
+        };
+        mode("ws/locked", 0o600);
+        mode("outside/locked", 0o600);
+        // Spelled through `..`, or from outside, a path is judged where it is.
+        let deny = [
+            r.join("ws/loop"),
+            r.join("ws/locked/../locked/inner/x.csv"),
+            r.join("ws/../outside/locked/inner/x.csv"),
+        ];
+        let targets = stand_in_targets(&deny, &writable);
+        mode("ws/locked", 0o755);
+        mode("outside/locked", 0o755);
+        let targets = targets.unwrap();
+        if rustix::process::geteuid().is_root() {
+            // Root searches any folder: every path resolves.
+            assert!(targets.iter().all(|t| t.ends_with("x.csv")), "{targets:?}");
+        } else {
+            assert_eq!(targets, vec![r.join("ws/locked")]);
+        }
+        assert!(!targets.contains(&r.join("ws")));
+    }
+
+    #[test]
+    fn folders_are_pinned_down_to_the_first_target_only() {
+        let r = PathBuf::from("/r");
+        let writable = [r.join("ws")];
+        let targets = [r.join("ws/a"), r.join("ws/a/b/c"), r.join("ws/x/y")];
+        assert_eq!(
+            pinned_folders(&targets, &writable),
+            vec![r.join("ws/a/b"), r.join("ws/x")]
+        );
+    }
+
+    #[test]
+    fn more_mounts_than_the_cap_are_refused() {
+        let (d, ws) = setup();
+        let root = d.path().canonicalize().unwrap();
+        let stubs = DenyStubs::ensure(&root).unwrap();
+        let mut s = spec(&ws);
+        std::fs::create_dir_all(&s.scratch).unwrap();
+        for i in 0..=MAX_COVER_MOUNTS {
+            let f = ws.join(format!("secrets/{i}.env"));
+            std::fs::create_dir_all(f.parent().unwrap()).unwrap();
+            std::fs::write(&f, "x").unwrap();
+            s.deny_read.push(f);
+        }
+        let e = bwrap_args(&s, &[], &stubs, &ws).unwrap_err().to_string();
+        assert!(e.contains("allowed") && e.contains("was not run"), "{e}");
+        // The same files under one denied folder are one mount.
+        s.deny_read = vec![ws.join("secrets")];
+        assert!(bwrap_args(&s, &[], &stubs, &ws).is_ok());
+    }
+
     #[test]
     fn stand_ins_are_never_placed_inside_another() {
         // A sensitive file in a denied folder, a linked worktree's git folder
@@ -2143,7 +2415,7 @@ mod tests {
         ]
         .map(|p| r.join(p));
         assert_eq!(
-            stand_in_targets(&deny, &[r.join("ws")]),
+            stand_in_targets(&deny, &[r.join("ws")]).unwrap(),
             vec![r.join("ws/data"), r.join("main/.git"), r.join("ws/.env")]
         );
     }
@@ -2176,7 +2448,7 @@ mod tests {
         let writable = [r.join("ws")];
         mode("ws/locked", 0o600);
         mode("outside/locked", 0o600);
-        let targets = stand_in_targets(&files.map(|f| r.join(f)), &writable);
+        let targets = stand_in_targets(&files.map(|f| r.join(f)), &writable).unwrap();
         mode("ws/locked", 0o755);
         mode("outside/locked", 0o755);
         // Root searches any folder: every path resolves.
@@ -2812,6 +3084,7 @@ mod fail_closed_tests {
             extra_env: vec![],
             deny_read: Vec::new(),
             readable_home_secrets: Vec::new(),
+            pin_readable: Vec::new(),
             read_only: false,
         }
     }
@@ -2907,6 +3180,7 @@ mod bwrap_args_tests {
             extra_env: vec![],
             deny_read: Vec::new(),
             readable_home_secrets: Vec::new(),
+            pin_readable: Vec::new(),
             read_only: false,
         };
         for dir in [
@@ -2932,7 +3206,8 @@ mod bwrap_args_tests {
             reserved.iter().map(|r| r.path.clone()).collect::<Vec<_>>(),
             [".declass", ".git", "vendor/dep/.git"].map(|p| s.workspace.join(p))
         );
-        let joined = bwrap_args(&s, &reserved, &stubs)
+        let joined = bwrap_args(&s, &reserved, &stubs, &s.workspace)
+            .unwrap()
             .iter()
             .map(|a| a.to_string_lossy().into_owned())
             .collect::<Vec<_>>()
@@ -2969,7 +3244,8 @@ mod bwrap_args_tests {
 
         // Read-only: the workspace is mounted read-only; scratch stays writable.
         s.read_only = true;
-        let joined = bwrap_args(&s, &reserved, &stubs)
+        let joined = bwrap_args(&s, &reserved, &stubs, &s.workspace)
+            .unwrap()
             .iter()
             .map(|a| a.to_string_lossy().into_owned())
             .collect::<Vec<_>>()
@@ -2999,6 +3275,7 @@ mod network_rule_tests {
             extra_env: vec![],
             deny_read: Vec::new(),
             readable_home_secrets: Vec::new(),
+            pin_readable: Vec::new(),
             read_only: false,
         }
     }
@@ -3055,7 +3332,8 @@ mod network_rule_tests {
         std::fs::create_dir_all(root.join("ws")).unwrap();
         let stubs = DenyStubs::ensure(&root).unwrap();
         let join = |s: &Spec| {
-            bwrap_args(s, &[], &stubs)
+            bwrap_args(s, &[], &stubs, &s.workspace)
+                .unwrap()
                 .iter()
                 .map(|a| a.to_string_lossy().into_owned())
                 .collect::<Vec<_>>()
@@ -3107,6 +3385,7 @@ mod toolchain_tests {
             extra_env: vec![],
             deny_read: Vec::new(),
             readable_home_secrets: Vec::new(),
+            pin_readable: Vec::new(),
             read_only: false,
         }
     }
@@ -3191,6 +3470,7 @@ mod linker_tests {
             extra_env: vec![],
             deny_read: Vec::new(),
             readable_home_secrets: Vec::new(),
+            pin_readable: Vec::new(),
             read_only: false,
         };
         let o = run(

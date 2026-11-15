@@ -5,7 +5,9 @@
 //! process's sandbox; then one real process per row reads a path the program
 //! registered as never readable, which every row must refuse.
 
-use crate::tools::{Access, command_deny_read, hidden_from_processes, sensitive_scratch};
+use crate::tools::{
+    Access, command_deny_read, command_pin_readable, hidden_from_processes, sensitive_scratch,
+};
 use declass_boundary::engine::Engine;
 use declass_boundary::policy::Policy;
 use declass_boundary::view::Presenter;
@@ -110,6 +112,28 @@ fn every_kind_of_process_is_held_to_its_declared_reads() {
     assert!(command_deny_read(p, &w.ws, &w.run, Access::Checks).1);
 }
 
+#[test]
+fn what_a_process_may_read_and_others_may_not_is_held_in_place() {
+    // A command that reads what the next ordinary command may not must not
+    // be able to rename it: the next command's deny list names it there.
+    let w = workspace();
+    let p: &dyn Presenter = w.engine.as_ref();
+    let data = w.ws.join("data");
+    let protected = w.ws.join("src/pricing.rs");
+    let source = w.ws.join("src/lib.rs");
+    let pins = |a| command_pin_readable(p, &w.ws, a);
+    for access in [Access::Ordinary, Access::ReadOnly] {
+        assert!(pins(access).is_empty());
+    }
+    let sensitive = pins(Access::SensitiveData);
+    assert!(denies(&sensitive, &data) && denies(&sensitive, &protected));
+    assert!(!denies(&sensitive, &source));
+    // A check reads protected source, but not sensitive data.
+    let checks = pins(Access::Checks);
+    assert!(denies(&checks, &protected));
+    assert!(!denies(&checks, &data) && !denies(&checks, &source));
+}
+
 static NEVER: OnceLock<PathBuf> = OnceLock::new();
 
 fn never() -> Vec<PathBuf> {
@@ -147,6 +171,7 @@ async fn every_kind_of_process_is_denied_what_the_program_registered() {
             extra_env: Vec::new(),
             deny_read,
             readable_home_secrets: Vec::new(),
+            pin_readable: Vec::new(),
             read_only: false,
         };
         let out = declass_sandbox::run(

@@ -33,6 +33,7 @@ fn spec(ws: &Path, network: Network) -> Spec {
         extra_env: vec![],
         deny_read: Vec::new(),
         readable_home_secrets: Vec::new(),
+        pin_readable: Vec::new(),
         read_only: false,
     }
 }

@@ -245,6 +245,7 @@ async fn a_sandboxed_process_stays_inside_with_network_off_and_on() {
             extra_env: vec![],
             deny_read: vec![ws.join("data")],
             readable_home_secrets: Vec::new(),
+            pin_readable: Vec::new(),
             read_only: false,
         };
         let got = probe(Some(&spec), &flat).await;

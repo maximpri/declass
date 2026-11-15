@@ -58,6 +58,7 @@ impl Launcher for SandboxLauncher {
                     .collect(),
                 deny_read: deny_read.to_vec(),
                 readable_home_secrets: Vec::new(),
+                pin_readable: Vec::new(),
                 read_only: false,
             };
             let mut argv = vec![server.program.display().to_string()];

@@ -109,6 +109,7 @@ async fn run(
         extra_env: vec![],
         deny_read: vec![original.to_path_buf()],
         readable_home_secrets: Vec::new(),
+        pin_readable: Vec::new(),
         read_only: true,
     };
     let argv: Vec<_> = std::iter::once(scanner.command.to_string_lossy().into_owned())

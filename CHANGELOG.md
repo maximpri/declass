@@ -66,7 +66,10 @@ details.
   (`chmod 600`), no stand-in covered the file at all. Denied paths, the folders above them, the
   workspace and its scratch directory can no longer be renamed or removed by a sandboxed process
   (on Linux each is a mount point), nor, on macOS, have their permissions changed; a folder
-  Declass cannot list or search is denied whole, and every sensitive file is denied by name.
+  Declass cannot list or search is denied whole, and every sensitive file is denied by name. A
+  `sensitive_data` command, or a check reading protected source, is held to the same: what it may
+  read but the next command may not stays where it is (readable, not renameable), and a command that
+  would hide the workspace or needs more than 2048 mounts for its denied paths is refused.
 - **The file tools opened other spellings of a path** (DECLASS-2026-042, macOS). `.DECLASS/...`,
   `DATA/orders.csv` under a `data/**` rule or `.GIT/config` reached run state, sensitive data or
   git's configuration past the checks. Every path is resolved to its spelling on disk before any

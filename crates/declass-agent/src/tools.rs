@@ -807,6 +807,30 @@ pub(crate) fn command_deny_read(
     }
 }
 
+/// What a command with `access` may read that an ordinary command may not:
+/// under bubblewrap the sandbox keeps these where they are (and the folders
+/// above them), so the next ordinary command's deny list, which names them,
+/// still finds them there. Sensitive paths for a `sensitive_data` command;
+/// the protected source a check may read.
+pub(crate) fn command_pin_readable(
+    presenter: &dyn Presenter,
+    workspace: &Path,
+    access: Access,
+) -> Vec<PathBuf> {
+    match access {
+        Access::Ordinary | Access::ReadOnly => Vec::new(),
+        Access::Checks => {
+            let from_checks = presenter.hidden_from_checks(workspace);
+            presenter
+                .hidden_from_commands(workspace)
+                .into_iter()
+                .filter(|p| !from_checks.contains(p))
+                .collect()
+        }
+        Access::SensitiveData => presenter.hidden_from_commands(workspace),
+    }
+}
+
 /// Runs `command` in the sandbox with the given `access`.
 pub(crate) async fn sandboxed(
     ctx: &Ctx<'_>,
@@ -823,6 +847,7 @@ pub(crate) async fn sandboxed(
     // Checks may read protected source; then they get no network.
     let (deny_read, reads_protected) =
         command_deny_read(ctx.presenter, ctx.workspace, ctx.run_dir, access);
+    let pin_readable = command_pin_readable(ctx.presenter, ctx.workspace, access);
     let scratch = match access {
         Access::SensitiveData => sensitive_scratch(ctx.run_dir),
         _ => scratch_root().join(run_name(ctx.run_dir)),
@@ -915,6 +940,7 @@ pub(crate) async fn sandboxed(
         },
         deny_read,
         readable_home_secrets: Vec::new(),
+        pin_readable,
         read_only: access == Access::ReadOnly,
     };
     let stop = async {
@@ -1902,7 +1928,15 @@ mod sensitive_command_tests {
     /// command's reach, whatever the command may read.
     fn visible_tempdir() -> tempfile::TempDir {
         if cfg!(target_os = "linux") {
-            tempfile::tempdir_in("/var/tmp").unwrap()
+            // `/var/tmp` may be missing (a minimal image); the home
+            // directory is under the read-only root, so commands see it too.
+            let home = std::env::var_os("HOME").map(PathBuf::from);
+            ["/var/tmp"]
+                .into_iter()
+                .map(PathBuf::from)
+                .chain(home)
+                .find_map(|dir| tempfile::tempdir_in(dir).ok())
+                .unwrap_or_else(|| tempfile::tempdir().unwrap())
         } else {
             tempfile::tempdir().unwrap()
         }
