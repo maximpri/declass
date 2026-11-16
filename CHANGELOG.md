@@ -1,7 +1,7 @@
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 # Changelog
 
-## 0.4.0 — not yet released
+## 0.4.0 — 2026-11-16
 
 Use Declass from an editor, run `declass exposure` in CI, and close fourteen leak and isolation
 classes that an adversarial review of the privacy boundary, the sandbox and the tool channels
