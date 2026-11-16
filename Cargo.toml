@@ -6,7 +6,7 @@ members = ["crates/*"]
 exclude = ["tasks", "results", "fuzz"]
 
 [workspace.package]
-version = "0.3.0"
+version = "0.4.0"
 authors = ["Maxim Priezjev"]
 edition = "2024"
 rust-version = "1.90"

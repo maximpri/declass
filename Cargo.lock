@@ -447,7 +447,7 @@ dependencies = [
 
 [[package]]
 name = "declass-agent"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "base64",
  "declass-boundary",
@@ -473,7 +473,7 @@ dependencies = [
 
 [[package]]
 name = "declass-boundary"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "aho-corasick",
  "bytes",
@@ -507,7 +507,7 @@ dependencies = [
 
 [[package]]
 name = "declass-cli"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "bytes",
@@ -548,7 +548,7 @@ dependencies = [
 
 [[package]]
 name = "declass-config"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "declass-fs",
  "hex",
@@ -562,7 +562,7 @@ dependencies = [
 
 [[package]]
 name = "declass-egress"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "declass-boundary",
  "declass-sandbox",
@@ -574,7 +574,7 @@ dependencies = [
 
 [[package]]
 name = "declass-evals"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "bytes",
@@ -598,7 +598,7 @@ dependencies = [
 
 [[package]]
 name = "declass-extensions"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "declass-fs",
@@ -612,7 +612,7 @@ dependencies = [
 
 [[package]]
 name = "declass-fs"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "hex",
  "rustix 0.38.44",
@@ -623,7 +623,7 @@ dependencies = [
 
 [[package]]
 name = "declass-git"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "declass-fs",
  "ignore",
@@ -633,7 +633,7 @@ dependencies = [
 
 [[package]]
 name = "declass-governor"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "libproc",
  "rustix 0.38.44",
@@ -644,7 +644,7 @@ dependencies = [
 
 [[package]]
 name = "declass-integrity"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "base64",
  "hex",
@@ -662,7 +662,7 @@ dependencies = [
 
 [[package]]
 name = "declass-lsp"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "declass-sandbox",
  "serde",
@@ -674,7 +674,7 @@ dependencies = [
 
 [[package]]
 name = "declass-mcp"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "declass-boundary",
  "declass-mcp",
@@ -688,7 +688,7 @@ dependencies = [
 
 [[package]]
 name = "declass-net"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "declass-boundary",
  "futures-util",
@@ -701,7 +701,7 @@ dependencies = [
 
 [[package]]
 name = "declass-provider"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "base64",
  "bytes",
@@ -725,7 +725,7 @@ dependencies = [
 
 [[package]]
 name = "declass-release"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "hex",
@@ -738,7 +738,7 @@ dependencies = [
 
 [[package]]
 name = "declass-review"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "serde",
  "tree-sitter",
@@ -749,7 +749,7 @@ dependencies = [
 
 [[package]]
 name = "declass-sandbox"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "declass-governor",
  "rustix 0.38.44",
@@ -760,7 +760,7 @@ dependencies = [
 
 [[package]]
 name = "declass-tui"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "declass-agent",
@@ -781,7 +781,7 @@ dependencies = [
 
 [[package]]
 name = "declass-web"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "declass-boundary",
  "declass-mcp",
